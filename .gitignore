@@ -1,0 +1,10 @@
+dist-newstyle/
+node_modules/
+
+TODO/
+
+*.project
+*.hi
+*.o
+
+humming-strolling-nest.md

@@ -1,0 +1,38 @@
+1: Type: Int
+Value:7
+2: Type: Int
+Value:512
+3: Type: Int
+Value:-4
+4: Type: Int
+Value:5
+5: Type: Int
+Value:-4
+6: Type: Int
+Value:4
+7: Type: Int
+Value:3
+8: Type: Int
+Value:-5
+9: Type: Int
+Value:4
+10: Type: Int
+Value:7
+11: Type: Int
+Value:6
+12: Type: Int
+Value:-5
+13: Type: Int
+Value:11
+14: Type: Int
+Value:5
+15: Type: Int
+Value:1
+16: Type: Int
+Value:1
+17: Type: (a1 -> a1)
+Value:<closure x -> ...>
+18: Type: (a0 -> a0)
+Value:<closure x -> ...>
+19: Type: Int
+Eval error:Divided by zero at 0.

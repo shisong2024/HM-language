@@ -1,0 +1,37 @@
+cabal-version:      3.0
+name:               interp
+version:            0.1.0.0
+
+common warnings
+    ghc-options: -Wall -Wcompat
+
+library
+    import:           warnings
+    exposed-modules:  Interp.Types
+                      Interp.Parser
+                      Interp.TypeCheck
+                      Interp.Eval
+                      Interp.Pretty
+    build-depends:    base
+                    , containers
+                    , mtl
+                    , text
+                    , megaparsec
+                    , parser-combinators
+    hs-source-dirs:   src
+    default-language: Haskell2010
+
+executable interp
+    import:           warnings
+    main-is:          Main.hs
+    hs-source-dirs:   app
+    build-depends:    base, interp, text, mtl, megaparsec
+    default-language: Haskell2010
+
+test-suite interp-test
+    import:           warnings
+    type:             exitcode-stdio-1.0
+    main-is:          Spec.hs
+    hs-source-dirs:   test
+    build-depends:    base, interp, hspec, QuickCheck
+    default-language: Haskell2010

@@ -1,0 +1,19 @@
+1 + 2 * 3
+2 ^ 3 ^ 2
+1 - 2 - 3
+2 - -3
+-2 ^ 2
+(-2) ^ 2
+10 / 3
+0 - 5
+let x = 3 in x + 1
+let a = 1 in let b = 2 in a + b * 3
+(lambda x = x * 2) 3
+(lambda x = lambda y = x + y - x * y) 3 4
+(lambda x = let y = 5 in lambda z = x - y + 2 * z) 2 7
+let id = lambda x = x in id 5
+let k = lambda x = lambda y = x in k 1 2
+let a = 1 in let f = lambda u = a in let a = 2 in f 0
+let f = lambda x = x in f
+lambda x = x
+1 / 0
