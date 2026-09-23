@@ -4,40 +4,109 @@ module Interp.Pretty where
 import Interp.Types
 import Data.Text (Text, pack)
 import qualified Data.Text as T
+import Text.Megaparsec (unPos, SourcePos (sourceLine, sourceColumn))
+import qualified Data.Text.IO as TIO
+import Data.List (sortOn)
+import qualified Data.Map as M
+import qualified Data.Set as S
 
-prettyArithOp :: LitOpr -> Text
-prettyArithOp = pack . drop 2 . show
+prettyBOpr :: Opr -> Text
+prettyBOpr = pack . drop 1 . takeWhile (/= 'p') . show
 
 prettyE' :: E' -> Text
 prettyE' = \case
-    Lit n -> pack (show n)
+    ILit n -> pack (show n)
+    BLit b -> pack (show b)
     Var t -> t
-    ArithOpr op e1 e2 -> "(" <> T.unwords [prettyArithOp op, prettyE' e1, prettyE' e2] <> ")"
+    BOpr op e1 e2 -> "(" <> T.unwords [prettyE' e1, prettyBOpr op, prettyE' e2] <> ")"
     Let t e1 e2 -> T.unwords ["(Let", t, "=", prettyE' e1, "in", prettyE' e2] <> ")"
+    If eb e1 e2 -> T.unwords ["(If", prettyE' eb, "then", prettyE' e1, "else", prettyE' e2] <> ")"
     Lambda t e -> T.concat ["(\\", t, " -> ", prettyE' e, ")"]
     App e1 e2 -> "(App " <> T.unwords [prettyE' e1, prettyE' e2] <> ")"
+    At _ e -> prettyE' e
 
 prettyV' :: V' -> Text
 prettyV' = \case
     VInt n -> pack $ show n
-    VClosure t _ _ -> T.unwords ["<closure", t, "->", "...>"]
+    VBool b -> pack $ show b
+    VClosure t _ _ -> T.unwords ["<closure", t, "::", "...>"]
 
 prettyEvalError :: EvalError -> Text
 prettyEvalError = \case
     UnboundVariable t -> t <> " is an unbound variable."
-    ArithArgIsNotNum op v -> T.unwords ["Argument", prettyV' v, "of", prettyArithOp op, "expects a number."]
+    OprArgIsNotNum op v -> T.unwords [prettyBOpr op, "expects a number but gets", prettyV' v] <> "."
     IsNotFunction v -> prettyV' v <> " is not a function."
-    DividedByZero i -> "Divided by zero at " <> pack (show i) <> "."
+    DividedByZero _ -> "Divided by zero."
     NegativeExponent i -> "Negative exponent at " <> pack (show i) <> "."
+    IfNeedsBool v -> "Expected Bool in if expression but get " <> prettyV' v <> "."
+    RecursionLimited n -> "Recursion Limited " <> pack (show n) <> "."
+    RecursiveVarDef t -> t <> " is defined recursively as a value."
 
 prettyT' :: T' -> Text
 prettyT' = \case
     TInt -> "Int"
+    TBool -> "Bool"
     TVar i -> "a" <> pack (show i)
     TFunc t1 t2 -> "(" <> T.unwords [prettyT' t1, "->", prettyT' t2] <> ")"
 
 prettyTypeError :: TypeError -> Text
 prettyTypeError = \case
     UnboundVar t -> T.unwords [t, "is an unbound variable."]
-    TypeMismatch t -> T.unwords ["Type mismath,", t, "."]
-    OccurCheck -> "Ocuur type check."
+    TypeMismatch t1 t2 -> T.unwords ["Type mismatch: expected", prettyT' t2, "but got", prettyT' t1] <> "."
+    OccurCheck -> "Occurs check failed."
+
+prettyS' :: S' -> Text
+prettyS' (Forall tvs t)
+    | null tvs  = prettyT' t
+    | otherwise = "Forall " <> T.unwords ["a" <> pack (show i) | i <- S.toList tvs] <> ". " <> prettyT' t
+
+lineAt :: Text -> Int -> Text
+lineAt src n = case drop (n - 1) (T.lines src) of
+    []     -> ""
+    (l: _) -> T.stripEnd l
+
+spanStart :: Span -> (Int, Int)
+spanStart (Span s _) = (unPos (sourceLine s), unPos (sourceColumn s))
+
+renderLocated :: (a -> Text) -> Text -> Located a -> Text
+renderLocated f tx (Located msp err) = case msp of
+    Nothing -> f err
+    Just sp -> if T.null line
+        then f err 
+        else T.intercalate "\n" 
+            [ numTxt <> " | " <> line
+            , gutter <> " | " <> T.replicate (col - 1) " " <> "^"
+            , f err
+            ]
+        where
+            ln, col :: Int
+            (ln, col) = spanStart sp
+            
+            line, numTxt, gutter :: Text
+            line = lineAt tx ln
+            numTxt = T.pack (show ln)
+            gutter = T.replicate (T.length numTxt) " "
+
+prettyEvalErrorWith :: Text -> Located EvalError -> Text
+prettyEvalErrorWith = renderLocated prettyEvalError
+
+prettyTypeErrorWith :: Text -> Located TypeError -> Text
+prettyTypeErrorWith = renderLocated prettyTypeError
+
+printBatch :: Text -> [(Int, Statement)] -> M.Map Int StmtTy -> M.Map Int (Either (Located EvalError) V') -> [(Int, Text)] -> IO ()
+printBatch src lprs tps vals perr = 
+    mapM_ (TIO.putStr . snd) . sortOn fst $
+        [(i, renderStmt i st) | (i, st) <- lprs] <>
+        [(i, T.pack (show i) <> ": Parse Error:\n" <> msg <> "\n") | (i, msg) <- perr]
+
+    where
+        renderStmt i st = T.pack (show i) <> ": " <> case st of
+            StmtDef (Def n _ _) -> case M.lookup i tps of
+                Just (TyDef _ sch) -> "def " <> n <> " : " <> prettyS' sch <> "\n"
+                _ -> ""
+            StmtExpr _ -> case (M.lookup i tps, M.lookup i vals) of
+                (Just (TyExpr (Left terr)), _) -> "Type Error:\n" <> prettyTypeErrorWith src terr <> "\n"
+                (Just (TyExpr (Right tp)), Just (Left eerr)) -> "Type : " <> prettyT' tp <> "\n" <>
+                    "Eval Error:\n" <> prettyEvalErrorWith src eerr <> "\n"
+                (Just (TyExpr (Right tp)), Just (Right v)) -> "Type : " <> prettyT' tp <> "\n" <> "Value: " <> prettyV' v <> "\n"
+                _ -> ""

@@ -1,0 +1,6 @@
+def nil c n = n
+def cons h t c n = c h (t c n)
+def foldr f z l = l f z
+def sum l = foldr (lambda x acc -> x + acc) 0 l
+
+def __explist = cons 1 (cons 2 (cons 3 nil))

@@ -2,20 +2,26 @@
 #
 # interp 金标回归测试。
 #
-# 特点：不需要改 interp.cabal、不需要 cabal、不需要 hspec，直接跑已构建的 exe。
-#      在 test/Spec.hs 能编译之前，这个脚本就是全部的回归保护。
+# 特点：不需要 cabal、不需要 hspec，直接跑已构建的 exe —— 秒级、零依赖。
+#      细粒度断言在 test/Spec.hs（用 test/run-spec.sh 跑），两者互补：
+#        run-spec.sh    测库 API 的语义（优先级、泛化、Span、渲染器）
+#        run-golden.sh  测**端到端 stdout**，覆盖 Main.hs 的接线与格式
 #
 # 用法：
 #     test/run-golden.sh
+#     test/run-golden.sh --regen          # 用当前 exe 重新生成三个金标文件
 #     INTERP=/path/to/interp.exe test/run-golden.sh
 #
-# 退出码：0 = 基线全绿；1 = 基线有回归。
+# 退出码：0 = 基线全绿；1 = 基线有回归；2 = 找不到 exe。
 #
-# 两个语料：
-#   test.txt                 正确行为基线，必须一直通过
-#   test/known-bugs.txt      已知缺陷，金标记的是"当前错误输出"。
-#                            所以它一旦"失败"，说明有 bug 被修好了 —— 那是好消息，
-#                            此时应更新 test/known-bugs.current.txt。
+# 三个语料：
+#   test.txt                      正确行为基线，必须一直通过
+#   test/parse-errors.txt         刻意写坏的行。方案甲（整文件解析）下解析错误是
+#                                 整文件级的，所以这类语料一个文件只能放一条 ——
+#                                 看到第一条错误就停了。
+#   test/known-bugs.txt           已知缺陷，金标记的是"当前错误输出"。
+#                                 所以它一旦"失败"，说明有 bug 被修好了 —— 那是好消息，
+#                                 此时应更新 test/known-bugs.current.txt。
 #
 # 注意：Windows 上 exe 输出是 CRLF，这里统一过滤 \r 后比较，
 #      所以金标文件存的是 LF，换到 Linux 构建也能用。
@@ -32,8 +38,54 @@ if [ ! -x "$EXE" ]; then
     exit 2
 fi
 
-# 规范化：去掉 CR，保证跨平台可比
-actual () { "$EXE" "$1" 2>&1 | tr -d '\r'; }
+# 规范化：去掉 CR，保证跨平台可比。
+# 注意 `|| true` 是必须的：脚本开了 pipefail，而 runFile 在解析错误时会
+# exitWith (ExitFailure 1) —— 那正是我们要的行为，不该让它把
+# "stdout 逐字节相同"误判成回归。这里只关心 stdout。
+#
+# timeout 是兜底：解释器一旦死循环，每个语料都会挂住 30 秒。
+actual () { { timeout 30 "$EXE" "$1" < /dev/null 2>&1 || true; } | tr -d '\r'; }
+
+# ---------------------------------------------------------------------------
+# 体检：先确认解释器不会在 REPL 里死循环
+#
+# 判据：喂一行 1+1，15 秒内应当正常跑完（读到 EOF 会自己打 Bye. 退出）。
+# 拿不到 124 以外的退出码就当健康。
+# ---------------------------------------------------------------------------
+
+printf '1+1\n' | timeout 15 "$EXE" >/dev/null 2>&1
+if [ $? -eq 124 ]; then
+    echo "★ 解释器在 REPL 里死循环了（喂 1+1 之后 15 秒不返回）。" >&2
+    echo "  已知原因：src/Interp/Parser.hs 的" >&2
+    echo "      sc = skipMany (void hspace <|> void eol)" >&2
+    echo "  hspace 是 takeWhileP，匹配 0 个字符也算成功 —— skipMany 于是永不终止。" >&2
+    echo "  修法：import hspace1，写成 skipMany (hspace1 <|> void eol)。" >&2
+    echo "  详见 TODO/07-REPL会话.md 与本次测试报告。" >&2
+    exit 2
+fi
+
+# ---------------------------------------------------------------------------
+# --regen：拿当前 exe 的输出覆盖金标
+#
+# ⚠️ 这是"把现状固化下来"，不是"让测试通过"。跑完必须自己 diff 一遍，
+#    确认新输出确实是对的 —— 否则就是把 bug 写进基线了。
+# ---------------------------------------------------------------------------
+
+if [ "${1:-}" = "--regen" ]; then
+    echo "解释器：$EXE"
+    echo
+    for pair in "test.txt:test/expected.txt" \
+                "test/parse-errors.txt:test/parse-errors.expected.txt" \
+                "test/known-bugs.txt:test/known-bugs.current.txt"; do
+        corpus=${pair%%:*}; golden=${pair##*:}
+        actual "$corpus" > "$golden"
+        echo "已重写 $golden（$(wc -l < "$golden") 行，来自 $corpus）"
+    done
+    echo
+    echo "现在自己 diff 一遍，确认新输出是对的："
+    echo "    git diff -- $golden 2>/dev/null || diff 旧文件 新文件"
+    exit 0
+fi
 
 fail=0
 
@@ -61,19 +113,66 @@ echo
 
 check test.txt test/expected.txt "基线（test.txt）"
 
+check test/parse-errors.txt test/parse-errors.expected.txt "解析错误（test/parse-errors.txt）"
+
+# ---------------------------------------------------------------------------
 # 已知缺陷：这里的"失败"是预期的
+# ---------------------------------------------------------------------------
+
 echo
 if actual test/known-bugs.txt | diff -u test/known-bugs.current.txt - >/dev/null; then
     echo "· 已知缺陷行为未变（test/known-bugs.txt）"
-    echo "  若你刚修好某个缺陷，请更新金标："
-    echo "      \"$EXE\" test/known-bugs.txt 2>&1 | tr -d '\\r' > test/known-bugs.current.txt"
+    echo "  里面固化了 1 条当前错误的输出：let x = x in 1 类型检查放行、求值才报错。"
+    echo "  修好它，这里就会报警 —— 这正是它的用途。"
 else
     echo "★ 已知缺陷的输出变了 —— 有缺陷被修好（也可能是有新回归）："
     actual test/known-bugs.txt | diff -u test/known-bugs.current.txt - | sed 's/^/    /'
     echo
     echo "  逐条确认确实是修复后，更新金标："
-    echo "      \"$EXE\" test/known-bugs.txt 2>&1 | tr -d '\\r' > test/known-bugs.current.txt"
+    echo "      \"$EXE\" test/known-bugs.txt < /dev/null 2>&1 | tr -d '\\r' > test/known-bugs.current.txt"
+    echo "  修好的条目应移进 test.txt，并重生成 test/expected.txt。"
 fi
+
+# ---------------------------------------------------------------------------
+# REPL：逐行喂管道
+#
+# 这里测的是 app/Main.hs 的接线 —— 会话状态（def 跨行可见）、类型回显、
+# 解析错误不中断、以及 §3 的"计数器跨行单调"（第二行不能又出现 a0）。
+#
+# 曾经有个缺陷：`line <- getLine` 排在 `done <- isEOF` 之前，最后一行被丢掉。
+# 现在的 loop 已经把 isEOF 挪到 getLine 前面，所以这条是正向断言。
+# ---------------------------------------------------------------------------
+
+echo
+repl_check () {
+    local label="$1" input="$2" needle="$3"
+    local out
+    out=$(printf '%b' "$input" | "$EXE" 2>&1 | tr -d '\r')
+    if printf '%s' "$out" | grep -qF -- "$needle"; then
+        echo "✓ $label"
+    else
+        echo "✗ $label —— 输出里找不到「$needle」："
+        printf '%s\n' "$out" | sed 's/^/    /'
+        fail=1
+    fi
+}
+
+repl_check "REPL 求值了管道输入的最后一行"        '1+1\n'                 'Value: 2'
+repl_check "REPL 跨行保持定义（def 后能用）"      'def f x = x + 1\nf 10\n' 'Value: 11'
+repl_check "REPL 里 0 参 def 也能用"              'def x = 1\nx\n'        'Value: 1'
+repl_check "REPL 的 :t 打印表达式类型"            ':t 1+1\n'              'Type : Int'
+repl_check "REPL 的 :t 认得会话里的 def"          'def f x = x + 1\n:t f\n' 'Int -> Int'
+repl_check "REPL 解析错误不退出、继续下一行"      '(((\n1+1\n'            'Value: 2'
+repl_check "REPL 计数器跨行单调（第二行不是 a0）" 'lambda a -> a\nlambda b -> b\n' 'a1 -> a1'
+
+# 2026-09-23 补：def 体调用另一个 def。
+# 之前缺这条，于是 Eval.hs「闭包只捕获本 SCC 的 knot」的缺陷没被发现 ——
+# 表现为第二行定义的 def 求值时报「上一行的 def is an unbound variable」。
+repl_check "REPL def 体能调用上一行定义的 def" \
+    'def f x = x + 1\ndef g x = f x\ng 1\n' 'Value: 2'
+repl_check "REPL 用户报的 max2/max3 三行会话" \
+    'def max2 a b = if a < b then b else a\ndef max3 a b c = if max2 a b == a then if max2 a c == a then a else c else if max2 b c == b then b else c\nmax3 1 4 3\n' \
+    'Value: 4'
 
 echo
 if [ "$fail" -eq 0 ]; then

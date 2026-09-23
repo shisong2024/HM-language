@@ -1,0 +1,13 @@
+def x = 3
+def min a b = if a < b then a else b
+def fact n = if n == 0 then 1 else n * fact (n - 1)
+def isEven n = if n == 0 then true else isOdd (n - 1)
+def isOdd n = if n == 0 then false else isEven (n - 1)
+
+x
+
+min x 5
+
+fact 6
+
+isEven (fact 2)

@@ -1,10 +1,1 @@
-2 ^ 100
-2 ^ 63
-99999999999999999999999
-123abc
-let x = 1 in(x)
-def x = 1
-1 + (lambda x = x)
-lambda x = x x
-1 2
-(lambda f = f) -2
+let x = x in 1

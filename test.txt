@@ -6,14 +6,55 @@
 (-2) ^ 2
 10 / 3
 0 - 5
-let x = 3 in x + 1
-let a = 1 in let b = 2 in a + b * 3
-(lambda x = x * 2) 3
-(lambda x = lambda y = x + y - x * y) 3 4
-(lambda x = let y = 5 in lambda z = x - y + 2 * z) 2 7
-let id = lambda x = x in id 5
-let k = lambda x = lambda y = x in k 1 2
-let a = 1 in let f = lambda u = a in let a = 2 in f 0
-let f = lambda x = x in f
-lambda x = x
+(lambda x -> x * 2) 3
+(lambda x -> lambda y -> x + y - x * y) 3 4
+lambda x -> x
 1 / 0
+2 ^ 100
+2 ^ 63
+99999999999999999999999
+def x = 1
+1 < 2
+1 <= 2
+2 < 2
+2 <= 2
+1 > 2
+1 >= 2
+2 > 1
+2 >= 2
+1 == 2
+1 != 2
+true
+false
+if true then 1 else 2
+if false then 1 else 2
+if 1 < 2 then 10 else 20
+zzz
+lambda x -> x x
+let x = 3 in x + 1
+let x = 3 in x
+let a = 1 in let b = 2 in a + b * 3
+(lambda x -> let y = 5 in lambda z -> x - y + 2 * z) 2 7
+let id = lambda x -> x in id 5
+let k = lambda x -> lambda y -> x in k 1 2
+let f = lambda x -> x in f
+let x = 1 in(x)
+let fact = lambda n -> if n == 0 then 1 else n * fact (n - 1) in fact 5
+let id = lambda x -> x in id true
+let x = 1 in let x = x + 1 in x
+let even = lambda n -> if n == 0 then true else odd (n - 1) in even 4
+1 2
+(lambda x -> x) 1 2
+true == false
+1 + true
+if 1 then 2 else 3
+1 + (lambda x -> x)
+def inc x = x + 1
+def twice_inc x = inc (inc x)
+twice_inc 1
+def k = 5
+def plus_k x = k + x
+plus_k 1
+def max2 a b = if a < b then b else a
+def max3 a b c = if max2 a b == a then if max2 a c == a then a else c else if max2 b c == b then b else c
+max3 1 4 3

@@ -1,0 +1,8 @@
+Parse Error:
+1:4:
+  |
+1 | 123abc
+  |    ^
+unexpected 'a'
+expecting digit
+

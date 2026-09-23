@@ -1,25 +1,5 @@
-1: Type: Int
-Value:0
-2: Type: Int
-Value:-9223372036854775808
-3: Type: Int
-Value:200376420520689663
-4: Type error: abc is an unbound variable.
-5: Parse error:
-1:4:
-  |
-1 | let x = 1 in(x)
-  |    ^
-reserved keyword: "let"
-
-6: Parse error:
-1:4:
-  |
-1 | def x = 1
-  |    ^
-reserved keyword: "def"
-
-7: Type error: Type mismath, Int vs Function .
-8: Type error: Ocuur type check.
-9: Type error: Type mismath, Int vs Function .
-10: Type error: Type mismath, Int vs Function .
+1: Type : Int
+Eval Error:
+1 | let x = x in 1
+  |         ^
+x is an unbound variable.
