@@ -9,15 +9,28 @@ import Data.Void (Void)
 import Data.Set (Set)
 import GHC.Generics (Generic)
 
+data P'
+    = PVar Text
+    | PWild
+    | PInt Integer
+    | PBool Bool
+    | PNil
+    | PCons P' P'
+    | PTuple [P']
+    deriving (Show, Eq)
+
 data E'
     = ILit Integer
     | BLit Bool
     | Var Text
+    | ListLit [E']
+    | TupleLit [E']
     | Let Text E' E'
     | If E' E' E'
     | BOpr Opr E' E'
     | Lambda Text E'
     | App E' E'
+    | Match E' [(P', E')]
     | At Span E'
     deriving (Show, Eq)
 
@@ -32,7 +45,10 @@ type Lev = Int
 data V'
     = VInt Integer
     | VBool Bool
+    | VList [V']
+    | VTuple [V']
     | VClosure Text E' Env
+    | VPrim Text Int [V']
     deriving (Show, Eq)
 
 data EvalError
@@ -44,12 +60,21 @@ data EvalError
     | IfNeedsBool V'
     | RecursionLimited Depth
     | RecursiveVarDef Text
+    | NonExhaustiveMatch V'
+    | ConsNeedsList V'
     deriving (Show, Eq)
 
 newtype Depth = Depth Int deriving (Show, Eq, Ord, Generic)
 data Located e = Located (Maybe Span) e deriving (Show, Eq)
 
-data T' = TInt | TBool | TVar TypeVar | TFunc T' T' deriving (Show, Eq)
+data T' 
+    = TInt | TBool 
+    | TVar TypeVar 
+    | TList T'
+    | TTuple [T']
+    | TFunc T' T' 
+    deriving (Show, Eq)
+
 data StmtTy = TyDef Text S' | TyExpr (Either (Located TypeError) T') deriving (Show, Eq)
 
 type TypeVar = Int
@@ -58,6 +83,9 @@ type Counter = Int
 data TypeError
     = UnboundVar Text
     | TypeMismatch T' T'
+    | DuplicateDef Text
+    | DuplicatePatVar Text
+    | NonExhaustivePat T'
     | OccurCheck
     deriving (Show, Eq)
 

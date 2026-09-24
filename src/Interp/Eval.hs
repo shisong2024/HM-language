@@ -1,4 +1,4 @@
-{-# LANGUAGE LambdaCase, FlexibleContexts, TupleSections #-}
+{-# LANGUAGE LambdaCase, FlexibleContexts, TupleSections, OverloadedStrings #-}
 
 module Interp.Eval where
 import Interp.Types
@@ -9,7 +9,7 @@ import Control.Monad.Error.Class (MonadError (throwError, catchError))
 import Control.Monad.State (MonadState (get, put), modify)
 import Control.Monad (when, foldM, forM)
 import Data.Graph (stronglyConnComp, SCC (AcyclicSCC, CyclicSCC))
-import Data.Text (Text)
+import Data.Text (Text, unpack)
 import Data.Set (Set)
 import qualified Data.Set as S
 import Data.Maybe (isJust)
@@ -20,11 +20,10 @@ evalwDepth expr = do
     when (d > maxDepth) $
         throwError $ Located Nothing (RecursionLimited d)
     modify $ \(Depth n) -> Depth (n + 1)
-    res <- eval expr
-    put d
-    return res
+    res <- eval expr `catchError` \e -> put d >> throwError e
+    put d >> return res
 
-eval :: (MonadReader Env m, MonadError (Located EvalError) m) => E' -> m V'
+eval :: (MonadState Depth m, MonadReader Env m, MonadError (Located EvalError) m) => E' -> m V'
 eval = \case
     ILit i -> return $ VInt i
 
@@ -35,6 +34,10 @@ eval = \case
         case env !? v of
             Nothing -> throwError (Located Nothing $ UnboundVariable v)
             Just v' -> return v'
+
+    ListLit es -> VList <$> mapM eval es
+
+    TupleLit es -> VTuple <$> mapM eval es
 
     BOpr bopr e1 e2 -> do
         v1 <- eval e1
@@ -69,11 +72,22 @@ eval = \case
 
     App e1 e2 -> do
         v1 <- eval e1
+        v2 <- eval e2
         case v1 of
-            VClosure t ec env -> do
-                v2 <- eval e2
-                local (const (M.insert t v2 env)) (eval ec)
+            VClosure t ec env -> local (const (M.insert t v2 env)) (evalwDepth ec)
+            VPrim n ar args -> do
+                let args' = args ++ [v2]
+                if length args < ar then return $ VPrim n ar args'
+                else applyPrim n args
             _ -> throwError (Located Nothing $ IsNotFunction v1)
+    
+    Match e pes -> do
+        res <- eval e
+        case pes of
+            [] -> throwError $ Located Nothing $ NonExhaustiveMatch res
+            (p, b): rest -> case matchP (p, res) of
+                Nothing -> eval (Match e rest)
+                Just bnds -> local (M.union (M.fromList bnds)) (eval b)
 
 evalProgram :: (MonadState Depth m, MonadReader Env m, MonadError (Located EvalError) m) => Program -> m (Env, M.Map Int (Either (Located EvalError) V'))
 evalProgram prs = ask >>= \env -> do
@@ -82,16 +96,17 @@ evalProgram prs = ask >>= \env -> do
     return (env1, M.fromList vals)
     where
         step :: (MonadState Depth m, MonadReader Env m, MonadError (Located EvalError) m) => Env -> SCC Decl -> m Env
-        step env scc = case flatten scc of
-            [Def n [] b] | not (isLambda b) -> do
+        step env scc = case scc of
+            AcyclicSCC (Def n [] b) | not (isLambda b) -> do
                 v <- local (const env) (evalwDepth b)
                 return $ M.insert n v env
-            ds | not $ all canKnot ds -> 
-                throwError (Located Nothing (RecursiveVarDef $ (\(Def n _ _) -> n) $ head ds))
-            ds -> do
-                let recEnv = M.union grp env
-                    grp = M.fromList [(n, clo d recEnv) | d@(Def n _ _) <- ds]
-                return $ M.union grp env
+            _ -> case flatten scc of
+                ds | not $ all canKnot ds -> 
+                    throwError (Located Nothing (RecursiveVarDef $ (\(Def n _ _) -> n) $ head ds))
+                ds -> do
+                    let recEnv = M.union grp env
+                        grp = M.fromList [(n, clo d recEnv) | d@(Def n _ _) <- ds]
+                    return $ M.union grp env
 
         isLambda :: E' -> Bool
         isLambda e = case stripAt e of Lambda _ _ -> True; _ -> False
@@ -134,22 +149,25 @@ addSpan _ l@(Located (Just _) _) = l
 
 stripAt :: E' -> E'
 stripAt = \case
-    At _ e -> e
+    At _ e -> stripAt e
     e      -> e
 
 maxDepth :: Depth
-maxDepth = Depth 1000
+maxDepth = Depth 10000
 
 freeVars :: E' -> Set Text
 freeVars = \case
     Var v -> S.singleton v
     ILit _ -> S.empty
     BLit _ -> S.empty
+    ListLit vs -> S.unions (map freeVars vs)
+    TupleLit vs -> S.unions (map freeVars vs)
     Lambda x e -> S.delete x (freeVars e)
     Let t e1 e2 -> freeVars e1 `S.union` S.delete t (freeVars e2)
     If b e1 e2 -> S.unions (map freeVars [b, e1, e2])
     BOpr _ e1 e2 -> freeVars e1 `S.union` freeVars e2
     App f a -> freeVars f `S.union` freeVars a
+    Match e pes -> S.unions (freeVars e: map (freeVars . snd) pes)
     At _ e -> freeVars e
 
 deps :: Program -> [(Decl, Text, [Text])]
@@ -169,3 +187,32 @@ tryEnv act = (Right <$> act) `catchError` (return . Left)
 relabel :: [(Int, Statement)] -> M.Map Int a -> M.Map Int a
 relabel lprs m = M.fromList [(l, v) | (k, v) <- M.toList m, Just l <- [M.lookup k idx]]
     where idx = M.fromList (zip [0 ..] (map fst lprs))
+
+patVars :: P' -> Set Text
+patVars = \case
+    PVar x -> S.singleton x
+    PCons p q -> patVars p `S.union` patVars q
+    PTuple ps -> S.unions (map patVars ps)
+    _ -> S.empty
+
+matchP :: (P', V') -> Maybe [(Text, V')]
+matchP = \case
+    (PWild, _) -> Just []
+    (PVar x, v) -> Just [(x, v)]
+
+    (PInt n, VInt m) | n == m -> Just []
+    (PBool n, VBool m) | n == m -> Just []
+
+    (PNil, VList []) -> Just []
+    (PCons ph pt, VList (x: xs)) -> (++) <$> matchP (ph, x) <*> matchP (pt, (VList xs))
+
+    (PTuple ps, VTuple vs) | length ps == length vs -> 
+        concat <$> mapM matchP (zip ps vs)
+    
+    _ -> Nothing
+
+applyPrim :: MonadError (Located EvalError) m => Text -> [V'] -> m V'
+applyPrim "cons" [h, t] = case t of
+    VList xs -> return $ VList (h: xs)
+    _ -> throwError $ Located Nothing $ ConsNeedsList t
+applyPrim n _ = error $ unpack ("unknown primitive: " <> n)

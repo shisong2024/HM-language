@@ -1,5 +1,0 @@
-1: Type : Int
-Eval Error:
-1 | let x = x in 1
-  |         ^
-x is an unbound variable.

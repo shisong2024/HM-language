@@ -12,6 +12,7 @@ library
                       Interp.TypeCheck
                       Interp.Eval
                       Interp.Pretty
+                      Interp.Builtin
     build-depends:    base
                     , containers
                     , mtl

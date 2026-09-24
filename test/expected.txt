@@ -18,7 +18,7 @@ Value: -5
 Value: 6
 10: Type : Int
 Value: -5
-11: Type : (a29 -> a29)
+11: Type : (a39 -> a39)
 Value: <closure x :: ...>
 12: Type : Int
 Eval Error:
@@ -82,7 +82,7 @@ Value: 11
 Value: 5
 39: Type : Int
 Value: 1
-40: Type : (a54 -> a54)
+40: Type : (a64 -> a64)
 Value: <closure x :: ...>
 41: Type : Int
 Value: 1
@@ -99,11 +99,11 @@ odd is an unbound variable.
 46: Type Error:
 46 | 1 2
    | ^
-Type mismatch: expected (Int -> a68) but got Int.
+Type mismatch: expected (Int -> a78) but got Int.
 47: Type Error:
 47 | (lambda x -> x) 1 2
    | ^
-Type mismatch: expected (Int -> a71) but got Int.
+Type mismatch: expected (Int -> a81) but got Int.
 48: Type Error:
 48 | true == false
    | ^
@@ -119,7 +119,7 @@ Type mismatch: expected Bool but got Int.
 51: Type Error:
 51 | 1 + (lambda x -> x)
    | ^
-Type mismatch: expected Int but got (a72 -> a72).
+Type mismatch: expected Int but got (a82 -> a82).
 52: def inc : (Int -> Int)
 53: def twice_inc : (Int -> Int)
 54: Type : Int
@@ -132,3 +132,38 @@ Value: 6
 59: def max3 : (Int -> (Int -> (Int -> Int)))
 60: Type : Int
 Value: 4
+61: def count : (Int -> Int)
+62: Type : Int
+Value: 0
+63: def fact : (Int -> Int)
+64: Type : Int
+Value: 2432902008176640000
+65: def fib : (Int -> Int)
+66: Type : Int
+Value: 610
+67: Type : Int
+Value: 0
+68: Type : Int
+Value: 1
+69: Type : [Int]
+Value: [1, 2, 3]
+70: Type : [a96]
+Value: []
+71: Type : [[Int]]
+Value: [[1], [2, 3]]
+72: Type : (Int, Bool)
+Value: (1, True)
+73: Type : (Int, (Int, Bool))
+Value: (1, (2, True))
+74: Type Error:
+74 | [1,true]
+   | ^
+Type mismatch: expected Bool but got Int.
+75: Type Error:
+75 | if true then (1,2) else (1,2,3)
+   | ^
+Type mismatch: expected (Int, Int, Int) but got (Int, Int).
+76: Type Error:
+76 | let p = (1,p) in 1
+   |            ^
+p is an unbound variable.

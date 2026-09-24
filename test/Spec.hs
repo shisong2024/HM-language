@@ -16,7 +16,7 @@ module Main where
 import Interp.Types
 import Interp.Parser (run, runProg)
 import Interp.TypeCheck (typeChecker, programChecker)
-import Interp.Eval (eval, evalProgram)
+import Interp.Eval (evalwDepth, evalProgram)
 import Interp.Pretty
 
 import Data.Text (Text)
@@ -26,7 +26,7 @@ import qualified Data.Text as T
 import qualified System.IO as SIO
 import Control.Monad.Reader (runReaderT)
 import Control.Monad.Except (runExceptT)
-import Control.Monad.State (runState)
+import Control.Monad.State (runState, evalState)
 import Test.Hspec
 import Test.QuickCheck
 
@@ -56,8 +56,10 @@ runSrc src = case run src of
 tcRun :: E' -> Either (Located TypeError) T'
 tcRun ast = fmap snd (fst (runState (runExceptT (typeChecker M.empty ast)) 0))
 
+-- 走 evalwDepth 而不是裸 eval：加深度守卫时 eval 的签名会多出一个
+-- MonadState Depth，裸 eval 那行就编不过了 —— 而 evalwDepth 两种签名下都在。
 evRun :: E' -> Either (Located EvalError) V'
-evRun ast = runReaderT (eval ast) M.empty
+evRun ast = evalState (runExceptT (runReaderT (evalwDepth ast) M.empty)) (Depth 0)
 
 -- | 丢掉位置，只留消息本身 —— 断言文案时用这个。
 tcMsg :: Located TypeError -> Text
@@ -401,6 +403,71 @@ spec = do
         runSrc "let a = 1 in let f = lambda u -> a in let a = 2 in f 0"
             `shouldBe` Ok "Int" "1"
 
+    -- 以前这是「已知缺陷」：类型侧对任意 RHS 都开递归（先把 t 放进环境再查 e1），
+    -- 于是 `x` 在 `e1 = Var x` 里解析成自己、unify (tv, tv) 通过，类型检查放行；
+    -- 求值侧只在 e1 是 lambda 时才结绳，于是求值才报未绑定。
+    -- 现在两侧都对齐成「只有 lambda 才递归」，所以这条是正向断言。
+    it "let 的非 lambda RHS 看不见自己：x = x 是未绑定，不是递归" $
+        runSrc "let x = x in 1" `shouldBe` TypeErr "x is an unbound variable."
+
+    -- 上面那条修好的前提是「非 lambda 时用外层 env」，而不是「一律不进环境」：
+    -- 内层的 e1 必须看得见外层的 x。下面这条（同组开头也有一条等价的）就是它的哨兵。
+    it "非 lambda RHS 仍然看得见外层的同名变量" $
+        runSrc "let x = 1 in let y = x + 1 in y" `shouldBe` Ok "Int" "2"
+
+  -------------------------------------------------------------------------
+  describe "列表与元组" $ do
+
+    it "列表字面量：类型与渲染" $
+        runSrc "[1,2,3]" `shouldBe` Ok "[Int]" "[1, 2, 3]"
+
+    it "空列表的类型是多态 [a]，不是 [Int]" $
+        runSrc "[]" `shouldSatisfy` \o -> case o of
+            Ok t v -> T.isPrefixOf "[a" t && T.isSuffixOf "]" t
+                   && not ("Int" `T.isInfixOf` t) && v == "[]"
+            _      -> False
+
+    it "嵌套列表" $
+        runSrc "[[1],[2,3]]" `shouldBe` Ok "[[Int]]" "[[1], [2, 3]]"
+
+    it "列表元素类型必须一致：异构列表是类型错" $
+        runSrc "[1,true]" `shouldSatisfy` hasTypeErrText "Type mismatch"
+
+    it "元组字面量：类型与渲染" $
+        runSrc "(1,true)" `shouldBe` Ok "(Int, Bool)" "(1, True)"
+
+    it "嵌套元组" $
+        runSrc "(1,(2,true))" `shouldBe` Ok "(Int, (Int, Bool))" "(1, (2, True))"
+
+    it "元组的两个位置各自独立多态" $
+        runSrc "(lambda x -> x) (1,true)" `shouldBe` Ok "(Int, Bool)" "(1, True)"
+
+    it "元组长度必须一致（if 两侧）" $
+        runSrc "if true then (1,2) else (1,2,3)"
+            `shouldSatisfy` hasTypeErrText "Type mismatch"
+
+    it "列表里的元组" $
+        runSrc "[(1,true),(2,false)]"
+            `shouldBe` Ok "[(Int, Bool)]" "[(1, True), (2, False)]"
+
+    -- 这是 B4 那类「两侧规则不一致」在元组/列表上的同型复查：
+    -- 非 lambda 的 let RHS 看不见自己，所以是未绑定，不是 occurs check。
+    it "let 的非 lambda RHS 里自引用：未绑定（列表/元组不会改变这个结论）" $
+        runSrc "let p = (1,p) in 1" `shouldBe` TypeErr "p is an unbound variable."
+
+    it "occurs check 仍然生效（列表里放自己）" $
+        runSrc "lambda x -> [x, x]" `shouldSatisfy` \o -> case o of
+            Ok t _ -> T.isPrefixOf "(a" t      -- (aN -> [aN])，不崩即可
+            _      -> False
+
+    -- ⚠️ B12（TODO/08-当前问题.md）：BOpr 把两侧无条件钉死成 TInt，
+    -- 于是列表/元组上的 == / != 是类型错。这是「当前错误行为」，修好后请搬走。
+    it "列表上的 == 用不了（BOpr 钉死 TInt）" $
+        runSrc "[1,2] == [1,2]" `shouldSatisfy` hasTypeErrText "expected Int but got [Int]"
+
+    it "元组上的 == 用不了（BOpr 钉死 TInt）" $
+        runSrc "(1,2) == (1,2)" `shouldSatisfy` hasTypeErrText "expected Int but got (Int, Int)"
+
   -------------------------------------------------------------------------
   describe "程序模式：def / SCC / 会话状态" $ do
 
@@ -530,10 +597,67 @@ spec = do
   -------------------------------------------------------------------------
   -- 下面这些断言的是【当前错误的行为】，所以今天是绿的。
   -- 哪天变红了 = 缺陷被修好，请把对应条目搬到上面「正确行为」去。
+  -------------------------------------------------------------------------
+  -- 递归与终止
+  --
+  -- 2026-09-23 补。起因：用户报 `def f n = if n == 0 then 1 else f n` 之后
+  -- `f 1` 不终止。查下来是**深度守卫没接在递归路径上** —— evalwDepth 只包在
+  -- 语句层，App 求值函数体走的是裸 eval，所以 maxDepth 永远够不着。
+  -- 后果不只是"卡住"：实测失控递归以 ~250 MB/s 吃内存（6 秒 1.5 GB、
+  -- 14 秒 3.3 GB），会把机器拖死。
+  --
+  -- 这一组只断言「合法递归必须正常终止」—— 有没有守卫它们都该绿。用途是
+  -- 挡住"加守卫时把 maxDepth 设得太低、误伤真实程序"这个反向错误
+  -- （实测把上限设成 1000 时，count 500 就会被误判成 RecursionLimited）。
+  --
+  -- 失控递归本身必须有超时才测得动，放在 test/run-golden.sh 的体检里，
+  -- 不放这儿：hspec 里一个跑飞的用例会先把内存吃光。
+  -------------------------------------------------------------------------
+  describe "递归与终止" $ do
+
+    it "阶乘" $ do
+        s <- okProg (T.unlines
+            [ "def fact n = if n == 0 then 1 else n * fact (n - 1)"
+            , "fact 10" ])
+        stmtVal 1 s `shouldBe` "3628800"
+
+    it "斐波那契" $ do
+        s <- okProg (T.unlines
+            [ "def fib n = if n < 2 then n else fib (n - 1) + fib (n - 2)"
+            , "fib 15" ])
+        stmtVal 1 s `shouldBe` "610"
+
+    it "尾递归 5000 层" $ do
+        s <- okProg (T.unlines
+            [ "def count n = if n == 0 then 0 else count (n - 1)"
+            , "count 5000" ])
+        stmtVal 1 s `shouldBe` "0"
+
+    it "互递归 5000 层" $ do
+        s <- okProg (T.unlines
+            [ "def even n = if n == 0 then true else odd (n - 1)"
+            , "def odd  n = if n == 0 then false else even (n - 1)"
+            , "even 5000" ])
+        stmtVal 2 s `shouldBe` "True"
+
+    it "高阶：把递归函数当参数传来传去" $ do
+        s <- okProg (T.unlines
+            [ "def applyN f n x = if n == 0 then x else applyN f (n - 1) (f x)"
+            , "applyN (lambda y -> y + 1) 1000 0" ])
+        stmtVal 1 s `shouldBe` "1000"
+
+    it "let 绑定的递归函数" $ do
+        s <- okProg "let lf = lambda n -> if n == 0 then 0 else lf (n - 1) in lf 500"
+        stmtVal 0 s `shouldBe` "0"
+
+    it "递归函数跨行定义后仍可调用（会话 Env 接得上）" $ do
+        ss <- okSteps ["def count n = if n == 0 then 0 else count (n - 1)", "count 1000"]
+        stmtVal 0 (at 1 ss) `shouldBe` "0"
+
   describe "已知缺陷（断言当前行为，修好后请搬走）" $ do
 
-    it "let x = x in 1：类型检查放行，求值才报错（Let 的 RHS 检查时把 x 放进了环境）" $
-        runSrc "let x = x in 1" `shouldBe` EvalErr "x is an unbound variable."
+    -- 曾经这里还有一条 `let x = x in 1 类型检查放行`，2026-09-24 修好后
+    -- 已翻面成正向断言，搬去上面的「let 求值」组。
 
     it "互递归只有 def 支持；let 仍然不行（let 不是互递归结点）" $
         runSrc "let even = lambda n -> if n == 0 then true else odd (n - 1) in even 4"

@@ -6,6 +6,7 @@ import Interp.Parser
 import Interp.Pretty
 import Interp.Types
 import Interp.TypeCheck
+import Interp.Builtin
 
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
@@ -26,7 +27,7 @@ main = do
         [path] -> runFile path
         []     -> do
             TIO.putStrLn "HM interpreter. Type :q to quit."
-            loop emptySession
+            loop initSession
         _      -> TIO.putStrLn "Usage: interp [file]"
 
 loop :: Session -> IO ()
@@ -51,8 +52,7 @@ runFile path = do
     content <- TIO.readFile path
     case runProg content of
         Left perr -> TIO.putStrLn ("Parse Error:\n" <> perr) >> exitWith (ExitFailure 1)
-        Right prs -> void $ execBatch emptySession content prs []
-
+        Right prs -> void $ execBatch initSession content prs []
 
 execBatch :: Session -> Text -> [(Int, Statement)] -> [(Int, Text)] -> IO Session
 execBatch ss src lprs perr = do
@@ -76,9 +76,6 @@ execBatch ss src lprs perr = do
                         , sEnv  = env'
                         , sNext = n
                         }
-
-emptySession :: Session
-emptySession = Session { sTEnv = emptyMap, sEnv = emptyMap, sNext = 0 }
 
 doTypeOf :: Session -> Text -> IO Session
 doTypeOf s e = case runProg e of

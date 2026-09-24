@@ -2,7 +2,7 @@
 module Interp.Parser where
 
 import Interp.Types
-import Text.Megaparsec ((<?>), (<|>), satisfy, MonadParsec (takeWhileP, eof, try, lookAhead), notFollowedBy, runParser, errorBundlePretty, choice, optional, many, between, getSourcePos, some, skipMany, unPos, SourcePos (sourceLine))
+import Text.Megaparsec 
 import Text.Megaparsec.Char (string, char, eol, hspace, hspace1)
 import Text.Megaparsec.Char.Lexer (decimal)
 import Data.Char (isLower, isAlphaNum)
@@ -47,11 +47,17 @@ toBool p = lexeme $ p >>= \case
         "false" -> return False
         _       -> fail "expected bool"
 
+comma :: Parser Char
+comma = lexeme (char ',')
+
 parseILit :: Parser E'
 parseILit = withSpan $ ILit <$> lexeme (decimal <* nextNotVar <?> "integer literal")
 
 parseBLit :: Parser E'
 parseBLit = withSpan $ BLit <$> toBool (symbol "true" <|> symbol "false" <?> "bool")
+
+parseListLit :: Parser E'
+parseListLit = withSpan $ ListLit <$> (lexeme (char '[') *> sepBy parseExpr comma <* lexeme (char ']'))
 
 varName :: Parser Text
 varName = cons <$> satisfy isVarFirst <*> takeWhileP Nothing isVarLeft
@@ -66,7 +72,13 @@ parseVar :: Parser E'
 parseVar = withSpan (try (Var <$> parseVar') <?> "variable")
 
 parseParen :: Parser E'
-parseParen = withSpan $ between (lexeme (char '(')) (lexeme (char ')')) parseExpr
+parseParen = withSpan $ do
+    _ <- lexeme (char '(')
+    ls <- sepBy1 parseExpr comma
+    _ <- lexeme (char ')')
+    return $ case ls of
+        [x] -> x
+        es  -> TupleLit es
 
 parseUnary :: Parser E'
 parseUnary = withSpan $ do
@@ -80,7 +92,7 @@ parseUnary = withSpan $ do
                 _      -> return $ BOpr (OArith OpSub) (ILit 0) e
 
 parseAtom :: Parser E'
-parseAtom = parseILit <|> parseBLit <|> parseVar <|> parseParen
+parseAtom = parseILit <|> parseBLit <|> parseVar <|> parseListLit <|> parseParen
 
 parseLet :: Parser E'
 parseLet = withSpan $ try $ Let 
@@ -122,7 +134,9 @@ parseApp :: Parser E'
 parseApp = withSpan $ foldl App <$> parseAtom <*> many parseAtom
 
 parseExpr :: Parser E'
-parseExpr = parseIf <|> parseLet <|> parseLambda <|> parseOpr 0
+parseExpr = parseIf <|> parseLet <|> parseLambda <|> parseMatch <|> parseCons
+
+-- parseCons = parseOpr 0 (':' parseCons)
 
 parseDef :: Parser Decl
 parseDef = do
@@ -157,3 +171,54 @@ withSpan p = do
     expr  <- p
     end   <- getSourcePos
     return $ At (Span start end) expr
+
+---
+
+colonTok :: Parser Char
+colonTok = lexeme (char ':' <* notFollowedBy (char ':'))
+
+parsePat :: Parser P'
+parsePat = do
+    h <- parsePatAtom
+    m <- optional (try (colonTok *> parsePat))
+    return $ case m of Nothing -> h; Just t -> PCons h t
+
+parsePatAtom :: Parser P'
+parsePatAtom = parsePatParen <|> parsePatNil <|> parsePatVar <|> parsePatInt <|> parsePatBool
+
+parsePatParen :: Parser P'
+parsePatParen = do
+    _ <- lexeme (char '(')
+    ls <- sepBy1 parsePat comma
+    _ <- lexeme (char ')')
+    return $ case ls of
+        [x] -> x
+        es  -> PTuple es
+
+parsePatNil :: Parser P'
+parsePatNil = lexeme (char '[') *> lexeme (char ']') $> PNil
+
+parsePatVar :: Parser P'
+parsePatVar = parseVar' >>= \n -> return $ if n == "_" then PWild else PVar n
+
+parsePatInt :: Parser P'
+parsePatInt = PInt <$> lexeme (decimal <* nextNotVar)
+
+parsePatBool :: Parser P'
+parsePatBool = PBool <$> toBool (symbol "true" <|> symbol "false")
+
+parseMatch :: Parser E'
+parseMatch = withSpan $ try $ Match
+    <$> (symbol "match" *> parseExpr <* symbol "with")
+    <*> sepBy1 parseArm (lexeme (char '|'))
+
+parseArm :: Parser (P', E')
+parseArm = (,) <$> (parsePat <* lexeme (string "->" <?> "->")) <*> parseExpr
+
+parseCons :: Parser E'
+parseCons = withSpan $ do
+    h <- parseOpr 0
+    m <- optional (try (colonTok *> parseCons))
+    return $ case m of
+        Nothing -> h
+        Just t  -> App (App (Var "cons") h) t

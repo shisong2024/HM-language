@@ -12,6 +12,7 @@ import Interp.Eval
 import Data.Graph (stronglyConnComp, SCC)
 import Control.Monad (foldM, forM)
 import Interp.Pretty (spanStart)
+import Data.Functor ((<&>))
 
 typeChecker :: (MonadState Counter m, MonadError (Located TypeError) m) => TEnv -> E' -> m (TSub, T')
 typeChecker env = \case
@@ -24,6 +25,26 @@ typeChecker env = \case
         Just s  -> do
             tp <- instantiate s
             return (M.empty, tp)
+
+    ListLit es -> case es of
+        [] -> do
+            v <- fresh
+            return (M.empty, TList v)
+        e0: rest -> do
+            (ts0, t0) <- typeChecker env e0
+            let step ts e = do
+                    (ts1, tp1) <- typeChecker (applyTEnv ts env) e
+                    ts2 <- unify (apply ts1 (apply ts t0), apply ts1 tp1)
+                    return (compose ts2 (compose ts1 ts))
+            ts <- foldM step ts0 rest
+            return (ts, TList (apply ts t0))
+    
+    TupleLit es -> do
+        let step (ts, tps) e = do
+                (ts1, tp1) <- typeChecker (applyTEnv ts env) e
+                return (compose ts1 ts, tps ++ [tp1])
+        (ts, tps) <- foldM step (M.empty, []) es
+        return (ts, TTuple (fmap (apply ts) tps))
     
     BOpr bopr e1 e2 -> do
         (ts1, tp1) <- typeChecker env e1
@@ -39,7 +60,10 @@ typeChecker env = \case
      
     Let t e1 e2 -> do
         tv <- fresh
-        (ts1, tp1) <- typeChecker (M.insert t (Forall S.empty tv) env) e1
+        let recEnv = case stripAt e1 of
+                Lambda _ _ -> M.insert t (Forall S.empty tv) env
+                _ -> env
+        (ts1, tp1) <- typeChecker recEnv e1
         ts2 <- unify (apply ts1 tv, tp1)
         let ts' = compose ts2 ts1
             nenv = applyTEnv ts' env
@@ -55,7 +79,8 @@ typeChecker env = \case
         let ts' = compose ts3 (compose ts2 ts1)
         (ts4, tp2) <- typeChecker (applyTEnv ts' env') e2
         ts5 <- unify (apply ts4 tp1, apply ts4 tp2)
-        return (compose ts5 $ compose ts4 ts', apply ts5 tp1)
+        let tsf = compose ts5 $ compose ts4 ts'
+        return (tsf, apply tsf tp1)
 
     Lambda t e -> do
         tv <- fresh
@@ -91,11 +116,14 @@ sccChecker env bs = do
 
 programChecker :: (MonadState Counter m, MonadError (Located TypeError) m) => TEnv -> Program -> m (TSub, TEnv, M.Map Int StmtTy)
 programChecker outer prs = do
-    (ts, nTEnv) <- go M.empty outer (stronglyConnComp $ deps prs)
-    let env' = applyTEnv ts (M.union nTEnv outer)
-    exprs <- forM [(i, e) | (i, StmtExpr e) <- zip [0..] prs] $ \(i, e) -> (i, ) <$> tryEnv (fmap (apply ts . snd) (typeChecker env' e))
-    let defTps = M.fromList [(i, TyDef n (nTEnv M.! n)) | (i, StmtDef (Def n _ _)) <- zip [0..] prs]
-    return (ts, nTEnv, M.union defTps (M.fromList (map (fmap TyExpr) exprs)))
+    case fstDuplicate [n | StmtDef (Def n _ _) <- prs] of
+        Just tx -> throwError $ Located Nothing $ DuplicateDef tx
+        Nothing -> do
+            (ts, nTEnv) <- go M.empty outer (stronglyConnComp $ deps prs)
+            let env' = applyTEnv ts (M.union nTEnv outer)
+            exprs <- forM [(i, e) | (i, StmtExpr e) <- zip [0..] prs] $ \(i, e) -> (i, ) <$> tryEnv (fmap (apply ts . snd) (typeChecker env' e))
+            let defTps = M.fromList [(i, TyDef n (nTEnv M.! n)) | (i, StmtDef (Def n _ _)) <- zip [0..] prs]
+            return (ts, nTEnv, M.union defTps (M.fromList (map (fmap TyExpr) exprs)))
 
     where
         go :: (MonadState Counter m, MonadError (Located TypeError) m) => TSub -> TEnv -> [SCC Decl] -> m (TSub, TEnv)
@@ -111,11 +139,14 @@ fresh = get >>= \n -> put (n + 1) >> return (TVar n)
 
 apply :: TSub -> T' -> T'
 apply ts = \case
+    TInt -> TInt
+    TBool -> TBool
     TVar i -> case ts !? i of
         Nothing -> TVar i
         Just tp -> tp
     TFunc argt rest -> TFunc (apply ts argt) (apply ts rest)
-    t -> t
+    TList tp -> TList (apply ts tp)
+    TTuple tps -> TTuple (fmap (apply ts) tps)
 
 applyS' :: TSub -> S' -> S'
 applyS' ts (Forall tvs t) = Forall tvs (apply (foldr M.delete ts tvs) t)
@@ -130,6 +161,11 @@ unify :: MonadError (Located TypeError) m => (T', T') -> m TSub
 unify = \case
     (TInt, TInt) -> return M.empty
     (TBool, TBool) -> return M.empty
+    (TList t1, TList t2) -> unify (t1, t2)
+    (TTuple t1, TTuple t2) -> do
+        if length t1 /= length t2 then throwError $ Located Nothing $ TypeMismatch (TTuple t1) (TTuple t2)
+        else let step ts (x, y) = unify (apply ts x, apply ts y) >>= \ts1 -> return (compose ts1 ts) in
+            foldM step M.empty (zip t1 t2)
     (TVar i, tp)  -> bindVar i tp
     (tp, TVar i)  -> bindVar i tp
     (TFunc a1 r1, TFunc a2 r2) -> do
@@ -151,6 +187,8 @@ instantiate (Forall tvs tp) = do
 occursIn :: TypeVar -> T' -> Bool
 occursIn i = \case
     TVar j -> i == j
+    TList tp -> i `occursIn` tp
+    TTuple tps -> any (occursIn i) tps
     TFunc at rt -> i `occursIn` at || i `occursIn` rt
     _ -> False
 
@@ -160,6 +198,8 @@ generalize env t = Forall (ftv t S.\\ ftvTEnv env) t
 ftv :: T' -> Set TypeVar
 ftv = \case
     TVar i -> S.singleton i
+    TList tp -> ftv tp
+    TTuple tps -> S.unions (fmap ftv tps)
     TFunc arg res -> S.union (ftv arg) (ftv res)
     _ -> S.empty
 
@@ -173,3 +213,15 @@ errLine :: Located TypeError -> Int
 errLine = \case
     Located (Just sp) _ -> fst (spanStart sp)
     _ -> 1
+
+fstDuplicate :: Eq a => [a] -> Maybe a
+fstDuplicate = \case
+    [] -> Nothing
+    x: xs -> if x `elem` xs then Just x else fstDuplicate xs
+
+patType :: (MonadState Counter m, MonadError (Located TypeError) m) => P' -> m (TSub, T', TEnv)
+patType = \case
+    PWild -> fresh <&> (M.empty, , M.empty)
+    PVar x -> fresh >>= \v -> return (M.empty, v, M.singleton x (Forall S.empty v))
+    PInt _ -> return (M.empty, TInt, M.empty)
+    PBool _ -> return (M.empty, TBool, M.empty)

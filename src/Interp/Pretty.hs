@@ -18,6 +18,8 @@ prettyE' = \case
     ILit n -> pack (show n)
     BLit b -> pack (show b)
     Var t -> t
+    ListLit es -> "[" <> T.intercalate ", " (fmap prettyE' es) <> "]"
+    TupleLit es -> "(" <> T.intercalate ", " (fmap prettyE' es) <> ")"
     BOpr op e1 e2 -> "(" <> T.unwords [prettyE' e1, prettyBOpr op, prettyE' e2] <> ")"
     Let t e1 e2 -> T.unwords ["(Let", t, "=", prettyE' e1, "in", prettyE' e2] <> ")"
     If eb e1 e2 -> T.unwords ["(If", prettyE' eb, "then", prettyE' e1, "else", prettyE' e2] <> ")"
@@ -29,6 +31,8 @@ prettyV' :: V' -> Text
 prettyV' = \case
     VInt n -> pack $ show n
     VBool b -> pack $ show b
+    VList vs -> "[" <> T.intercalate ", " (fmap prettyV' vs) <> "]"
+    VTuple vs -> "(" <> T.intercalate ", " (fmap prettyV' vs) <> ")"
     VClosure t _ _ -> T.unwords ["<closure", t, "::", "...>"]
 
 prettyEvalError :: EvalError -> Text
@@ -46,6 +50,8 @@ prettyT' :: T' -> Text
 prettyT' = \case
     TInt -> "Int"
     TBool -> "Bool"
+    TList tp -> "[" <> prettyT' tp <> "]"
+    TTuple tps -> "(" <> T.intercalate ", " (fmap prettyT' tps) <> ")"
     TVar i -> "a" <> pack (show i)
     TFunc t1 t2 -> "(" <> T.unwords [prettyT' t1, "->", prettyT' t2] <> ")"
 
@@ -53,6 +59,7 @@ prettyTypeError :: TypeError -> Text
 prettyTypeError = \case
     UnboundVar t -> T.unwords [t, "is an unbound variable."]
     TypeMismatch t1 t2 -> T.unwords ["Type mismatch: expected", prettyT' t2, "but got", prettyT' t1] <> "."
+    DuplicateDef tx -> "Duplicated definition: " <> tx <> "."
     OccurCheck -> "Occurs check failed."
 
 prettyS' :: S' -> Text

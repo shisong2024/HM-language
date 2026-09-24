@@ -65,6 +65,34 @@ if [ $? -eq 124 ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 体检 2：失控递归必须被深度守卫拦住
+#
+# 判据：喂一句自递归定义 + 一句调用，5 秒内应当打印 "Recursion Limited"。
+#
+# 为什么单独设一道体检：不接守卫时这是个**内存炸弹**，不是普通卡住 ——
+# 实测失控递归以 ~250 MB/s 吃内存（6 秒 1.5 GB、14 秒 3.3 GB），
+# 会把整台机器拖死，比体检 1 那个纯 CPU 空转的解析器死循环危险得多。
+# 超时因此压得比体检 1 短；机器内存吃紧可以再往下调。
+#
+# 和体检 1 不同，这里**不 exit**：失控递归不影响金标语料本身（test.txt 里
+# 没有自递归不终止的用例），所以报警之后继续把语料跑完，最后计入 fail。
+#
+# ⚠️ 本项只查「守卫够不够硬」，查不出「守卫是不是【过度】触发」——
+#    后者表现为本项绿、而 test.txt 基线红（fib 15 报 Depth 1001）。
+#    2026-09-23 的修法漏了成功路径的深度还原，正是这个方向，见 TODO/02-栈安全.md。
+# ---------------------------------------------------------------------------
+
+rout=$(printf 'def f n = if n == 0 then 1 else f n\nf 1\n' | timeout 5 "$EXE" 2>&1 | tr -d '\r')
+rrc=$?
+guard_ok=1
+if [ "$rrc" -eq 124 ]; then
+    guard_ok=0
+elif ! printf '%s' "$rout" | grep -qF 'Recursion Limited'; then
+    guard_ok=0
+    rout_msg="既没超时、也没报 Recursion Limited，实际输出："
+fi
+
+# ---------------------------------------------------------------------------
 # --regen：拿当前 exe 的输出覆盖金标
 #
 # ⚠️ 这是"把现状固化下来"，不是"让测试通过"。跑完必须自己 diff 一遍，
@@ -88,6 +116,29 @@ if [ "${1:-}" = "--regen" ]; then
 fi
 
 fail=0
+
+# 体检 2 的结论在这里计入（它排在 fail 初始化之前，所以单独存了 guard_ok）。
+if [ "$guard_ok" -eq 0 ]; then
+    echo "★ 体检 2 未过：失控递归没有被深度守卫拦住。" >&2
+    if [ "$rrc" -eq 124 ]; then
+        echo "  现象：5 秒不返回，期间以 ~250 MB/s 持续吃内存。" >&2
+    else
+        echo "  现象：${rout_msg:-输出异常}" >&2
+        printf '%s\n' "$rout" | sed 's/^/    /' >&2
+    fi
+    echo "  原因：两种情况 ——" >&2
+    echo "    (a) 守卫没接到递归路径上：函数体走的是裸 eval，maxDepth 永远够不到。" >&2
+    echo "        失控递归于是变成 ~250 MB/s 的内存炸弹（表现为超时）。" >&2
+    echo "        修法：eval 签名加 MonadState Depth；App 里把 eval ec 换成 evalwDepth ec。" >&2
+    echo "    (b) 守卫接了，但 RecursionLimited 没渲染出来。" >&2
+    echo "        修法：查 Pretty.hs 的 prettyEvalError 有没有 RecursionLimited 分支。" >&2
+    echo "  ⚠️ 体检 2 通过【不代表】深度守卫就是对的 ——" >&2
+    echo "     还有一种反向缺陷：成功路径没还原深度，守卫会【过度】触发。" >&2
+    echo "     那时本项是绿的，但 test.txt 基线会红（fib 15 报 Depth 1001）。" >&2
+    echo "     详见 TODO/02-栈安全.md 与 TODO/08-当前问题.md。" >&2
+    echo >&2
+    fail=1
+fi
 
 check () {
     local corpus="$1" golden="$2" label="$3"
@@ -122,8 +173,14 @@ check test/parse-errors.txt test/parse-errors.expected.txt "解析错误（test/
 echo
 if actual test/known-bugs.txt | diff -u test/known-bugs.current.txt - >/dev/null; then
     echo "· 已知缺陷行为未变（test/known-bugs.txt）"
-    echo "  里面固化了 1 条当前错误的输出：let x = x in 1 类型检查放行、求值才报错。"
-    echo "  修好它，这里就会报警 —— 这正是它的用途。"
+    if [ -s test/known-bugs.txt ]; then
+        echo "  里面固化了 $(grep -c . test/known-bugs.txt) 条当前错误的输出"
+        echo "  （正文就是 test/known-bugs.txt 本身，配套金标是 test/known-bugs.current.txt）。"
+    else
+        echo "  当前为空 —— 没有已知缺陷被固化。"
+        echo "  新发现的缺陷请写进 test/known-bugs.txt 并重生成 test/known-bugs.current.txt。"
+    fi
+    echo "  修好一条，这里就会报警 —— 这正是它的用途。"
 else
     echo "★ 已知缺陷的输出变了 —— 有缺陷被修好（也可能是有新回归）："
     actual test/known-bugs.txt | diff -u test/known-bugs.current.txt - | sed 's/^/    /'

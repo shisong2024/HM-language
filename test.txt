@@ -58,3 +58,19 @@ plus_k 1
 def max2 a b = if a < b then b else a
 def max3 a b c = if max2 a b == a then if max2 a c == a then a else c else if max2 b c == b then b else c
 max3 1 4 3
+def count n = if n == 0 then 0 else count (n - 1)
+count 5000
+def fact n = if n == 0 then 1 else n * fact (n - 1)
+fact 20
+def fib n = if n < 2 then n else fib (n - 1) + fib (n - 2)
+fib 15
+let lf = lambda n -> if n == 0 then 0 else lf (n - 1) in lf 500
+let x = x in 1
+[1,2,3]
+[]
+[[1],[2,3]]
+(1,true)
+(1,(2,true))
+[1,true]
+if true then (1,2) else (1,2,3)
+let p = (1,p) in 1
