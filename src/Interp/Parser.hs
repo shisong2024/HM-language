@@ -95,13 +95,13 @@ parseAtom :: Parser E'
 parseAtom = parseILit <|> parseBLit <|> parseVar <|> parseListLit <|> parseParen
 
 parseLet :: Parser E'
-parseLet = withSpan $ try $ Let 
+parseLet = withSpan $ Let 
     <$> (symbol "let" *> parseVar')
     <*> (lexeme (char '=' <?> "=") *> parseExpr)
     <*> (symbol "in" *> parseExpr)
 
 parseIf :: Parser E'
-parseIf = withSpan $ try $ If
+parseIf = withSpan $ If
     <$> (symbol "if" *> parseExpr)
     <*> (symbol "then" *> parseExpr)
     <*> (symbol "else" *> parseExpr)

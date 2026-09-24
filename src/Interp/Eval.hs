@@ -207,7 +207,7 @@ matchP = \case
     (PBool n, VBool m) | n == m -> Just []
 
     (PNil, VList []) -> Just []
-    (PCons ph pt, VList (x: xs)) -> (++) <$> matchP (ph, x) <*> matchP (pt, (VList xs))
+    (PCons ph pt, VList (x: xs)) -> (++) <$> matchP (ph, x) <*> matchP (pt, VList xs)
 
     (PTuple ps, VTuple vs) | length ps == length vs -> 
         concat <$> mapM matchP (zip ps vs)

@@ -32,7 +32,7 @@ prettyE' = \case
 prettyV' :: V' -> Text
 prettyV' = \case
     VInt n -> pack $ show n
-    VBool b -> pack $ show b
+    VBool b -> if b then "true" else "false"
     VList vs -> "[" <> T.intercalate ", " (fmap prettyV' vs) <> "]"
     VTuple vs -> "(" <> T.intercalate ", " (fmap prettyV' vs) <> ")"
     VClosure t _ _ -> T.unwords ["<closure", t, "::", "...>"]

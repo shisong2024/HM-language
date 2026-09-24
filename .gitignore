@@ -9,4 +9,6 @@ test/
 *.o
 *.txt
 
+.gitattributes
+
 humming-strolling-nest.md
