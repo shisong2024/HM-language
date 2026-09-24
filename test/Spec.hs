@@ -103,12 +103,16 @@ progRun s src = case runProg src of
         let prs = map snd lprs
             (tcRes, n') = runState (runExceptT (programChecker (prTEnv s) prs)) (prNext s)
         in case tcRes of
-            Left terr -> Left ("Type error: " <> prettyTypeErrorWith src terr)
+            -- ⚠️ 注意实参顺序：renderLocated 的实现是 (batchName, src)，
+            -- 而 prettyTypeErrorWith 的签名却写成 (src, batchName) —— 两者都是 Text，
+            -- 编译器分不出来。这里必须按【实现】的顺序传：batchName 在前。
+            -- Spec 里的 span 名是 runProg 用的 ""，所以插入符照常渲染。
+            Left terr -> Left ("Type error: " <> prettyTypeErrorWith "" src terr)
             Right (_, tenv', tys) ->
                 let (evRes, _) = runState
                         (runReaderT (runExceptT (evalProgram prs)) (prEnv s)) (Depth 0)
                 in case evRes of
-                    Left eerr -> Left ("Eval error: " <> prettyEvalErrorWith src eerr)
+                    Left eerr -> Left ("Eval error: " <> prettyEvalErrorWith "" src eerr)
                     Right (env', vals) -> Right ProgRes
                         { prTEnv = M.union tenv' (prTEnv s)   -- 新定义遮蔽旧定义
                         , prEnv  = env'
@@ -207,7 +211,7 @@ rendersCaret needle src = case run src of
     Left _ -> expectationFailure "不该是 Parse error"
     Right ast -> case tcRun ast of
         Left terr -> do
-            let txt = prettyTypeErrorWith src terr
+            let txt = prettyTypeErrorWith "" src terr
             txt `shouldSatisfy` T.isInfixOf "^"
             txt `shouldSatisfy` T.isInfixOf needle
         Right _ -> expectationFailure "期待 Type error"
@@ -763,7 +767,7 @@ spec = do
         let src = "1 + zzz"
             txt = case run src of
                     Right ast -> case tcRun ast of
-                                    Left terr -> prettyTypeErrorWith src terr
+                                    Left terr -> prettyTypeErrorWith "" src terr
                                     Right _   -> ""
                     Left _ -> ""
             ls = T.lines txt

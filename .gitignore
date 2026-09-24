@@ -7,8 +7,9 @@ test/
 *.project
 *.hi
 *.o
-*.txt
 
-.gitattributes
+lang.txt
+test.txt
+_*.txt
 
 humming-strolling-nest.md

@@ -8,13 +8,18 @@ import Interp.Types
 
 builtinEnv :: Env 
 builtinEnv = M.fromList
-    [ ("cons", VPrim "cons" 2 [])
+    [ ("#cons", VPrim "#cons" 2 [])
+    , ("cons", VPrim "#cons" 2 [])
     ]
 
 builtinTEnv :: TEnv
 builtinTEnv = M.fromList
-    [ ("cons", Forall (S.singleton 0) (TFunc (TVar 0) (TFunc (TList (TVar 0)) (TList (TVar 0)))))
+    [ ("#cons", consTy)
+    , ("cons", consTy)
     ]
 
+consTy :: S'
+consTy = Forall (S.singleton 0) (TFunc (TVar 0) (TFunc (TList (TVar 0)) (TList (TVar 0))))
+
 initSession :: Session
-initSession = Session { sEnv = builtinEnv, sTEnv = builtinTEnv, sNext = 0 }
+initSession = Session { sEnv = builtinEnv, sTEnv = builtinTEnv, sNext = 0, sBatch = "" }

@@ -62,6 +62,7 @@ data EvalError
     | RecursiveVarDef Text
     | NonExhaustiveMatch V'
     | ConsNeedsList V'
+    | OprArgIsNotComparable V' V'
     deriving (Show, Eq)
 
 newtype Depth = Depth Int deriving (Show, Eq, Ord, Generic)
@@ -100,11 +101,13 @@ data Decl = Def Text [Text] E' deriving (Show, Eq)
 data Statement = StmtDef Decl | StmtExpr E' deriving (Show, Eq)
 type Program = [Statement]
 type Binding = (Text, E')
+type BatchName = Text
 
 data Session = Session
     { sTEnv :: TEnv
     , sEnv  :: Env
     , sNext :: Counter
+    , sBatch :: BatchName
     } deriving (Show, Eq)
 
 opTable :: [(Text, Opr)]

@@ -4,30 +4,30 @@ module Interp.Pretty where
 import Interp.Types
 import Data.Text (Text, pack)
 import qualified Data.Text as T
-import Text.Megaparsec (unPos, SourcePos (sourceLine, sourceColumn))
+import Text.Megaparsec (unPos, SourcePos (sourceLine, sourceColumn, sourceName))
 import qualified Data.Text.IO as TIO
-import Data.List (sortOn)
+import Data.List (sortOn, find)
 import qualified Data.Map as M
 import qualified Data.Set as S
 
 prettyBOpr :: Opr -> Text
-prettyBOpr = pack . drop 1 . takeWhile (/= 'p') . show
+prettyBOpr opr = maybe "?" fst (find ((== opr) . snd) opTable)
 
-prettyE' :: E' -> Text
-prettyE' = \case
+debugE' :: E' -> Text
+debugE' = \case
     ILit n -> pack (show n)
     BLit b -> pack (show b)
     Var t -> t
-    ListLit es -> "[" <> T.intercalate ", " (fmap prettyE' es) <> "]"
-    TupleLit es -> "(" <> T.intercalate ", " (fmap prettyE' es) <> ")"
-    BOpr op e1 e2 -> "(" <> T.unwords [prettyE' e1, prettyBOpr op, prettyE' e2] <> ")"
-    Let t e1 e2 -> T.unwords ["(Let", t, "=", prettyE' e1, "in", prettyE' e2] <> ")"
-    If eb e1 e2 -> T.unwords ["(If", prettyE' eb, "then", prettyE' e1, "else", prettyE' e2] <> ")"
-    Lambda t e -> T.concat ["(\\", t, " -> ", prettyE' e, ")"]
-    App e1 e2 -> "(App " <> T.unwords [prettyE' e1, prettyE' e2] <> ")"
-    Match e arms -> T.unwords ["(Match", prettyE' e, "with"] <> " " 
-        <> T.intercalate " | " [prettyP p <> " -> " <> prettyE' b | (p, b) <- arms] <> ")"
-    At _ e -> prettyE' e
+    ListLit es -> "[" <> T.intercalate ", " (fmap debugE' es) <> "]"
+    TupleLit es -> "(" <> T.intercalate ", " (fmap debugE' es) <> ")"
+    BOpr op e1 e2 -> "(" <> T.unwords [debugE' e1, prettyBOpr op, debugE' e2] <> ")"
+    Let t e1 e2 -> T.unwords ["(Let", t, "=", debugE' e1, "in", debugE' e2] <> ")"
+    If eb e1 e2 -> T.unwords ["(If", debugE' eb, "then", debugE' e1, "else", debugE' e2] <> ")"
+    Lambda t e -> T.concat ["(\\", t, " -> ", debugE' e, ")"]
+    App e1 e2 -> "(App " <> T.unwords [debugE' e1, debugE' e2] <> ")"
+    Match e arms -> T.unwords ["(Match", debugE' e, "with"] <> " " 
+        <> T.intercalate " | " [prettyP p <> " -> " <> debugE' b | (p, b) <- arms] <> ")"
+    At _ e -> debugE' e
 
 prettyV' :: V' -> Text
 prettyV' = \case
@@ -50,6 +50,7 @@ prettyEvalError = \case
     RecursiveVarDef t -> t <> " is defined recursively as a value."
     NonExhaustiveMatch v -> "Pattern match is not exhaustive: no arm matches " <> prettyV' v <> "."
     ConsNeedsList v -> "cons expects a list as its second argument but gets " <> prettyV' v <> "."
+    OprArgIsNotComparable v1 v2 -> T.unwords [prettyV' v1, "and", prettyV' v2, "is not comparable"] <> "."
 
 prettyT' :: T' -> Text
 prettyT' = \case
@@ -93,12 +94,13 @@ lineAt src n = case drop (n - 1) (T.lines src) of
 spanStart :: Span -> (Int, Int)
 spanStart (Span s _) = (unPos (sourceLine s), unPos (sourceColumn s))
 
-renderLocated :: (a -> Text) -> Text -> Located a -> Text
-renderLocated f tx (Located msp err) = case msp of
+renderLocated :: (a -> Text) -> BatchName -> Text -> Located a -> Text
+renderLocated f batchName tx (Located msp err) = case msp of
     Nothing -> f err
-    Just sp -> if T.null line
-        then f err 
-        else T.intercalate "\n" 
+    Just sp@(Span n _)
+        | sourceName n /= T.unpack batchName -> f err
+        | T.null line || col > T.length line + 1 -> f err 
+        | otherwise -> T.intercalate "\n" 
             [ numTxt <> " | " <> line
             , gutter <> " | " <> T.replicate (col - 1) " " <> "^"
             , f err
@@ -112,14 +114,14 @@ renderLocated f tx (Located msp err) = case msp of
             numTxt = T.pack (show ln)
             gutter = T.replicate (T.length numTxt) " "
 
-prettyEvalErrorWith :: Text -> Located EvalError -> Text
+prettyEvalErrorWith :: BatchName -> Text -> Located EvalError -> Text
 prettyEvalErrorWith = renderLocated prettyEvalError
 
-prettyTypeErrorWith :: Text -> Located TypeError -> Text
+prettyTypeErrorWith :: BatchName -> Text -> Located TypeError -> Text
 prettyTypeErrorWith = renderLocated prettyTypeError
 
-printBatch :: Text -> [(Int, Statement)] -> M.Map Int StmtTy -> M.Map Int (Either (Located EvalError) V') -> [(Int, Text)] -> IO ()
-printBatch src lprs tps vals perr = 
+printBatch :: Text -> BatchName -> [(Int, Statement)] -> M.Map Int StmtTy -> M.Map Int (Either (Located EvalError) V') -> [(Int, Text)] -> IO ()
+printBatch src bn lprs tps vals perr = 
     mapM_ (TIO.putStr . snd) . sortOn fst $
         [(i, renderStmt i st) | (i, st) <- lprs] <>
         [(i, T.pack (show i) <> ": Parse Error:\n" <> msg <> "\n") | (i, msg) <- perr]
@@ -130,8 +132,8 @@ printBatch src lprs tps vals perr =
                 Just (TyDef _ sch) -> "def " <> n <> " : " <> prettyS' sch <> "\n"
                 _ -> ""
             StmtExpr _ -> case (M.lookup i tps, M.lookup i vals) of
-                (Just (TyExpr (Left terr)), _) -> "Type Error:\n" <> prettyTypeErrorWith src terr <> "\n"
+                (Just (TyExpr (Left terr)), _) -> "Type Error:\n" <> prettyTypeErrorWith src bn terr <> "\n"
                 (Just (TyExpr (Right tp)), Just (Left eerr)) -> "Type : " <> prettyT' tp <> "\n" <>
-                    "Eval Error:\n" <> prettyEvalErrorWith src eerr <> "\n"
+                    "Eval Error:\n" <> prettyEvalErrorWith src bn eerr <> "\n"
                 (Just (TyExpr (Right tp)), Just (Right v)) -> "Type : " <> prettyT' tp <> "\n" <> "Value: " <> prettyV' v <> "\n"
                 _ -> ""

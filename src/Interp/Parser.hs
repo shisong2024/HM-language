@@ -184,7 +184,7 @@ parsePat = do
     return $ case m of Nothing -> h; Just t -> PCons h t
 
 parsePatAtom :: Parser P'
-parsePatAtom = parsePatParen <|> parsePatNil <|> parsePatVar <|> parsePatInt <|> parsePatBool
+parsePatAtom = parsePatParen <|> parsePatNil <|> parsePatVar <|> parsePatBool <|> parsePatInt
 
 parsePatParen :: Parser P'
 parsePatParen = do
@@ -202,7 +202,10 @@ parsePatVar :: Parser P'
 parsePatVar = parseVar' >>= \n -> return $ if n == "_" then PWild else PVar n
 
 parsePatInt :: Parser P'
-parsePatInt = PInt <$> lexeme (decimal <* nextNotVar)
+parsePatInt = try $ do
+    sign <- optional (lexeme (char '-'))
+    n <- lexeme (decimal <* nextNotVar)
+    return $ PInt (if sign == Just '-' then negate n else n)
 
 parsePatBool :: Parser P'
 parsePatBool = PBool <$> toBool (symbol "true" <|> symbol "false")
@@ -221,4 +224,4 @@ parseCons = withSpan $ do
     m <- optional (try (colonTok *> parseCons))
     return $ case m of
         Nothing -> h
-        Just t  -> App (App (Var "cons") h) t
+        Just t  -> App (App (Var "#cons") h) t

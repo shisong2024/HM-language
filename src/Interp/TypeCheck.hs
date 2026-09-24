@@ -49,14 +49,19 @@ typeChecker env = \case
     BOpr bopr e1 e2 -> do
         (ts1, tp1) <- typeChecker env e1
         (ts2, tp2) <- typeChecker (applyTEnv ts1 env) e2
-        ts3 <- unify (apply ts2 tp1, TInt)
-        ts4 <- unify (apply ts3 tp2, TInt)
-        return 
-            ( compose ts4 $ compose ts3 $ compose ts2 ts1
-            , case bopr of
-                OArith _ -> TInt
-                OCmp _ -> TBool
-            )
+        case bopr of
+            OCmp op | op == OpEq || op == OpNe -> do
+                ts3 <- unify (apply ts2 tp1, apply ts2 tp2)
+                return (compose ts3 (compose ts2 ts1), TBool)
+            _ -> do
+                ts3 <- unify (apply ts2 tp1, TInt)
+                ts4 <- unify (apply ts3 tp2, TInt)
+                return 
+                    ( compose ts4 $ compose ts3 $ compose ts2 ts1
+                    , case bopr of
+                        OArith _ -> TInt
+                        OCmp _ -> TBool
+                    )
      
     Let t e1 e2 -> do
         tv <- fresh

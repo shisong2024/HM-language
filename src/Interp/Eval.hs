@@ -42,15 +42,18 @@ eval = \case
     BOpr bopr e1 e2 -> do
         v1 <- eval e1
         v2 <- eval e2
-        case (v1, v2) of
-            (VInt vi1, VInt vi2) -> case bopr of
-                OArith OpDiv | vi2 == 0 -> throwError (Located Nothing $ DividedByZero vi2)
-                OArith OpPow | vi2 < 0  -> throwError (Located Nothing $ NegativeExponent vi2)
-                _  -> return $ case bopr of
-                    OArith opr -> VInt $ calArithOpr opr vi1 vi2
-                    OCmp opr   -> VBool $ calCmpOpr opr vi1 vi2
-            (VInt _, _) -> throwError (Located Nothing $ OprArgIsNotNum bopr v2)
-            _           -> throwError (Located Nothing $ OprArgIsNotNum bopr v1)
+        case bopr of
+            OCmp OpEq -> eqOp v1 v2 True
+            OCmp OpNe -> eqOp v1 v2 False
+            _ -> case (v1, v2) of
+                (VInt vi1, VInt vi2) -> case bopr of
+                    OArith OpDiv | vi2 == 0 -> throwError (Located Nothing $ DividedByZero vi2)
+                    OArith OpPow | vi2 < 0  -> throwError (Located Nothing $ NegativeExponent vi2)
+                    _  -> return $ case bopr of
+                        OArith opr -> VInt $ calArithOpr opr vi1 vi2
+                        OCmp opr   -> VBool $ calCmpOpr opr vi1 vi2
+                (VInt _, _) -> throwError (Located Nothing $ OprArgIsNotNum bopr v2)
+                _           -> throwError (Located Nothing $ OprArgIsNotNum bopr v1)
 
     At sp e -> catchError (eval e) (throwError . addSpan sp)
 
@@ -81,13 +84,7 @@ eval = \case
                 else applyPrim n args'
             _ -> throwError (Located Nothing $ IsNotFunction v1)
     
-    Match e pes -> do
-        res <- eval e
-        case pes of
-            [] -> throwError $ Located Nothing $ NonExhaustiveMatch res
-            (p, b): rest -> case matchP (p, res) of
-                Nothing -> eval (Match e rest)
-                Just bnds -> local (M.union (M.fromList bnds)) (eval b)
+    Match e pes -> eval e >>= \v -> matchArms v pes
 
 evalProgram :: (MonadState Depth m, MonadReader Env m, MonadError (Located EvalError) m) => Program -> m (Env, M.Map Int (Either (Located EvalError) V'))
 evalProgram prs = ask >>= \env -> do
@@ -139,9 +136,6 @@ calCmpOpr = \case
     OpGe -> (>=)
     OpLt -> (<)
     OpGt -> (>)
-
-emptyMap :: M.Map a b
-emptyMap = M.empty
 
 addSpan :: Span -> Located e -> Located e
 addSpan sp (Located Nothing err) = Located (Just sp) err
@@ -215,7 +209,27 @@ matchP = \case
     _ -> Nothing
 
 applyPrim :: MonadError (Located EvalError) m => Text -> [V'] -> m V'
-applyPrim "cons" [h, t] = case t of
+applyPrim "#cons" [h, t] = case t of
     VList xs -> return $ VList (h: xs)
     _ -> throwError $ Located Nothing $ ConsNeedsList t
 applyPrim n _ = error $ unpack ("unknown primitive: " <> n)
+
+matchArms :: (MonadError (Located EvalError) m, MonadReader Env m,  MonadState Depth m) => V' -> [(P', E')] -> m V'
+matchArms v = \case
+    [] -> throwError $ Located Nothing $ NonExhaustiveMatch v
+    (p, b): rest -> case matchP (p, v) of
+        Nothing   -> matchArms v rest
+        Just bnds -> local (M.union (M.fromList bnds)) (eval b)
+
+eqV :: (V', V') -> Maybe Bool
+eqV = \case
+    (VInt a, VInt b) -> Just (a == b)
+    (VBool a, VBool b) -> Just (a == b)
+    (VList a, VList b) -> if length a == length b then and <$> mapM eqV (zip a b) else Just False
+    (VTuple a, VTuple b) -> if length a == length b then and <$> mapM eqV (zip a b) else Just False
+    _ -> Nothing
+
+eqOp :: MonadError (Located EvalError) m => V' -> V' -> Bool -> m V'
+eqOp v1 v2 w = case eqV (v1, v2) of
+    Just b -> return $ VBool (if w then b else not b)
+    Nothing -> throwError $ Located Nothing $ OprArgIsNotComparable v1 v2
