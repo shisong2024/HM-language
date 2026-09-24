@@ -21,7 +21,7 @@ opInfo = \case
     OCmp _ -> (0, AssocL)
 
 reserved :: [Text]
-reserved = ["let", "in", "lambda", "def", "if", "then", "else", "true", "false"]
+reserved = ["let", "in", "lambda", "def", "if", "then", "else", "true", "false", "match", "with"]
 
 isVarFirst :: Char -> Bool
 isVarFirst c = isLower c || c == '_'
@@ -208,7 +208,7 @@ parsePatBool :: Parser P'
 parsePatBool = PBool <$> toBool (symbol "true" <|> symbol "false")
 
 parseMatch :: Parser E'
-parseMatch = withSpan $ try $ Match
+parseMatch = withSpan $ Match
     <$> (symbol "match" *> parseExpr <* symbol "with")
     <*> sepBy1 parseArm (lexeme (char '|'))
 

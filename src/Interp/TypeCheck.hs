@@ -94,6 +94,14 @@ typeChecker env = \case
         ts3 <- unify (apply ts2 ft, TFunc argt rt) 
         return (compose ts3 $ compose ts2 ts1, apply ts3 rt)
 
+    Match e arms -> do
+        (ts1, t) <- typeChecker env e
+        (ts, mtp) <- foldM (matchType env t) (ts1, Nothing) arms
+        checkNonExhaustive (apply ts t) arms
+        case mtp of
+            Just tp -> return (ts, tp)
+            Nothing -> fresh <&> (ts, )
+
     At sp e -> catchError (typeChecker env e) (throwError . addSpan sp)
 
 sccChecker :: (MonadState Counter m, MonadError (Located TypeError) m) => TEnv -> [Binding] -> m (TSub, TEnv)
@@ -225,3 +233,75 @@ patType = \case
     PVar x -> fresh >>= \v -> return (M.empty, v, M.singleton x (Forall S.empty v))
     PInt _ -> return (M.empty, TInt, M.empty)
     PBool _ -> return (M.empty, TBool, M.empty)
+    PNil -> fresh <&> ((M.empty, , M.empty) . TList)
+
+    PCons ph pt -> do
+        (ts1, th, env1) <- patType ph
+        (ts2, tt, env2) <- patType pt
+        let tsA = compose ts2 ts1
+        v <- fresh
+        ts3 <- unify (apply tsA th, apply tsA v)
+        let tsB = compose ts3 tsA
+        ts4 <- unify (apply tsB tt, apply tsB (TList v))
+        let tsf = compose ts4 tsB
+        return (tsf, apply tsf (TList v), M.union (applyTEnv tsf env1) (applyTEnv tsf env2))
+    
+    PTuple ps -> do
+        (ts, tps, tenv) <- foldM step (M.empty, [], M.empty) ps
+        return (ts, TTuple tps, tenv)
+    where
+        step (ts, tps, tenv) p = do
+            (ts1, tp1, tenv1) <- patType p
+            let ts' = compose ts1 ts
+            return (ts', tps ++ [apply ts' tp1], M.union (applyTEnv ts' tenv1) tenv)
+
+matchType :: (MonadState Counter m, MonadError (Located TypeError) m) => TEnv -> T' -> (TSub, Maybe T') -> (P', E') -> m (TSub, Maybe T')
+matchType env t (ts, mtp) (p, b) = do
+    checkDupPatVar p
+    let env' = applyTEnv ts env
+    (ts2, tp, benv) <- patType p
+    let tsA = compose ts2 ts
+    ts3 <- unify (apply tsA tp, apply tsA t)
+    let tsB = compose ts3 tsA
+    (ts4, tb) <- typeChecker (M.union (applyTEnv tsB benv) env') b
+    let tsC = compose ts4 tsB
+    case mtp of
+        Nothing -> return (tsC, Just (apply tsC tb))
+        Just t0 -> do 
+            ts5 <- unify (apply tsC t0, apply tsC tb)
+            let tsD = compose ts5 tsC
+            return (tsD, Just (apply tsD tb))
+
+checkDupPatVar :: MonadError (Located TypeError) m => P' -> m ()
+checkDupPatVar p = case fstDuplicate (patVarsList p) of
+    Just x -> throwError $ Located Nothing $ DuplicatePatVar x
+    Nothing -> return ()
+
+irrefutable :: P' -> Bool
+irrefutable = \case
+    PVar _    -> True
+    PWild     -> True
+    PTuple ps -> all irrefutable ps
+    _         -> False
+
+checkNonExhaustive :: MonadError (Located TypeError) m => T' -> [(P', E')] -> m ()
+checkNonExhaustive t arms
+    | exhaustive t (map fst arms) = return ()
+    | otherwise = throwError $ Located Nothing $ NonExhaustivePat t
+
+exhaustive :: T' -> [P'] -> Bool
+exhaustive t ps = any irrefutable ps || case t of
+    TList _ -> 
+           any (\case PNil -> True; _ -> False) ps 
+        && any (\case PCons h tt -> irrefutable h && irrefutable tt ; _ -> False) ps
+    TBool -> 
+           any (\case PBool True -> True; _ -> False) ps
+        && any (\case PBool False -> True; _ -> False) ps
+    TTuple ts -> 
+        let col j = [qs !! j | PTuple qs <- ps, length qs == length ts] in 
+        any (\case 
+            PTuple qs -> length ts == length qs && all irrefutable qs
+            _ -> False
+        ) ps || and [exhaustive tj (col j) | (j, tj) <- zip [0..] ts]
+    _ -> True
+        

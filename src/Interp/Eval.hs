@@ -77,8 +77,8 @@ eval = \case
             VClosure t ec env -> local (const (M.insert t v2 env)) (evalwDepth ec)
             VPrim n ar args -> do
                 let args' = args ++ [v2]
-                if length args < ar then return $ VPrim n ar args'
-                else applyPrim n args
+                if length args' < ar then return $ VPrim n ar args'
+                else applyPrim n args'
             _ -> throwError (Located Nothing $ IsNotFunction v1)
     
     Match e pes -> do
@@ -167,7 +167,7 @@ freeVars = \case
     If b e1 e2 -> S.unions (map freeVars [b, e1, e2])
     BOpr _ e1 e2 -> freeVars e1 `S.union` freeVars e2
     App f a -> freeVars f `S.union` freeVars a
-    Match e pes -> S.unions (freeVars e: map (freeVars . snd) pes)
+    Match e pes -> S.unions (freeVars e: [freeVars b `S.difference` patVars p | (p, b) <- pes])
     At _ e -> freeVars e
 
 deps :: Program -> [(Decl, Text, [Text])]
@@ -189,11 +189,14 @@ relabel lprs m = M.fromList [(l, v) | (k, v) <- M.toList m, Just l <- [M.lookup 
     where idx = M.fromList (zip [0 ..] (map fst lprs))
 
 patVars :: P' -> Set Text
-patVars = \case
-    PVar x -> S.singleton x
-    PCons p q -> patVars p `S.union` patVars q
-    PTuple ps -> S.unions (map patVars ps)
-    _ -> S.empty
+patVars = S.fromList . patVarsList
+
+patVarsList :: P' -> [Text]
+patVarsList = \case
+    PVar x -> [x]
+    PCons p q -> patVarsList p ++ patVarsList q
+    PTuple ps -> concatMap patVarsList ps
+    _ -> []
 
 matchP :: (P', V') -> Maybe [(Text, V')]
 matchP = \case

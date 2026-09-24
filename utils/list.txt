@@ -1,0 +1,17 @@
+def headInt l = match l with [] -> 0 | x: xs -> x
+def tail l = match l with [] -> [] | x: xs -> xs
+
+def null l = match l with [] -> true | x: xs -> false
+
+def map f l = match l with [] -> [] | x: xs -> f x : map f xs
+def foldr f z l = match l with [] -> z | x: xs -> f x (foldr f z xs)
+def filter p l = match l with [] -> [] | x: xs -> if p x then x: filter p xs else filter p xs
+
+def sum l = foldr (lambda a b -> a + b) 0 l
+def prod l = foldr (lambda a b -> a * b) 1 l
+
+def append xs ys = match xs with [] -> ys | x: rest -> x: append rest ys
+def zip xs ys = match (xs, ys) with ([], _) -> [] | (_, []) -> [] | (x: xr, y: yr) -> (x, y): zip xr yr
+def unzipx ps = match ps with [] -> [] | (x, _): rest -> x: unzipx rest
+def unzipy ps = match ps with [] -> [] | (_, y): rest -> y: unzipy rest
+def unzip ps = (unzipx ps, unzipy ps)

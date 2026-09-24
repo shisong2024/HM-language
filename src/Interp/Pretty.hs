@@ -25,6 +25,8 @@ prettyE' = \case
     If eb e1 e2 -> T.unwords ["(If", prettyE' eb, "then", prettyE' e1, "else", prettyE' e2] <> ")"
     Lambda t e -> T.concat ["(\\", t, " -> ", prettyE' e, ")"]
     App e1 e2 -> "(App " <> T.unwords [prettyE' e1, prettyE' e2] <> ")"
+    Match e arms -> T.unwords ["(Match", prettyE' e, "with"] <> " " 
+        <> T.intercalate " | " [prettyP p <> " -> " <> prettyE' b | (p, b) <- arms] <> ")"
     At _ e -> prettyE' e
 
 prettyV' :: V' -> Text
@@ -34,6 +36,7 @@ prettyV' = \case
     VList vs -> "[" <> T.intercalate ", " (fmap prettyV' vs) <> "]"
     VTuple vs -> "(" <> T.intercalate ", " (fmap prettyV' vs) <> ")"
     VClosure t _ _ -> T.unwords ["<closure", t, "::", "...>"]
+    VPrim n _ args -> "(" <> T.unwords (n : map prettyV' args) <> ")"
 
 prettyEvalError :: EvalError -> Text
 prettyEvalError = \case
@@ -45,6 +48,8 @@ prettyEvalError = \case
     IfNeedsBool v -> "Expected Bool in if expression but get " <> prettyV' v <> "."
     RecursionLimited n -> "Recursion Limited " <> pack (show n) <> "."
     RecursiveVarDef t -> t <> " is defined recursively as a value."
+    NonExhaustiveMatch v -> "Pattern match is not exhaustive: no arm matches " <> prettyV' v <> "."
+    ConsNeedsList v -> "cons expects a list as its second argument but gets " <> prettyV' v <> "."
 
 prettyT' :: T' -> Text
 prettyT' = \case
@@ -61,11 +66,24 @@ prettyTypeError = \case
     TypeMismatch t1 t2 -> T.unwords ["Type mismatch: expected", prettyT' t2, "but got", prettyT' t1] <> "."
     DuplicateDef tx -> "Duplicated definition: " <> tx <> "."
     OccurCheck -> "Occurs check failed."
+    DuplicatePatVar x -> "The variable " <> x <> " is bound more than once in the same pattern."
+    NonExhaustivePat t -> "Patterns are not exhaustive for type " <> prettyT' t <> "."
+
 
 prettyS' :: S' -> Text
 prettyS' (Forall tvs t)
     | null tvs  = prettyT' t
     | otherwise = "Forall " <> T.unwords ["a" <> pack (show i) | i <- S.toList tvs] <> ". " <> prettyT' t
+
+prettyP :: P' -> Text
+prettyP = \case
+    PVar x -> x
+    PWild -> "_"
+    PInt n -> pack $ show n
+    PBool b ->  if b then "true" else "false"
+    PNil -> "[]"
+    PCons h t -> prettyP h <> " : " <> prettyP t
+    PTuple ps -> "(" <> T.intercalate ", " (map prettyP ps) <> ")"
 
 lineAt :: Text -> Int -> Text
 lineAt src n = case drop (n - 1) (T.lines src) of

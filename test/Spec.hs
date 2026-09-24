@@ -17,6 +17,7 @@ import Interp.Types
 import Interp.Parser (run, runProg)
 import Interp.TypeCheck (typeChecker, programChecker)
 import Interp.Eval (evalwDepth, evalProgram)
+import Interp.Builtin (initSession)
 import Interp.Pretty
 
 import Data.Text (Text)
@@ -53,13 +54,17 @@ runSrc src = case run src of
             Left eerr -> EvalErr (evMsg eerr)
             Right v   -> Ok (prettyT' ty) (prettyV' v)
 
+-- 会话起点一律取 initSession：内置函数（cons）在它里面。
+-- 少了这一层，`cons 1 []` 会以 "cons is an unbound variable" 失败 ——
+-- 那是测试环境比真实环境（app/Main.hs 也是从 initSession 起）少东西，
+-- 不是被测代码的问题。
 tcRun :: E' -> Either (Located TypeError) T'
-tcRun ast = fmap snd (fst (runState (runExceptT (typeChecker M.empty ast)) 0))
+tcRun ast = fmap snd (fst (runState (runExceptT (typeChecker (sTEnv initSession) ast)) (sNext initSession)))
 
 -- 走 evalwDepth 而不是裸 eval：加深度守卫时 eval 的签名会多出一个
 -- MonadState Depth，裸 eval 那行就编不过了 —— 而 evalwDepth 两种签名下都在。
 evRun :: E' -> Either (Located EvalError) V'
-evRun ast = evalState (runExceptT (runReaderT (evalwDepth ast) M.empty)) (Depth 0)
+evRun ast = evalState (runExceptT (runReaderT (evalwDepth ast) (sEnv initSession))) (Depth 0)
 
 -- | 丢掉位置，只留消息本身 —— 断言文案时用这个。
 tcMsg :: Located TypeError -> Text
@@ -83,8 +88,9 @@ data ProgRes = ProgRes
     , prVals :: M.Map Int (Either (Located EvalError) V')
     } deriving (Show)
 
+-- | 空会话 = 只有内置函数的起点，和 app/Main.hs 用 initSession 起的会话一致。
 emptyProg :: ProgRes
-emptyProg = ProgRes M.empty M.empty 0 M.empty M.empty
+emptyProg = ProgRes (sTEnv initSession) (sEnv initSession) (sNext initSession) M.empty M.empty
 
 -- | 跑一段源码，返回新的会话。任一步失败就 Left（带上渲染好的消息）。
 --
@@ -171,6 +177,13 @@ parseErr :: Text -> Text -> Expectation
 parseErr needle src = case runSrc src of
     ParseErr e -> e `shouldSatisfy` T.isInfixOf needle
     other      -> expectationFailure $ "期待 Parse error，实际是: " <> show other
+
+-- | parseErr 的整段源码版：runSrc 走的是单表达式入口 run，认不出 def / 多行，
+--   所以带 def 的解析错误要用这个（走的才是 REPL 与文件路径用的 runProg）。
+progParseErr :: Text -> Text -> Expectation
+progParseErr needle src = case runProg src of
+    Left e   -> e `shouldSatisfy` T.isInfixOf needle
+    Right _  -> expectationFailure "期待 Parse error，实际解析通过了"
 
 typeErr :: Text -> Expectation
 typeErr src = case runSrc src of
@@ -469,6 +482,170 @@ spec = do
         runSrc "(1,2) == (1,2)" `shouldSatisfy` hasTypeErrText "expected Int but got (Int, Int)"
 
   -------------------------------------------------------------------------
+  -- 模式匹配（TODO/09-模式匹配.md）
+  --
+  -- 覆盖点按「哪一层负责」分组：
+  --   * 求值    —— matchP 的形状匹配、臂的短路顺序、match 是表达式
+  --   * cons    —— 中缀 `:` 脱糖 + VPrim 的归约。曾经的缺陷：实参补齐后
+  --                判的是旧 args，于是 cons 一次都没归约，冒号构造的值
+  --                是 VPrim，任何 cons 模式都匹配不上（2026-09-24 修好）。
+  --   * 类型    —— 各臂结果类型统一、穷尽性的静态判定与「判不了就放行」
+  --   * 查重    —— DuplicatePatVar。曾经的缺陷：checkDupPatVar 拿
+  --                `S.toList . patVars` 去查重，Set 已经去过重，永远查不出
+  --                （2026-09-24 修好，改走保序的 patVarsList）。
+  -------------------------------------------------------------------------
+  describe "模式匹配" $ do
+
+    it "整数模式：从头往下试，第一个匹配的臂胜出" $
+        runSrc "match 0 with 0 -> 1 | _ -> 2" `shouldBe` Ok "Int" "1"
+
+    it "整数模式：前面的臂不匹配时落到后面的臂" $
+        runSrc "match 1 with 0 -> 1 | _ -> 2" `shouldBe` Ok "Int" "2"
+
+    it "Bool 模式" $
+        runSrc "match true with false -> 1 | true -> 2" `shouldBe` Ok "Int" "2"
+
+    it "列表模式：cons 臂绑定头与尾" $
+        runSrc "match [1,2] with (x: xs) -> x | [] -> 0" `shouldBe` Ok "Int" "1"
+
+    it "列表模式：空表臂" $
+        runSrc "match [] with (x: xs) -> x | [] -> 0" `shouldBe` Ok "Int" "0"
+
+    it "cons 模式不写括号也行（: 右结合，臂体不会把 | 吃掉）" $
+        runSrc "match [1,2] with [] -> 0 | x : xs -> x" `shouldBe` Ok "Int" "1"
+
+    it "元组模式：嵌套也能取到内层" $
+        runSrc "match (1,(2,3)) with (x,(y,z)) -> y | _ -> 0" `shouldBe` Ok "Int" "2"
+
+    it "通配符不绑定任何名字" $
+        runSrc "match (1,2) with (x,_) -> x | _ -> 0" `shouldBe` Ok "Int" "1"
+
+    it "臂体里可以用 if" $
+        runSrc "match 1 with 0 -> 1 | _ -> if true then 2 else 3" `shouldBe` Ok "Int" "2"
+
+    it "match 是表达式，能当实参" $
+        runSrc "(lambda x -> x) (match 1 with _ -> 42)" `shouldBe` Ok "Int" "42"
+
+    -- ---------------------------------------------------------------------
+    -- cons / 中缀冒号
+    -- ---------------------------------------------------------------------
+
+    it "cons 是内置函数，实参够了就归约（不是留着不动的 VPrim）" $
+        runSrc "cons 1 []" `shouldBe` Ok "[Int]" "[1]"
+
+    it "中缀冒号脱糖成 cons" $
+        runSrc "1 : 2 : []" `shouldBe` Ok "[Int]" "[1, 2]"
+
+    it "cons 构造的值与列表字面量是同一种值（能被 cons 模式解构）" $
+        runSrc "match (1 : [2, 3]) with (x: xs) -> x | [] -> 0" `shouldBe` Ok "Int" "1"
+
+    it "cons 的元素类型跟着走（多态）" $
+        runSrc "cons true []" `shouldBe` Ok "[Bool]" "[True]"
+
+    -- ---------------------------------------------------------------------
+    -- 类型侧
+    -- ---------------------------------------------------------------------
+
+    it "各臂的结果类型必须一致" $
+        runSrc "match 1 with 0 -> 1 | _ -> true"
+            `shouldSatisfy` hasTypeErrText "Type mismatch"
+
+    it "元组模式的元数必须和 scrutinee 对得上" $
+        runSrc "match (1,2) with (x,y,z) -> x | _ -> 0"
+            `shouldSatisfy` hasTypeErrText "Type mismatch"
+
+    it "列表模式不穷尽（只有 cons 臂）：类型检查就拒绝，不必等到运行期" $
+        runSrc "match [1] with (x: xs) -> x"
+            `shouldSatisfy` hasTypeErrText "not exhaustive"
+
+    it "Bool 模式缺一半：类型检查拒绝" $
+        runSrc "match true with true -> 1"
+            `shouldSatisfy` hasTypeErrText "not exhaustive"
+
+    -- 穷尽性判定是 best-effort：Int 上的字面量模式判不了，只能放行到运行期。
+    it "Int 的穷尽性判不了 —— 放行，运行期报 Eval Error" $
+        evalErr "not exhaustive" "match 5 with 0 -> 1"
+
+    it "全通配臂能兜住任何类型" $
+        runSrc "match (1,2) with _ -> 0" `shouldBe` Ok "Int" "0"
+
+    -- ---------------------------------------------------------------------
+    -- 重复绑定（DuplicatePatVar）
+    -- ---------------------------------------------------------------------
+
+    it "同一个模式里绑定两次：类型错" $
+        runSrc "match (1, 2) with (x, x) -> x | _ -> 0"
+            `shouldSatisfy` hasTypeErrText "bound more than once"
+
+    it "嵌套模式里的重复也要抓到" $
+        runSrc "match (1, (2, 3)) with (x, (x, z)) -> z | _ -> 0"
+            `shouldSatisfy` hasTypeErrText "bound more than once"
+
+    it "cons 模式里的重复也要抓到" $
+        runSrc "match [1] with (x : x) -> x | _ -> 0"
+            `shouldSatisfy` hasTypeErrText "bound more than once"
+
+    it "报的是最先重复的那个名字" $
+        runSrc "match (1, 2, 3) with (x, y, y) -> x | _ -> 0"
+            `shouldSatisfy` hasTypeErrText "The variable y is"
+
+    -- 下面两条是反向保护：查重必须【逐臂】做，不能跨臂、不能算上通配符。
+    it "不同臂用同一个名字是合法的" $
+        runSrc "match (1, 2) with (x, y) -> x | (x, y) -> y" `shouldBe` Ok "Int" "1"
+
+    it "模式变量可以和外层同名（形参不算重复，臂内它是遮蔽的那个）" $ do
+        ss <- okSteps ["def f x = match (x, 1) with (x, y) -> x + y | _ -> 0", "f 2"]
+        stmtVal 0 (at 1 ss) `shouldBe` "3"
+
+    -- ---------------------------------------------------------------------
+    -- def + 模式匹配
+    -- ---------------------------------------------------------------------
+
+    it "def 里的 match：参数与结果都保持多态" $ do
+        ss <- okSteps
+            [ "def null l = match l with [] -> true | (x: xs) -> false"
+            , "null [1,2,3]"
+            , "null []" ]
+        stmtType 0 (at 0 ss) `shouldBe` "Forall a2. ([a2] -> Bool)"
+        stmtVal  0 (at 1 ss) `shouldBe` "False"
+        stmtVal  0 (at 2 ss) `shouldBe` "True"
+
+    -- 模式绑定的变量（y、xs）必须从 freeVars 里减掉，否则会污染 deps/SCC。
+    it "模式绑定的变量不污染泛化：tail 能用在两种元素类型上" $ do
+        ss <- okSteps
+            [ "def tl2 l = match l with [] -> [] | (y: xs) -> xs"
+            , "tl2 [1,2]"
+            , "tl2 [true]" ]
+        stmtType 0 (at 0 ss) `shouldBe` "Forall a2. ([a2] -> [a2])"
+        stmtType 0 (at 1 ss) `shouldBe` "[Int]"
+        stmtType 0 (at 2 ss) `shouldBe` "[Bool]"
+
+    it "递归 + 模式：自己写的 length（作用在 cons 构造的值上）" $ do
+        ss <- okSteps
+            [ "def len l = match l with [] -> 0 | (x: xs) -> len xs + 1"
+            , "len (cons 1 (cons 2 (cons 3 [])))" ]
+        stmtVal 0 (at 1 ss) `shouldBe` "3"
+
+    -- ---------------------------------------------------------------------
+    -- 解析错误的措辞
+    --
+    -- parseMatch 曾经是 `withSpan $ try $ ...`：match 内部一出错就整体回溯，
+    -- 关键字接着被当成普通表达式重新解析，于是报出 `reserved symbol: "match"`
+    -- 并且 caret 指在 match 自己身上 —— 离真正缺的 token 十万八千里
+    -- （2026-09-24 修好：见到关键字就提交，不再整体 try）。
+    -- 下面三条钉住「报在正确的位置、并且提到正确的 token」。
+    -- ---------------------------------------------------------------------
+
+    it "少写 with：报错要提到 with，不是 reserved symbol" $
+        progParseErr "\"with\"" "def f l = match l wit [] -> true"
+
+    it "臂里少写 ->：报错要提到 ->" $
+        progParseErr "->" "def f l = match l with [] true"
+
+    it "臂体为空：在缺表达式的地方报 end of input" $
+        progParseErr "end of input" "def null l = match l with [] -> "
+
+  -------------------------------------------------------------------------
   describe "程序模式：def / SCC / 会话状态" $ do
 
     it "runProg 会跳过行首空白和空行（run 不会）" $ do
@@ -664,6 +841,13 @@ spec = do
             `shouldSatisfy` \o -> case o of
                 TypeErr t -> T.isInfixOf "odd is an unbound variable" t
                 _         -> False
+
+    -- parseMatch 的外层 try 已经去掉（见「模式匹配」组最后三条）；parseIf /
+    -- parseLet 还包着 `withSpan $ try $ ...`，同一类误报仍在：少个 else / in
+    -- 时，报的是 `reserved symbol: "if"` 并指在关键字上。修法与 parseMatch 相同。
+    it "已知缺陷：if / let 少分支时报 reserved symbol，而不是真正缺的 token" $ do
+        progParseErr "reserved symbol: \"if\""  "def f = if true then 1 else"
+        progParseErr "reserved symbol: \"let\"" "def f = let x = 1"
 
   -------------------------------------------------------------------------
   describe "属性测试（QuickCheck）" $ do
