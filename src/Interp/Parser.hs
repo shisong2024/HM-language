@@ -253,10 +253,28 @@ run t = case runParser (parseExpr <* eof) "" t of
     Left  err -> Left $ pack (errorBundlePretty err)
     Right res -> Right res
 
+stripComment :: Text -> Either Text Text
+stripComment t
+    | ((i, _): _) <- [(i, l) | (i, l) <- zip [1 :: Int ..] (T.lines t), trailing l] =
+        Left $ T.unlines [T.pack (show i) <> ":", "Parse Error:", "`--` must be at the start of a line."]
+    | otherwise = Right $ T.unlines (map blanck (T.lines t))
+    where
+        blanck :: Text -> Text
+        blanck l
+            | "--" `T.isPrefixOf` T.stripStart l = ""
+            | otherwise = l
+        
+        trailing :: Text -> Bool
+        trailing l = let (pre, rest) = T.breakOn "--" l in
+            not (T.null rest) && not (T.null (T.strip pre))
+
 runProg :: Text -> Either Text [(Int, Statement)]
-runProg t = case runParser (parseProg <* eof) "" t of
-    Left err -> Left $ pack $ errorBundlePretty err
-    Right r  -> Right r
+runProg tx = case stripComment tx of
+    Left msg -> Left msg
+    Right t -> case runParser (parseProg <* eof) "" t of
+        Left err -> Left $ pack $ errorBundlePretty err
+        Right r  -> Right r
+    
 
 withSpan :: Parser E' -> Parser E'
 withSpan p = do
