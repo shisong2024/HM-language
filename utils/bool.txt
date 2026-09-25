@@ -1,0 +1,7 @@
+def and a b = match (a, b) with (true, true) -> true | _ -> false
+def or a b = match (a, b) with (false, false) -> false | _ -> true
+def not a = match a with true -> false | false -> true
+def xor a b = a != b
+
+def any l = match l with [] -> false | x: xs -> match x with true -> true | false -> any xs
+def all l = match l with [] -> true | x: xs -> match x with false -> false | true -> all xs

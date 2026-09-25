@@ -1,0 +1,2 @@
+def fst tp = match tp with (a, b) -> a
+def snd tp = match tp with (a, b) -> b

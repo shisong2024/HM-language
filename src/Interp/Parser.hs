@@ -5,10 +5,11 @@ import Interp.Types
 import Text.Megaparsec 
 import Text.Megaparsec.Char (string, char, eol, hspace, hspace1)
 import Text.Megaparsec.Char.Lexer (decimal)
-import Data.Char (isLower, isAlphaNum)
-import Data.Text (cons, Text, pack)
+import Data.Char (isLower, isAlphaNum, isUpper, isAsciiLower, chr)
+import Data.Text (cons, Text, pack, unpack)
 import Data.Functor(($>), void)
-import Control.Monad (guard)
+import Control.Monad (guard, when)
+import qualified Data.Text as T
 
 opInfo :: Opr -> (Lev, Assoc)
 opInfo = \case
@@ -21,7 +22,10 @@ opInfo = \case
     OCmp _ -> (0, AssocL)
 
 reserved :: [Text]
-reserved = ["let", "in", "lambda", "def", "if", "then", "else", "true", "false", "match", "with"]
+reserved = ["let", "in", "lambda", "def", "if", "then", "else", "true", "false", "match", "with", "data"]
+
+reservedType :: [Text]
+reservedType = ["Int", "Bool"]
 
 isVarFirst :: Char -> Bool
 isVarFirst c = isLower c || c == '_'
@@ -50,6 +54,11 @@ toBool p = lexeme $ p >>= \case
 comma :: Parser Char
 comma = lexeme (char ',')
 
+varIndex :: Text -> Maybe TypeVar
+varIndex t = case unpack t of
+    [c] | isAsciiLower c -> Just (negate $ fromEnum c)
+    _ -> Nothing
+
 parseILit :: Parser E'
 parseILit = withSpan $ ILit <$> lexeme (decimal <* nextNotVar <?> "integer literal")
 
@@ -60,7 +69,10 @@ parseListLit :: Parser E'
 parseListLit = withSpan $ ListLit <$> (lexeme (char '[') *> sepBy parseExpr comma <* lexeme (char ']'))
 
 varName :: Parser Text
-varName = cons <$> satisfy isVarFirst <*> takeWhileP Nothing isVarLeft
+varName = lexeme $ cons <$> satisfy isVarFirst <*> takeWhileP Nothing isVarLeft
+
+upperName :: Parser Text
+upperName = lexeme $ cons <$> satisfy isUpper <*> takeWhileP Nothing isVarLeft 
 
 parseVar' :: Parser Text
 parseVar' = lexeme $ do
@@ -92,7 +104,7 @@ parseUnary = withSpan $ do
                 _      -> return $ BOpr (OArith OpSub) (ILit 0) e
 
 parseAtom :: Parser E'
-parseAtom = parseILit <|> parseBLit <|> parseVar <|> parseListLit <|> parseParen
+parseAtom = parseILit <|> parseBLit <|> parseVar <|> parseCtorExpr <|> parseListLit <|> parseParen
 
 parseLet :: Parser E'
 parseLet = withSpan $ Let 
@@ -133,10 +145,91 @@ parseLambda = withSpan $ do
 parseApp :: Parser E'
 parseApp = withSpan $ foldl App <$> parseAtom <*> many parseAtom
 
-parseExpr :: Parser E'
-parseExpr = parseIf <|> parseLet <|> parseLambda <|> parseMatch <|> parseCons
+parseTypeAtom :: [(Text, TypeVar)] -> Parser T'
+parseTypeAtom vars = parseTypeParen vars <|> parseTypeList vars <|> parseTypeName vars
 
--- parseCons = parseOpr 0 (':' parseCons)
+parseTypeName :: [(Text, TypeVar)] -> Parser T'
+parseTypeName vars = do
+    n <- upperName <|> varName
+    case n of
+        "Int" -> return TInt
+        "Bool" -> return TBool
+        _ -> case (lookup n vars, varIndex n) of
+            (Just i, _) -> return $ TVar i
+            (Nothing, Just i) -> return $ TVar i
+            _ -> return (TCon n [])
+
+parseTypeParen :: [(Text, TypeVar)] -> Parser T'
+parseTypeParen vars = do
+    _ <- lexeme (char '(') 
+    ts <- sepBy1 (parseTypeWith vars) comma
+    _ <- lexeme (char ')')
+    return $ case ts of
+        [t] -> t
+        _ -> TTuple ts
+
+parseTypeList :: [(Text, TypeVar)] -> Parser T'
+parseTypeList vars = do
+    _ <- lexeme (char '[')
+    t <- parseTypeWith vars 
+    _ <- lexeme (char ']')
+    return $ TList t
+
+parseTypeWith :: [(Text, TypeVar)] -> Parser T'
+parseTypeWith vars = do
+    ts <- sepBy1 (parseTypeApp vars) (lexeme (string "->" <?> "?"))
+    return $ case ts of
+        [t] -> t
+        _ -> foldr1 TFunc ts
+
+parseType :: Parser T'
+parseType = parseTypeWith []
+
+parseTypeApp :: [(Text, TypeVar)] -> Parser T'
+parseTypeApp vars = do
+    h <- parseTypeAtom vars
+    rest <- many (parseTypeAtom vars)
+    case (h, rest) of
+        (TCon n as, rs) -> return (TCon n (as ++ rs))
+        (_, []) -> return h
+        _ -> fail "type application on a non-type-constructor"
+
+parseAnn :: Parser E'
+parseAnn = do
+    e <- parseCons
+    m <- optional (try (lexeme (string "::") *> parseType))
+    return $ case m of
+        Nothing -> e
+        Just t -> AnnT e t
+
+parseData :: Parser DataDecl
+parseData = do
+    _ <- symbol "data"
+    n <- upperName
+    when (n `elem` reservedType) $
+        fail $ unpack $ n <> " is a built in type name and cannot be redeclared."
+    ps <- many varName
+    case [v | (i, v) <- zip [0..] ps, v `elem` drop (i + 1) ps] of
+        (v: _) -> fail $ unpack $ "duplicate type parameter " <> v <> " in data " <> n <> "."
+        _ -> return ()
+    let vars = zip ps [0..]
+    _ <- lexeme (char '=' <?> "=")
+    cs <- sepBy1 (parseCtorDecl vars) (lexeme (char '|' <?> "|"))
+    case [(c, i) | (c, args) <- cs, i <- concatMap strayTvs args] of
+        [] -> return ()
+        ((c, i): _) -> fail $ unpack (T.unwords
+            ["constructor", c, "uses type variable", pack [chr (negate i)], "which is not a parameter of", n]
+            <> ".")
+    return $ DataDecl n ps cs
+
+parseCtorDecl :: [(Text, TypeVar)] -> Parser (Text, [T'])
+parseCtorDecl vars = (,) <$> upperName <*> many (parseTypeAtom vars)
+
+parseExpr :: Parser E'
+parseExpr = parseIf <|> parseLet <|> parseLambda <|> parseMatch <|> parseAnn <|> parseCons
+
+parseCtorExpr :: Parser E'
+parseCtorExpr = withSpan (try (Var <$> upperName) <?> "constructor")
 
 parseDef :: Parser Decl
 parseDef = do
@@ -149,7 +242,7 @@ parseDef = do
 parseProg :: Parser [(Int, Statement)]
 parseProg = sc *> many 
     (   ((,) . unPos . sourceLine <$> getSourcePos)
-    <*> (StmtDef <$> parseDef <|> StmtExpr <$> parseExpr) 
+    <*> (StmtDef <$> parseDef <|> StmtData <$> parseData <|> StmtExpr <$> parseExpr) 
     <*  sc)
     where
         sc :: Parser ()
@@ -172,6 +265,16 @@ withSpan p = do
     end   <- getSourcePos
     return $ At (Span start end) expr
 
+strayTvs :: T' -> [TypeVar]
+strayTvs = \case
+    TInt -> []
+    TBool -> []
+    TVar i -> [i | i < 0]
+    TList t -> strayTvs t
+    TTuple ts -> concatMap strayTvs ts
+    TFunc a b -> strayTvs a <> strayTvs b
+    TCon _ as -> concatMap strayTvs as
+
 ---
 
 colonTok :: Parser Char
@@ -184,7 +287,7 @@ parsePat = do
     return $ case m of Nothing -> h; Just t -> PCons h t
 
 parsePatAtom :: Parser P'
-parsePatAtom = parsePatParen <|> parsePatNil <|> parsePatVar <|> parsePatBool <|> parsePatInt
+parsePatAtom = parsePatParen <|> parsePatNil <|> parsePatCtor <|> parsePatVar <|> parsePatBool <|> parsePatInt
 
 parsePatParen :: Parser P'
 parsePatParen = do
@@ -225,3 +328,7 @@ parseCons = withSpan $ do
     return $ case m of
         Nothing -> h
         Just t  -> App (App (Var "#cons") h) t
+
+parsePatCtor :: Parser P'
+parsePatCtor = PCtor <$> upperName <*> many parsePatAtom
+

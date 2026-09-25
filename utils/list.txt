@@ -2,6 +2,7 @@ def headInt l = match l with [] -> 0 | x: xs -> x
 def tail l = match l with [] -> [] | x: xs -> xs
 
 def null l = match l with [] -> true | x: xs -> false
+def isSingleton l = match l with x: [] -> true | _ -> false
 
 def map f l = match l with [] -> [] | x: xs -> f x : map f xs
 def foldr f z l = match l with [] -> z | x: xs -> f x (foldr f z xs)
@@ -15,3 +16,13 @@ def zip xs ys = match (xs, ys) with ([], _) -> [] | (_, []) -> [] | (x: xr, y: y
 def unzipx ps = match ps with [] -> [] | (x, _): rest -> x: unzipx rest
 def unzipy ps = match ps with [] -> [] | (_, y): rest -> y: unzipy rest
 def unzip ps = (unzipx ps, unzipy ps)
+
+def snoc x xs = match xs with [] -> [x] | x': rest -> x': (snoc x rest)
+
+def _find n target l = match l with [] -> -1 | x: xs -> (if x == target then n else _find (n + 1) target xs)
+def find = _find 0
+
+def index n l = match l with [] -> [] | x: xs -> (if n == 0 then [x] else index (n - 1) xs)
+
+def range2 m n = if m >= n then [] else m: range2 (m + 1) n
+def range = range2 0

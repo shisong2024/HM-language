@@ -17,6 +17,7 @@ data P'
     | PNil
     | PCons P' P'
     | PTuple [P']
+    | PCtor Text [P']
     deriving (Show, Eq)
 
 data E'
@@ -31,6 +32,7 @@ data E'
     | Lambda Text E'
     | App E' E'
     | Match E' [(P', E')]
+    | AnnT E' T'
     | At Span E'
     deriving (Show, Eq)
 
@@ -49,6 +51,7 @@ data V'
     | VTuple [V']
     | VClosure Text E' Env
     | VPrim Text Int [V']
+    | VCtor Text Int [V']
     deriving (Show, Eq)
 
 data EvalError
@@ -73,7 +76,8 @@ data T'
     | TVar TypeVar 
     | TList T'
     | TTuple [T']
-    | TFunc T' T' 
+    | TFunc T' T'
+    | TCon Text [T'] 
     deriving (Show, Eq)
 
 data StmtTy = TyDef Text S' | TyExpr (Either (Located TypeError) T') deriving (Show, Eq)
@@ -87,6 +91,12 @@ data TypeError
     | DuplicateDef Text
     | DuplicatePatVar Text
     | NonExhaustivePat T'
+    | UnknownCtor Text
+    | CtorArityMisMatch Text Int Int
+    | DuplicateCtor Text
+    | DuplicateData Text
+    | UnknownTypeCtor Text
+    | TypeCtorArityMisMatch Text Int Int
     | OccurCheck
     deriving (Show, Eq)
 
@@ -98,16 +108,34 @@ type Parser a = Parsec Void Text a
 data S' = Forall (Set TypeVar) T' deriving (Show, Eq)
 
 data Decl = Def Text [Text] E' deriving (Show, Eq)
-data Statement = StmtDef Decl | StmtExpr E' deriving (Show, Eq)
+data Statement = StmtDef Decl | StmtExpr E' | StmtData DataDecl deriving (Show, Eq)
 type Program = [Statement]
 type Binding = (Text, E')
 type BatchName = Text
 
+data DataDecl = DataDecl
+    { dName   :: Text
+    , dParams :: [Text]
+    , dCtors  :: [(Text, [T'])]
+    } deriving (Show, Eq)
+
 data Session = Session
-    { sTEnv :: TEnv
-    , sEnv  :: Env
-    , sNext :: Counter
+    { sTEnv  :: TEnv
+    , sEnv   :: Env
+    , sNext  :: Counter
     , sBatch :: BatchName
+    , sDEnv  :: DEnv
+    } deriving (Show, Eq)
+
+data CtorInfo = CtorInfo
+    { ciTvs  :: Set TypeVar
+    , ciRes  :: T'
+    , ciArgs :: [T']
+    } deriving (Show, Eq)
+
+data DEnv = DEnv
+    { denvCtors :: Map Text CtorInfo
+    , denvDatas :: Map Text [Text]
     } deriving (Show, Eq)
 
 opTable :: [(Text, Opr)]

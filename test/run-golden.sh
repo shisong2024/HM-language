@@ -194,7 +194,14 @@ fi
 # REPL：逐行喂管道
 #
 # 这里测的是 app/Main.hs 的接线 —— 会话状态（def 跨行可见）、类型回显、
-# 解析错误不中断、以及 §3 的"计数器跨行单调"（第二行不能又出现 a0）。
+# 解析错误不中断、以及类型变量编号的**显示**。
+#
+# ⚠️ 2026-09-25：原来这里断言的是「第二行不是 a0」（拿显示值当计数器单调性的探针）。
+# 那条已经过时：`prettyS'` / `prettyT'` 现在在**显示层**按首次出现重编号
+# （见 TODO 11 §5），每行都从 a0 起，计数器仍然单调但显示上看不见了。
+# 计数器单调性改在 test/Spec.hs 的「计数器跨行单调」里直接断 prNext —— 那才是
+# 正确的层次（它是 instantiate 不撞号的前提，而撞号的症状是挂死，不是显示错）。
+# 这里改成钉住显示层本身：编号必须从 a0 起，不能把计数器原值（a100+）漏给用户。
 #
 # 曾经有个缺陷：`line <- getLine` 排在 `done <- isEOF` 之前，最后一行被丢掉。
 # 现在的 loop 已经把 isEOF 挪到 getLine 前面，所以这条是正向断言。
@@ -220,7 +227,10 @@ repl_check "REPL 里 0 参 def 也能用"              'def x = 1\nx\n'        '
 repl_check "REPL 的 :t 打印表达式类型"            ':t 1+1\n'              'Type : Int'
 repl_check "REPL 的 :t 认得会话里的 def"          'def f x = x + 1\n:t f\n' 'Int -> Int'
 repl_check "REPL 解析错误不退出、继续下一行"      '(((\n1+1\n'            'Value: 2'
-repl_check "REPL 计数器跨行单调（第二行不是 a0）" 'lambda a -> a\nlambda b -> b\n' 'a1 -> a1'
+repl_check "REPL 类型变量显示从 a0 起编号"        'lambda a -> a\nlambda b -> b\n' 'a0 -> a0'
+# 会话跑很久之后计数器会到 100+，显示层必须把它压回 a0/a1（旧行为会打 a1xx）。
+repl_check "长会话里 :t 仍从 a0 起编号（不泄漏计数器原值）" \
+    ':load utils/list.txt\n:t map\n' '((a0 -> a1) -> ([a0] -> [a1]))'
 
 # 2026-09-23 补：def 体调用另一个 def。
 # 之前缺这条，于是 Eval.hs「闭包只捕获本 SCC 的 knot」的缺陷没被发现 ——

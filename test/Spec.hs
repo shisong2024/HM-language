@@ -15,9 +15,9 @@ module Main where
 
 import Interp.Types
 import Interp.Parser (run, runProg)
-import Interp.TypeCheck (typeChecker, programChecker)
-import Interp.Eval (evalwDepth, evalProgram)
-import Interp.Builtin (initSession)
+import Interp.TypeCheck (typeChecker, programChecker, buildDEnv)
+import Interp.Eval (evalwDepth, evalProgram, dataDeclsOf)
+import Interp.Builtin (initSession, emptyDEnv)
 import Interp.Pretty
 
 import Data.Text (Text)
@@ -58,8 +58,9 @@ runSrc src = case run src of
 -- 少了这一层，`cons 1 []` 会以 "cons is an unbound variable" 失败 ——
 -- 那是测试环境比真实环境（app/Main.hs 也是从 initSession 起）少东西，
 -- 不是被测代码的问题。
+-- 单表达式走不到 data 声明，所以 DEnv 一律取空的那个 —— 和 initSession 的 sDEnv 一致。
 tcRun :: E' -> Either (Located TypeError) T'
-tcRun ast = fmap snd (fst (runState (runExceptT (typeChecker (sTEnv initSession) ast)) (sNext initSession)))
+tcRun ast = fmap snd (fst (runState (runExceptT (runReaderT (typeChecker (sTEnv initSession) ast) (sDEnv initSession))) (sNext initSession)))
 
 -- 走 evalwDepth 而不是裸 eval：加深度守卫时 eval 的签名会多出一个
 -- MonadState Depth，裸 eval 那行就编不过了 —— 而 evalwDepth 两种签名下都在。
@@ -84,13 +85,20 @@ data ProgRes = ProgRes
     { prTEnv :: TEnv
     , prEnv  :: Env
     , prNext :: Counter
+    , prDEnv :: DEnv      -- ^ data 声明累积出来的构造子/类型环境，跨批保留
     , prTys  :: M.Map Int StmtTy
     , prVals :: M.Map Int (Either (Located EvalError) V')
     } deriving (Show)
 
 -- | 空会话 = 只有内置函数的起点，和 app/Main.hs 用 initSession 起的会话一致。
 emptyProg :: ProgRes
-emptyProg = ProgRes (sTEnv initSession) (sEnv initSession) (sNext initSession) M.empty M.empty
+emptyProg = ProgRes (sTEnv initSession) (sEnv initSession) (sNext initSession) (sDEnv initSession) M.empty M.empty
+
+-- | 两批 data 声明合并 —— app/Main.hs 里叫 unionDEnv，这边只需要同样的语义：
+--   新声明赢。buildDEnv 也在 Main 里被调过一次，但 programChecker 内部还会
+--   自己从本批的 dataDeclsOf 再建一份，这里补的是"上一批"那一半。
+unionDEnv :: DEnv -> DEnv -> DEnv
+unionDEnv a b = DEnv (M.union (denvCtors a) (denvCtors b)) (M.union (denvDatas a) (denvDatas b))
 
 -- | 跑一段源码，返回新的会话。任一步失败就 Left（带上渲染好的消息）。
 --
@@ -101,7 +109,10 @@ progRun s src = case runProg src of
     Left perr -> Left ("Parse error: " <> perr)
     Right lprs ->
         let prs = map snd lprs
-            (tcRes, n') = runState (runExceptT (programChecker (prTEnv s) prs)) (prNext s)
+            -- 本批的 data 声明 ＋ 之前各批留下的（REPL 逐行提交时靠这个把
+            -- data Maybe 传给下一行的构造子模式），和 app/Main.hs 的 execBatch 同构。
+            denv = unionDEnv (buildDEnv (dataDeclsOf prs)) (prDEnv s)
+            (tcRes, n') = runState (runExceptT (runReaderT (programChecker (prTEnv s) prs) denv)) (prNext s)
         in case tcRes of
             -- ⚠️ 注意实参顺序：renderLocated 的实现是 (batchName, src)，
             -- 而 prettyTypeErrorWith 的签名却写成 (src, batchName) —— 两者都是 Text，
@@ -117,6 +128,7 @@ progRun s src = case runProg src of
                         { prTEnv = M.union tenv' (prTEnv s)   -- 新定义遮蔽旧定义
                         , prEnv  = env'
                         , prNext = n'
+                        , prDEnv = denv
                         , prTys  = tys
                         , prVals = vals
                         }
@@ -337,7 +349,7 @@ spec = do
     it "两个分支都是函数时，类型统一" $
         runSrc "if true then lambda x -> x else lambda y -> y"
             `shouldSatisfy` \o -> case o of
-                Ok t _ -> t == "(a1 -> a1)"
+                Ok t _ -> t == "(a0 -> a0)"   -- 显示层按首次出现重编号
                 _      -> False
 
   -------------------------------------------------------------------------
@@ -620,7 +632,7 @@ spec = do
             [ "def tl2 l = match l with [] -> [] | (y: xs) -> xs"
             , "tl2 [1,2]"
             , "tl2 [true]" ]
-        stmtType 0 (at 0 ss) `shouldBe` "Forall a2. ([a2] -> [a2])"
+        stmtType 0 (at 0 ss) `shouldBe` "Forall a0. ([a0] -> [a0])"
         stmtType 0 (at 1 ss) `shouldBe` "[Int]"
         stmtType 0 (at 2 ss) `shouldBe` "[Bool]"
 
@@ -666,9 +678,10 @@ spec = do
 
     it "带参 def 的类型是泛化后的 scheme，不是实例化的 T'" $ do
         ss <- okSteps ["def id x = x"]
-        -- a1 而不是 a0：sccChecker 先给 def 自己 fresh 一个（a0），
-        -- 再给 lambda 的参数 fresh（a1），泛化时 a0 被消掉。
-        stmtType 0 (at 0 ss) `shouldBe` "Forall a1. (a1 -> a1)"
+        -- 编号由显示层（prettyS'''）按首次出现重排，所以永远是 a0；
+        -- 计数器本身仍是会话全局单调的 —— 真正的单调性断言在下面的
+        -- 「计数器跨行单调」里（那一条断的是 prNext，与显示无关）。
+        stmtType 0 (at 0 ss) `shouldBe` "Forall a0. (a0 -> a0)"
 
     it "带参 def 能应用" $ do
         ss <- okSteps ["def f x = x + 1", "f 10"]
@@ -741,7 +754,8 @@ spec = do
     it "计数器跨行单调：第二行的类型变量编号不回到 0" $ do
         ss1 <- okSteps ["lambda a -> a"]
         ss2 <- okSteps ["lambda a -> a", "lambda b -> b"]
-        stmtType 0 (at 1 ss2) `shouldBe` "(a1 -> a1)"
+        -- 显示是 a0（每行独立重编号）；真正的"跨行单调"看 prNext。
+        stmtType 0 (at 1 ss2) `shouldBe` "(a0 -> a0)"
         prNext (at 1 ss2) `shouldSatisfy` (> prNext (at 0 ss1))
 
     it "一行里只要有类型错误，整行不提交（调用方保留旧会话）" $ do
@@ -756,6 +770,101 @@ spec = do
     it "def 绑定的语法是 =，lambda 参数用 ->（两者不一致，见报告）" $ do
         progRun emptyProg "def f x = x + 1"  `shouldSatisfy` isRight
         progRun emptyProg "def f x -> x + 1" `shouldSatisfy` isLeft
+
+  -------------------------------------------------------------------------
+  describe "ADT：data / 构造子 / 构造子模式" $ do
+
+    -- 这一组是 TODO 12（ADT 6 阶段）的回归网。写的时候 6 个阶段已经落地，
+    -- 但**带参数**的 data 声明整个解析不出来（parseData 用裸 varName 收参数，
+    -- 不吃尾随空格，于是 `data Maybe a = ...` 在 '=' 前的空格上炸），
+    -- 而且 `a -> b` 这类以小写类型变量结尾的箭头类型也解析不出来
+    -- （parseTypeName 的 varName 分支不吃尾随空格）。两条都是 1 token 的修法：
+    --     ps <- many (lexeme varName)
+    --     n  <- lexeme (upperName <|> varName)
+    -- 修好之前，这一组里的「带参」用例会红 —— 那正是它们的用途。
+
+    it "零参 data：构造子是值，且类型就是 data 名" $ do
+        ss <- okSteps ["data Color = Red | Green", "Red"]
+        stmtType 0 (at 1 ss) `shouldBe` "Color"
+        stmtVal  0 (at 1 ss) `shouldBe` "Red"
+
+    it "带参 data 能声明（当前红：parseData 的 varName 不吃空格）" $ do
+        ss <- okSteps ["data Maybe a = None | Some a", "Some 1", "None"]
+        stmtType 0 (at 1 ss) `shouldBe` "Maybe Int"
+        stmtVal  0 (at 1 ss) `shouldBe` "(Some 1)"
+
+    it "构造子模式：match 能匹配构造子" $ do
+        ss <- okSteps
+            [ "data Color = Red | Green"
+            , "def f c = match c with Red -> 1 | Green -> 2"
+            , "f Green" ]
+        stmtType 0 (at 1 ss) `shouldBe` "(Color -> Int)"
+        stmtVal  0 (at 2 ss) `shouldBe` "2"
+
+    it "ADT 让多态 head 第一次写得出来（这是整件事的收益）" $ do
+        ss <- okSteps
+            [ "data Maybe a = None | Some a"
+            , "def head l = match l with [] -> None | x: xs -> Some x"
+            , "head [1]" ]
+        stmtType 0 (at 1 ss) `shouldBe` "Forall a0. ([a0] -> Maybe a0)"
+        stmtType 0 (at 2 ss) `shouldBe` "Maybe Int"
+
+    it "构造子部分应用：还差参数时不报错，饱和后就是值" $ do
+        ss <- okSteps ["data Pair a b = MkPair a b", "MkPair 1"]
+        stmtType 0 (at 1 ss) `shouldBe` "(a0 -> Pair Int a0)"
+
+    it "构造子模式数量不符要报错" $
+        -- 必须写在同一个 progRun 里：跨行的 ctor 靠 prDEnv 传（见上面的 unionDEnv）
+        progSteps ["data Maybe a = None | Some a\ndef bad m = match m with Some x y -> x"]
+            `shouldSatisfy` \r -> case r of
+                Left e  -> "expects 1 argument" `T.isInfixOf` e
+                Right _ -> False
+
+    it "未声明的构造子在模式里要报错" $ do
+        progSteps ["data Color = Red\ndef f c = match c with Blue -> 1"]
+            `shouldSatisfy` \r -> case r of
+                Left e  -> "Unknown constructor" `T.isInfixOf` e
+                Right _ -> False
+
+    it "穷尽性：漏了构造子要报错" $ do
+        progSteps ["data Color = Red | Green\ndef f c = match c with Red -> 1"]
+            `shouldSatisfy` \r -> case r of
+                Left e  -> "not exhaustive" `T.isInfixOf` e
+                Right _ -> False
+
+    it "重复的 data / 构造子名要报错" $ do
+        progSteps ["data Color = Red | Green\ndata Color = Blue"]
+            `shouldSatisfy` \r -> case r of
+                Left e  -> "Duplicate data" `T.isInfixOf` e
+                Right _ -> False
+        progSteps ["data Color = Red\ndata Other = Red"]
+            `shouldSatisfy` \r -> case r of
+                Left e  -> "Duplicate constructor" `T.isInfixOf` e
+                Right _ -> False
+
+    -- occursIn 漏 TCon 分支的话（见 TODO 12 §5.2），这里不是报错而是**挂死**：
+    -- apply 已经是递归的，循环替换会让求值转不出来。所以这条用例必须带超时跑，
+    -- 挂死 = 红。
+    it "occurs check：Node l l l 要报 Occurs check failed，不能挂死" $ do
+        progSteps
+            [ "data Tree a = Leaf | Node (Tree a) a (Tree a)\n\
+              \def f x = match x with Leaf -> Leaf | Node l a r -> Node l l l" ]
+            `shouldSatisfy` \r -> case r of
+                Left e  -> "Occurs check" `T.isInfixOf` e
+                Right _ -> False
+
+    it "标注 e :: T 的变量是新鲜的：不泄漏到外面" $ do
+        ss <- okSteps ["def f x = x :: a", "f 1", "f true"]
+        stmtType 0 (at 0 ss) `shouldBe` "Forall a0. (a0 -> a0)"
+        stmtType 0 (at 1 ss) `shouldBe` "Int"
+        stmtType 0 (at 2 ss) `shouldBe` "Bool"
+
+    it "标注写出了具体类型：对不上要报错" $ do
+        progRun emptyProg "def f x = x :: Int" `shouldSatisfy` isRight
+        progRun emptyProg "1 :: Int"           `shouldSatisfy` isRight
+        runSrc "1 :: Bool" `shouldSatisfy` \o -> case o of
+            TypeErr _ -> True
+            _         -> False
 
   -------------------------------------------------------------------------
   describe "错误位置渲染（Span）" $ do

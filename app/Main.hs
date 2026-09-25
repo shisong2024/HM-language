@@ -54,7 +54,7 @@ runFile :: FilePath -> IO ()
 runFile path = do
     r <- readFileSafe path
     case r of
-        Left msg -> TIO.putStrLn ("Cannot read " <> T.pack path <> ": " <> msg)
+        Left msg -> TIO.putStrLn ("Cannot read " <> T.pack path <> ": " <> msg) >> exitWith (ExitFailure 1)
         Right content -> case runProg content of
             Left perr -> TIO.putStrLn ("Parse Error:\n" <> perr) >> exitWith (ExitFailure 1)
             Right prs -> do
@@ -64,7 +64,8 @@ runFile path = do
 execBatch :: Session -> Text -> [(Int, Statement)] -> [(Int, Text)] -> IO (Session, Bool)
 execBatch ss src lprs perr = do
     let prs = map snd lprs
-        (tsRes, n) = runState (runExceptT (programChecker (sTEnv ss) prs)) (sNext ss)
+        denv = unionDEnv (buildDEnv (dataDeclsOf prs)) (sDEnv ss)
+        (tsRes, n) = runState (runExceptT (runReaderT (programChecker (sTEnv ss) prs) denv)) (sNext ss)
     case tsRes of
         Left terr -> do
             TIO.putStrLn (T.pack (show (errLine terr)) <> ":")
@@ -78,16 +79,23 @@ execBatch ss src lprs perr = do
                     return (ss { sNext = n }, False)
                 Right (env', vals) -> do
                     printBatch (sBatch ss) src lprs (relabel lprs tps) (relabel lprs vals) perr
-                    let ok = not (any isLeft (M.elems vals))
+                    let newCs = concatMap (map fst . dCtors) (dataDeclsOf prs)
+                        stale = [c | d <- dataDeclsOf prs
+                                   , Just cs <- [M.lookup (dName d) (denvDatas (sDEnv ss))]
+                                   , c <- cs, c `notElem` newCs
+                                ]
+                        ok = not (any isLeft (M.elems vals))
                            && not (any (\case TyExpr (Left _) -> True; _ -> False) (M.elems tps))
-                    return (ss { sTEnv = M.union nTEnv (sTEnv ss)
-                               , sEnv  = env', sNext = n }, ok)
+                    return (ss { sTEnv = foldr M.delete (M.union nTEnv (sTEnv ss)) stale
+                               , sEnv  = foldr M.delete env' stale
+                               , sNext = n, sDEnv = denv }, ok)
 
 doTypeOf :: Session -> Text -> IO Session
 doTypeOf s e = case runProg e of
     Left perr -> TIO.putStrLn ("Parse Error:\n" <> perr) >> return s
     Right lprs -> do
-        let (tcRes, n) = runState (runExceptT (programChecker (sTEnv s) (map snd lprs))) (sNext s)
+        let denv = unionDEnv (buildDEnv (dataDeclsOf (map snd lprs))) (sDEnv s)
+            (tcRes, n) = runState (runExceptT (runReaderT (programChecker (sTEnv s) (map snd lprs)) denv)) (sNext s)
         case tcRes of
             Left terr -> TIO.putStrLn $ "Type Error:\n" <> prettyTypeErrorWith (sBatch s) e terr
             Right (_, _, tps) -> forM_ (M.toAscList tps) $ \(_, info) -> case info of
@@ -118,3 +126,9 @@ help = mapM_ TIO.putStrLn
     , "  :load <file>  load file"
     , "  :q            exit"
     ]
+
+unionDEnv :: DEnv -> DEnv -> DEnv
+unionDEnv a b = 
+    let redef = M.keys (M.intersection (denvDatas a) (denvDatas b))
+        stale = [c | n <- redef, Just cs <- [M.lookup n (denvDatas b)], c <- cs] in
+    DEnv (M.union (denvCtors a) (foldr M.delete (denvCtors b) stale)) (M.union (denvDatas a) (denvDatas b))

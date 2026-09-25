@@ -82,13 +82,20 @@ eval = \case
                 let args' = args ++ [v2]
                 if length args' < ar then return $ VPrim n ar args'
                 else applyPrim n args'
+            VCtor n ar args -> do
+                let args' = args ++ [v2]
+                if length args' <= ar then return $ VCtor n ar args'
+                else throwError $ Located Nothing $ IsNotFunction v1
             _ -> throwError (Located Nothing $ IsNotFunction v1)
     
     Match e pes -> eval e >>= \v -> matchArms v pes
 
+    AnnT e _ -> eval e
+
 evalProgram :: (MonadState Depth m, MonadReader Env m, MonadError (Located EvalError) m) => Program -> m (Env, M.Map Int (Either (Located EvalError) V'))
 evalProgram prs = ask >>= \env -> do
-    env1 <- foldM step env (stronglyConnComp (deps prs))
+    let env0 = M.union (ctorValues (dataDeclsOf prs)) env
+    env1 <- foldM step env0 (stronglyConnComp (deps prs))
     vals <- forM [(i, e) | (i, StmtExpr e) <- zip [0..] prs] $ \(i, e) -> (i, ) <$> tryEnv (local (const env1) (evalwDepth e))
     return (env1, M.fromList vals)
     where
@@ -120,6 +127,9 @@ evalProgram prs = ask >>= \env -> do
             Just (v, b) -> VClosure v b cap
             Nothing     -> error "unexpected."
 
+        ctorValues :: [DataDecl] -> Env
+        ctorValues ds = M.fromList [(c, VCtor c (length args) []) | d <- ds, (c, args) <- dCtors d]
+
 calArithOpr :: (Integral a, Num a) => LitOpr -> (a -> a -> a)
 calArithOpr = \case
     OpAdd -> (+)
@@ -144,6 +154,7 @@ addSpan _ l@(Located (Just _) _) = l
 stripAt :: E' -> E'
 stripAt = \case
     At _ e -> stripAt e
+    AnnT e _ -> stripAt e
     e      -> e
 
 maxDepth :: Depth
@@ -162,6 +173,7 @@ freeVars = \case
     BOpr _ e1 e2 -> freeVars e1 `S.union` freeVars e2
     App f a -> freeVars f `S.union` freeVars a
     Match e pes -> S.unions (freeVars e: [freeVars b `S.difference` patVars p | (p, b) <- pes])
+    AnnT e _ -> freeVars e
     At _ e -> freeVars e
 
 deps :: Program -> [(Decl, Text, [Text])]
@@ -190,6 +202,7 @@ patVarsList = \case
     PVar x -> [x]
     PCons p q -> patVarsList p ++ patVarsList q
     PTuple ps -> concatMap patVarsList ps
+    PCtor _ ps -> concatMap patVarsList ps
     _ -> []
 
 matchP :: (P', V') -> Maybe [(Text, V')]
@@ -205,6 +218,9 @@ matchP = \case
 
     (PTuple ps, VTuple vs) | length ps == length vs -> 
         concat <$> mapM matchP (zip ps vs)
+
+    (PCtor n ps, VCtor m _ qs) | n == m && length ps == length qs -> 
+        concat <$> mapM matchP (zip ps qs)
     
     _ -> Nothing
 
@@ -227,9 +243,14 @@ eqV = \case
     (VBool a, VBool b) -> Just (a == b)
     (VList a, VList b) -> if length a == length b then and <$> mapM eqV (zip a b) else Just False
     (VTuple a, VTuple b) -> if length a == length b then and <$> mapM eqV (zip a b) else Just False
+    (VCtor n _ a, VCtor m _ b) -> 
+        if n == m && length a == length b then and <$> mapM eqV (zip a b) else Just False
     _ -> Nothing
 
 eqOp :: MonadError (Located EvalError) m => V' -> V' -> Bool -> m V'
 eqOp v1 v2 w = case eqV (v1, v2) of
     Just b -> return $ VBool (if w then b else not b)
     Nothing -> throwError $ Located Nothing $ OprArgIsNotComparable v1 v2
+
+dataDeclsOf :: Program -> [DataDecl]
+dataDeclsOf prs = [d | StmtData d <- prs]

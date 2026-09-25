@@ -3,7 +3,7 @@ name:               interp
 version:            0.1.0.0
 
 common warnings
-    ghc-options: -Wall -Wcompat
+    ghc-options: -Wall -Wcompat -Werror=incomplete-patterns
 
 library
     import:           warnings

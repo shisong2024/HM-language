@@ -18,7 +18,7 @@ Value: -5
 Value: 6
 10: Type : Int
 Value: -5
-11: Type : (a39 -> a39)
+11: Type : (a0 -> a0)
 Value: <closure x :: ...>
 12: Type : Int
 Eval Error:
@@ -33,29 +33,29 @@ Value: 9223372036854775808
 Value: 99999999999999999999999
 16: def x : Int
 17: Type : Bool
-Value: True
+Value: true
 18: Type : Bool
-Value: True
+Value: true
 19: Type : Bool
-Value: False
+Value: false
 20: Type : Bool
-Value: True
+Value: true
 21: Type : Bool
-Value: False
+Value: false
 22: Type : Bool
-Value: False
+Value: false
 23: Type : Bool
-Value: True
+Value: true
 24: Type : Bool
-Value: True
+Value: true
 25: Type : Bool
-Value: False
+Value: false
 26: Type : Bool
-Value: True
+Value: true
 27: Type : Bool
-Value: True
+Value: true
 28: Type : Bool
-Value: False
+Value: false
 29: Type : Int
 Value: 1
 30: Type : Int
@@ -82,14 +82,14 @@ Value: 11
 Value: 5
 39: Type : Int
 Value: 1
-40: Type : (a64 -> a64)
+40: Type : (a0 -> a0)
 Value: <closure x :: ...>
 41: Type : Int
 Value: 1
 42: Type : Int
 Value: 120
 43: Type : Bool
-Value: True
+Value: true
 44: Type : Int
 Value: 2
 45: Type Error:
@@ -99,15 +99,13 @@ odd is an unbound variable.
 46: Type Error:
 46 | 1 2
    | ^
-Type mismatch: expected (Int -> a78) but got Int.
+Type mismatch: expected (Int -> a0) but got Int.
 47: Type Error:
 47 | (lambda x -> x) 1 2
    | ^
-Type mismatch: expected (Int -> a81) but got Int.
-48: Type Error:
-48 | true == false
-   | ^
-Type mismatch: expected Int but got Bool.
+Type mismatch: expected (Int -> a0) but got Int.
+48: Type : Bool
+Value: false
 49: Type Error:
 49 | 1 + true
    | ^
@@ -119,7 +117,7 @@ Type mismatch: expected Bool but got Int.
 51: Type Error:
 51 | 1 + (lambda x -> x)
    | ^
-Type mismatch: expected Int but got (a82 -> a82).
+Type mismatch: expected Int but got (a0 -> a0).
 52: def inc : (Int -> Int)
 53: def twice_inc : (Int -> Int)
 54: Type : Int
@@ -147,14 +145,14 @@ Value: 0
 Value: 1
 69: Type : [Int]
 Value: [1, 2, 3]
-70: Type : [a96]
+70: Type : [a0]
 Value: []
 71: Type : [[Int]]
 Value: [[1], [2, 3]]
 72: Type : (Int, Bool)
-Value: (1, True)
+Value: (1, true)
 73: Type : (Int, (Int, Bool))
-Value: (1, (2, True))
+Value: (1, (2, true))
 74: Type Error:
 74 | [1,true]
    | ^
