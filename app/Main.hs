@@ -17,7 +17,7 @@ import Control.Monad.State (runState)
 import System.Environment (getArgs)
 import Data.Text (Text)
 import System.Exit (exitWith, ExitCode (ExitFailure))
-import Control.Monad (forM_, unless)
+import Control.Monad (forM_, unless, when)
 import qualified Data.Map as M
 import Data.Either (isLeft)
 import Control.Exception (try, IOException)
@@ -29,7 +29,7 @@ main = do
         [path] -> runFile path
         []     -> do
             TIO.putStrLn "HM interpreter. Type :q to quit."
-            loop initSession
+            loop =<< withPrelude initSession
         _      -> TIO.putStrLn "Usage: interp [file]"
 
 loop :: Session -> IO ()
@@ -48,7 +48,7 @@ loop s = do
             | T.isPrefixOf ":" src -> TIO.putStrLn ("Unknown command: " <> src <> ".") >> loop s
             | otherwise -> case runProg src of
                 Left perr -> TIO.putStrLn ("Parse Error:\n" <> perr) >> loop s
-                Right lprs -> loop . fst =<< execBatch s src lprs []
+                Right lprs -> loop . fst =<< execBatch True s src lprs []
 
 runFile :: FilePath -> IO ()
 runFile path = do
@@ -58,11 +58,11 @@ runFile path = do
         Right content -> case runProg content of
             Left perr -> TIO.putStrLn ("Parse Error:\n" <> perr) >> exitWith (ExitFailure 1)
             Right prs -> do
-                (_, ok) <- execBatch initSession content prs []
+                (_, ok) <- execBatch True initSession content prs []
                 unless ok $ exitWith (ExitFailure 1)
 
-execBatch :: Session -> Text -> [(Int, Statement)] -> [(Int, Text)] -> IO (Session, Bool)
-execBatch ss src lprs perr = do
+execBatch :: Bool -> Session -> Text -> [(Int, Statement)] -> [(Int, Text)] -> IO (Session, Bool)
+execBatch loud ss src lprs perr = do
     let prs = map snd lprs
         denv = unionDEnv (buildDEnv (dataDeclsOf prs)) (sDEnv ss)
         (tsRes, n) = runState (runExceptT (runReaderT (programChecker (sTEnv ss) prs) denv)) (sNext ss)
@@ -78,7 +78,7 @@ execBatch ss src lprs perr = do
                     TIO.putStrLn ("Eval Error:\n" <> prettyEvalErrorWith (sBatch ss) src eerr)
                     return (ss { sNext = n }, False)
                 Right (env', vals) -> do
-                    printBatch (sBatch ss) src lprs (relabel lprs tps) (relabel lprs vals) perr
+                    when loud $ printBatch (sBatch ss) src lprs (relabel lprs tps) (relabel lprs vals) perr
                     let newCs = concatMap (map fst . dCtors) (dataDeclsOf prs)
                         stale = [c | d <- dataDeclsOf prs
                                    , Just cs <- [M.lookup (dName d) (denvDatas (sDEnv ss))]
@@ -111,7 +111,10 @@ loadFile s path = do
         Left msg -> TIO.putStrLn ("Cannot read " <> T.pack path <> ": " <> msg) >> return s
         Right content -> case runProg content of
             Left perr -> TIO.putStrLn ("Parse Error:\n" <> perr) >> return s
-            Right lprs -> fst <$> execBatch s content lprs []
+            Right lprs -> do 
+                (s', ok) <- execBatch False s content lprs []
+                TIO.putStrLn $ (if ok then "Loaded " else "Failed: ") <> T.pack path <> " (" <> T.pack (show (length lprs)) <> " statement(s))."
+                return s'
 
 readFileSafe :: FilePath -> IO (Either Text Text)
 readFileSafe p = do
@@ -132,3 +135,13 @@ unionDEnv a b =
     let redef = M.keys (M.intersection (denvDatas a) (denvDatas b))
         stale = [c | n <- redef, Just cs <- [M.lookup n (denvDatas b)], c <- cs] in
     DEnv (M.union (denvCtors a) (foldr M.delete (denvCtors b) stale)) (M.union (denvDatas a) (denvDatas b))
+
+preludePath :: FilePath
+preludePath = "utils/prelude.txt"
+
+withPrelude :: Session -> IO Session
+withPrelude s = do
+    r <- readFileSafe preludePath
+    case r of
+        Left _ -> return s
+        Right _ -> loadFile s preludePath

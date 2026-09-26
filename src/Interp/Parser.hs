@@ -305,7 +305,7 @@ parsePat = do
     return $ case m of Nothing -> h; Just t -> PCons h t
 
 parsePatAtom :: Parser P'
-parsePatAtom = parsePatParen <|> parsePatNil <|> parsePatCtor <|> parsePatVar <|> parsePatBool <|> parsePatInt
+parsePatAtom = parsePatParen <|> parsePatList <|> parsePatCtor <|> parsePatVar <|> parsePatBool <|> parsePatInt
 
 parsePatParen :: Parser P'
 parsePatParen = do
@@ -316,8 +316,8 @@ parsePatParen = do
         [x] -> x
         es  -> PTuple es
 
-parsePatNil :: Parser P'
-parsePatNil = lexeme (char '[') *> lexeme (char ']') $> PNil
+parsePatList :: Parser P'
+parsePatList = foldr PCons PNil <$> (lexeme (char '[') *> sepBy parsePat comma <* lexeme (char ']'))
 
 parsePatVar :: Parser P'
 parsePatVar = parseVar' >>= \n -> return $ if n == "_" then PWild else PVar n
