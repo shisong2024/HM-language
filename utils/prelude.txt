@@ -31,7 +31,7 @@ def odd i = mod i 2 != 0
 def abs n = if n < 0 then -n else n
 
 -- signum :: Int -> Int
-def dignum i = if i < 0 then -1 else if n > 0 then 1 else 0
+def signum i = if i < 0 then -1 else if i > 0 then 1 else 0
 
 -- divmod :: Int -> Int -> (Int, Int)
 def divmod m n = (m / n, mod m n)
@@ -118,7 +118,7 @@ def range' a b = if a >= b then [] else a: range' (a + 1) b
 def range = range' 0
 
 -- length :: [a] -> Int
-def length = match l with [] -> 0 | x: xs -> 1 + length xs
+def length l = match l with [] -> 0 | x: xs -> 1 + length xs
 
 -- concat :: [[a]] -> [a]
 def concat l = foldr append [] l
@@ -160,10 +160,10 @@ def sum l = foldr (lambda a b -> a + b) 0 l
 def id a = a
 
 -- flip :: (a -> b -> c) -> b -> a -> c
-def flip f y x -> f x y
+def flip f y x = f x y
 
 -- compose :: (b -> c) -> (a -> b) -> a -> c
-compose g f x = g (f x)
+def compose g f x = g (f x)
 
 -- curry :: ((a, b) -> c) -> a -> b -> c
 def curry f x y = f (x, y)
@@ -205,5 +205,4 @@ def isLeft e = match e with Left _ -> true | Right _ -> false
 def isRight e = match e with Left _ -> false | Right _ -> true
 
 -- either :: (a -> c) -> (b -> d) -> Either a b -> Either c d
-def either f g e = mathc e with Left x -> f x | Right y -> g y
-
+def either f g e = match e with Left x -> f x | Right y -> g y
