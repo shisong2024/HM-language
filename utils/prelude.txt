@@ -2,6 +2,7 @@
 
 data Maybe a = None | Just a
 data Either a b = Left a | Right b
+data Ordering = LT | EQ | GT
 
 
 -- -- functions of numbers
@@ -206,3 +207,12 @@ def isRight e = match e with Left _ -> false | Right _ -> true
 
 -- either :: (a -> c) -> (b -> d) -> Either a b -> Either c d
 def either f g e = match e with Left x -> f x | Right y -> g y
+
+
+-- -- functions of Ordering
+
+-- cmp :: a -> a -> Ordering
+-- leave for future
+
+-- cmpInt :: Int -> Int -> Ordering
+def cmpInt a b = if a < b then LT else if a > b then GT else EQ

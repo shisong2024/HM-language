@@ -10,6 +10,7 @@ import Interp.Builtin
 
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
+import qualified Data.Map as M
 import Control.Monad.Reader (runReaderT)
 import Control.Monad.Except (runExceptT)
 import System.IO (stdout, hFlush, isEOF)
@@ -17,8 +18,7 @@ import Control.Monad.State (runState)
 import System.Environment (getArgs)
 import Data.Text (Text)
 import System.Exit (exitWith, ExitCode (ExitFailure))
-import Control.Monad (forM_, unless, when)
-import qualified Data.Map as M
+import Control.Monad (forM_, unless, when, foldM)
 import Data.Either (isLeft)
 import Control.Exception (try, IOException)
 
@@ -52,14 +52,8 @@ loop s = do
 
 runFile :: FilePath -> IO ()
 runFile path = do
-    r <- readFileSafe path
-    case r of
-        Left msg -> TIO.putStrLn ("Cannot read " <> T.pack path <> ": " <> msg) >> exitWith (ExitFailure 1)
-        Right content -> case runProg content of
-            Left perr -> TIO.putStrLn ("Parse Error:\n" <> perr) >> exitWith (ExitFailure 1)
-            Right prs -> do
-                (_, ok) <- execBatch True initSession content prs []
-                unless ok $ exitWith (ExitFailure 1)
+    (_, ok) <- loadWithImports [] True initSession path
+    unless ok $ exitWith (ExitFailure 1)
 
 execBatch :: Bool -> Session -> Text -> [(Int, Statement)] -> [(Int, Text)] -> IO (Session, Bool)
 execBatch loud ss src lprs perr = do
@@ -105,16 +99,7 @@ doTypeOf s e = case runProg e of
         return s { sNext = n }
 
 loadFile :: Session -> FilePath -> IO Session
-loadFile s path = do
-    cont <- readFileSafe path
-    case cont of
-        Left msg -> TIO.putStrLn ("Cannot read " <> T.pack path <> ": " <> msg) >> return s
-        Right content -> case runProg content of
-            Left perr -> TIO.putStrLn ("Parse Error:\n" <> perr) >> return s
-            Right lprs -> do 
-                (s', ok) <- execBatch False s content lprs []
-                TIO.putStrLn $ (if ok then "Loaded " else "Failed: ") <> T.pack path <> " (" <> T.pack (show (length lprs)) <> " statement(s))."
-                return s'
+loadFile s path = fst <$> loadWithImports [] False s path
 
 readFileSafe :: FilePath -> IO (Either Text Text)
 readFileSafe p = do
@@ -145,3 +130,41 @@ withPrelude s = do
     case r of
         Left _ -> return s
         Right _ -> loadFile s preludePath
+
+importLines :: Text -> [FilePath]
+importLines t = [T.unpack (T.strip p) | l <- T.lines t, Just p <- [T.stripPrefix "import " (T.stripStart l)]]
+
+blanckImportLines :: Text -> Text
+blanckImportLines = T.unlines . map blanck . T.lines
+    where
+        blanck l = case T.stripPrefix "import " (T.stripStart l) of
+            Just _ -> ""
+            Nothing -> l
+
+dirOf :: FilePath -> FilePath
+dirOf p = let (d, _) = T.breakOnEnd "/" (T.pack p) in if T.null d then "." else T.unpack (T.dropEnd 1 d)
+
+resolve :: FilePath -> FilePath -> FilePath
+resolve dir p
+    | "/" `T.isPrefixOf` T.pack p = p
+    | dir == "." = p
+    | otherwise = dir <> "/" <> p
+
+loadWithImports :: [FilePath] -> Bool -> Session -> FilePath -> IO (Session, Bool)
+loadWithImports seen loud s path = if path `elem` seen then return (s, True) else do
+    r <- readFileSafe path
+    case r of
+        Left msg -> TIO.putStrLn ("Cannot read " <> T.pack path <> " : " <> msg <> ".") >> return (s, False)
+        Right content -> do
+            let dir = dirOf path
+                imps = importLines content
+                body = blanckImportLines content
+            (s1, ok1) <- foldM (\(sa, oka) p -> do
+                (sb, okb) <- loadWithImports (path: seen) loud sa (resolve dir p)
+                return (sb, oka && okb))
+                (s, True) imps
+            case runProg body of
+                Left perr -> TIO.putStrLn ("Parse Error:\n" <> perr) >> return (s1, False)
+                Right lprs -> do
+                    (s2, ok2) <- execBatch loud s1 body lprs []
+                    return (s2, ok2 && ok1)
