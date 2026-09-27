@@ -201,6 +201,12 @@ progParseErr needle src = case runProg src of
     Left e   -> e `shouldSatisfy` T.isInfixOf needle
     Right _  -> expectationFailure "期待 Parse error，实际解析通过了"
 
+-- | 同上的反面：报错里**不许**出现某段文字（专治「误报成 reserved symbol」这类回归）。
+progParseErrNot :: Text -> Text -> Expectation
+progParseErrNot banned src = case runProg src of
+    Left e   -> e `shouldNotSatisfy` T.isInfixOf banned
+    Right _  -> expectationFailure "期待 Parse error，实际解析通过了"
+
 typeErr :: Text -> Expectation
 typeErr src = case runSrc src of
     TypeErr _ -> return ()
@@ -298,41 +304,43 @@ spec = do
   -------------------------------------------------------------------------
   describe "比较运算符" $ do
 
-    it "1 < 2"   $ runSrc "1 < 2"   `shouldBe` Ok "Bool" "True"
-    it "1 <= 2"  $ runSrc "1 <= 2"  `shouldBe` Ok "Bool" "True"
-    it "2 < 2"   $ runSrc "2 < 2"   `shouldBe` Ok "Bool" "False"
-    it "2 <= 2"  $ runSrc "2 <= 2"  `shouldBe` Ok "Bool" "True"
-    it "1 > 2"   $ runSrc "1 > 2"   `shouldBe` Ok "Bool" "False"
-    it "2 > 1"   $ runSrc "2 > 1"   `shouldBe` Ok "Bool" "True"
-    it "1 >= 2"  $ runSrc "1 >= 2"  `shouldBe` Ok "Bool" "False"
-    it "2 >= 2"  $ runSrc "2 >= 2"  `shouldBe` Ok "Bool" "True"
-    it "1 == 2"  $ runSrc "1 == 2"  `shouldBe` Ok "Bool" "False"
-    it "1 != 2"  $ runSrc "1 != 2"  `shouldBe` Ok "Bool" "True"
+    it "1 < 2"   $ runSrc "1 < 2"   `shouldBe` Ok "Bool" "true"
+    it "1 <= 2"  $ runSrc "1 <= 2"  `shouldBe` Ok "Bool" "true"
+    it "2 < 2"   $ runSrc "2 < 2"   `shouldBe` Ok "Bool" "false"
+    it "2 <= 2"  $ runSrc "2 <= 2"  `shouldBe` Ok "Bool" "true"
+    it "1 > 2"   $ runSrc "1 > 2"   `shouldBe` Ok "Bool" "false"
+    it "2 > 1"   $ runSrc "2 > 1"   `shouldBe` Ok "Bool" "true"
+    it "1 >= 2"  $ runSrc "1 >= 2"  `shouldBe` Ok "Bool" "false"
+    it "2 >= 2"  $ runSrc "2 >= 2"  `shouldBe` Ok "Bool" "true"
+    it "1 == 2"  $ runSrc "1 == 2"  `shouldBe` Ok "Bool" "false"
+    it "1 != 2"  $ runSrc "1 != 2"  `shouldBe` Ok "Bool" "true"
     it "比较的结果是 Bool，可以参与运算（经 if）" $
         runSrc "if 1 < 2 then 10 else 20" `shouldBe` Ok "Int" "10"
 
     -- 比较运算符的优先级低于 +-，所以右边整体是一个算术表达式。
     -- （这两条以前是「已知缺陷」，现已修正。）
     it "比较比 +- 松：1 < 2 + 3 解析成 1 < (2 + 3)" $
-        runSrc "1 < 2 + 3" `shouldBe` Ok "Bool" "True"
+        runSrc "1 < 2 + 3" `shouldBe` Ok "Bool" "true"
 
     it "比较比 +- 松：0 == 1 - 1 解析成 0 == (1 - 1)" $
-        runSrc "0 == 1 - 1" `shouldBe` Ok "Bool" "True"
+        runSrc "0 == 1 - 1" `shouldBe` Ok "Bool" "true"
 
     it "但 a + b < c 本来就对，所以旧缺陷很难察觉" $
-        runSrc "1 + 1 == 2" `shouldBe` Ok "Bool" "True"
+        runSrc "1 + 1 == 2" `shouldBe` Ok "Bool" "true"
 
-    it "== 只支持 Int，Bool 之间不能比较" $
-        typeErr "true == false"
+    -- 2026-09-25：== / != 从「两侧无条件钉死 TInt」改成结构化比较，
+    -- 下面两条于是从「已知缺陷」（断言类型错）翻面成正向断言。
+    it "== 是多态的：Bool 之间也能比" $
+        runSrc "true == false" `shouldBe` Ok "Bool" "false"
 
-    it "比较结果不能和 Bool 比较" $
-        typeErr "(1 < 2) == true"
+    it "== 是多态的：比较结果也能再比" $
+        runSrc "(1 < 2) == true" `shouldBe` Ok "Bool" "true"
 
   -------------------------------------------------------------------------
   describe "Bool 与 if" $ do
 
-    it "true"  $ runSrc "true"  `shouldBe` Ok "Bool" "True"
-    it "false" $ runSrc "false" `shouldBe` Ok "Bool" "False"
+    it "true"  $ runSrc "true"  `shouldBe` Ok "Bool" "true"
+    it "false" $ runSrc "false" `shouldBe` Ok "Bool" "false"
 
     it "if 取 then 分支" $
         runSrc "if true then 1 else 2" `shouldBe` Ok "Int" "1"
@@ -422,7 +430,7 @@ spec = do
             `shouldBe` Ok "Int" "2432902008176640000"
 
     it "let 绑定的函数是多态的（对 Bool 也能用）" $
-        runSrc "let id = lambda x -> x in id true" `shouldBe` Ok "Bool" "True"
+        runSrc "let id = lambda x -> x in id true" `shouldBe` Ok "Bool" "true"
 
     it "多态 let 在同一次求值里用两种类型" $
         runSrc "let id = lambda x -> x in if id true then id 5 else 2"
@@ -463,13 +471,13 @@ spec = do
         runSrc "[1,true]" `shouldSatisfy` hasTypeErrText "Type mismatch"
 
     it "元组字面量：类型与渲染" $
-        runSrc "(1,true)" `shouldBe` Ok "(Int, Bool)" "(1, True)"
+        runSrc "(1,true)" `shouldBe` Ok "(Int, Bool)" "(1, true)"
 
     it "嵌套元组" $
-        runSrc "(1,(2,true))" `shouldBe` Ok "(Int, (Int, Bool))" "(1, (2, True))"
+        runSrc "(1,(2,true))" `shouldBe` Ok "(Int, (Int, Bool))" "(1, (2, true))"
 
     it "元组的两个位置各自独立多态" $
-        runSrc "(lambda x -> x) (1,true)" `shouldBe` Ok "(Int, Bool)" "(1, True)"
+        runSrc "(lambda x -> x) (1,true)" `shouldBe` Ok "(Int, Bool)" "(1, true)"
 
     it "元组长度必须一致（if 两侧）" $
         runSrc "if true then (1,2) else (1,2,3)"
@@ -477,7 +485,7 @@ spec = do
 
     it "列表里的元组" $
         runSrc "[(1,true),(2,false)]"
-            `shouldBe` Ok "[(Int, Bool)]" "[(1, True), (2, False)]"
+            `shouldBe` Ok "[(Int, Bool)]" "[(1, true), (2, false)]"
 
     -- 这是 B4 那类「两侧规则不一致」在元组/列表上的同型复查：
     -- 非 lambda 的 let RHS 看不见自己，所以是未绑定，不是 occurs check。
@@ -489,13 +497,19 @@ spec = do
             Ok t _ -> T.isPrefixOf "(a" t      -- (aN -> [aN])，不崩即可
             _      -> False
 
-    -- ⚠️ B12（TODO/08-当前问题.md）：BOpr 把两侧无条件钉死成 TInt，
-    -- 于是列表/元组上的 == / != 是类型错。这是「当前错误行为」，修好后请搬走。
-    it "列表上的 == 用不了（BOpr 钉死 TInt）" $
-        runSrc "[1,2] == [1,2]" `shouldSatisfy` hasTypeErrText "expected Int but got [Int]"
+    -- 2026-09-25 翻面（原 B12 / TODO/08）：BOpr 不再把两侧钉死成 TInt，
+    -- == / != 变成结构化比较 —— 列表、元组、Bool、用户 data 都能比。
+    it "列表上的 == 是结构化比较：相同为 true" $
+        runSrc "[1,2] == [1,2]" `shouldBe` Ok "Bool" "true"
 
-    it "元组上的 == 用不了（BOpr 钉死 TInt）" $
-        runSrc "(1,2) == (1,2)" `shouldSatisfy` hasTypeErrText "expected Int but got (Int, Int)"
+    it "列表上的 == 是结构化比较：元素不同为 false" $
+        runSrc "[1,2] == [1,3]" `shouldBe` Ok "Bool" "false"
+
+    it "元组上的 == 是结构化比较：相同为 true" $
+        runSrc "(1,2) == (1,2)" `shouldBe` Ok "Bool" "true"
+
+    it "元组上的 != 是结构化比较：不同为 true" $
+        runSrc "(1,2) != (1,3)" `shouldBe` Ok "Bool" "true"
 
   -------------------------------------------------------------------------
   -- 模式匹配（TODO/09-模式匹配.md）
@@ -556,7 +570,7 @@ spec = do
         runSrc "match (1 : [2, 3]) with (x: xs) -> x | [] -> 0" `shouldBe` Ok "Int" "1"
 
     it "cons 的元素类型跟着走（多态）" $
-        runSrc "cons true []" `shouldBe` Ok "[Bool]" "[True]"
+        runSrc "cons true []" `shouldBe` Ok "[Bool]" "[true]"
 
     -- ---------------------------------------------------------------------
     -- 类型侧
@@ -610,7 +624,7 @@ spec = do
         runSrc "match (1, 2) with (x, y) -> x | (x, y) -> y" `shouldBe` Ok "Int" "1"
 
     it "模式变量可以和外层同名（形参不算重复，臂内它是遮蔽的那个）" $ do
-        ss <- okSteps ["def f x = match (x, 1) with (x, y) -> x + y | _ -> 0", "f 2"]
+        ss <- okSteps ["def f x = match (x, 1) with (x, y) -> x + y | _ -> 0;", "f 2;"]
         stmtVal 0 (at 1 ss) `shouldBe` "3"
 
     -- ---------------------------------------------------------------------
@@ -619,27 +633,27 @@ spec = do
 
     it "def 里的 match：参数与结果都保持多态" $ do
         ss <- okSteps
-            [ "def null l = match l with [] -> true | (x: xs) -> false"
-            , "null [1,2,3]"
-            , "null []" ]
-        stmtType 0 (at 0 ss) `shouldBe` "Forall a2. ([a2] -> Bool)"
-        stmtVal  0 (at 1 ss) `shouldBe` "False"
-        stmtVal  0 (at 2 ss) `shouldBe` "True"
+            [ "def null l = match l with [] -> true | (x: xs) -> false;"
+            , "null [1,2,3];"
+            , "null [];" ]
+        stmtType 0 (at 0 ss) `shouldBe` "Forall a0. ([a0] -> Bool)"
+        stmtVal  0 (at 1 ss) `shouldBe` "false"
+        stmtVal  0 (at 2 ss) `shouldBe` "true"
 
     -- 模式绑定的变量（y、xs）必须从 freeVars 里减掉，否则会污染 deps/SCC。
     it "模式绑定的变量不污染泛化：tail 能用在两种元素类型上" $ do
         ss <- okSteps
-            [ "def tl2 l = match l with [] -> [] | (y: xs) -> xs"
-            , "tl2 [1,2]"
-            , "tl2 [true]" ]
+            [ "def tl2 l = match l with [] -> [] | (y: xs) -> xs;"
+            , "tl2 [1,2];"
+            , "tl2 [true];" ]
         stmtType 0 (at 0 ss) `shouldBe` "Forall a0. ([a0] -> [a0])"
         stmtType 0 (at 1 ss) `shouldBe` "[Int]"
         stmtType 0 (at 2 ss) `shouldBe` "[Bool]"
 
     it "递归 + 模式：自己写的 length（作用在 cons 构造的值上）" $ do
         ss <- okSteps
-            [ "def len l = match l with [] -> 0 | (x: xs) -> len xs + 1"
-            , "len (cons 1 (cons 2 (cons 3 [])))" ]
+            [ "def len l = match l with [] -> 0 | (x: xs) -> len xs + 1;"
+            , "len (cons 1 (cons 2 (cons 3 [])));" ]
         stmtVal 0 (at 1 ss) `shouldBe` "3"
 
     -- ---------------------------------------------------------------------
@@ -658,37 +672,46 @@ spec = do
     it "臂里少写 ->：报错要提到 ->" $
         progParseErr "->" "def f l = match l with [] true"
 
-    it "臂体为空：在缺表达式的地方报 end of input" $
-        progParseErr "end of input" "def null l = match l with [] -> "
+    it "臂体为空：缺表达式的地方要报 unexpected" $
+        progParseErr "unexpected" "def null l = match l with [] -> "
+
+    -- 曾经这是「已知缺陷」：parseIf / parseLet 外面包着 `withSpan $ try $ ...`，
+    -- 少个 else / in 时报的是 `reserved symbol: "if"` 并指在关键字上，离真正
+    -- 缺的 token 十万八千里。parseMatch 已先修好，2026-09-27 这两条也修好了。
+    it "少写 else / in：报 unexpected，不再误报 reserved symbol" $ do
+        progParseErr    "unexpected"      "def f = if true then 1 else"
+        progParseErrNot "reserved symbol" "def f = if true then 1 else"
+        progParseErr    "unexpected"      "def f = let x = 1"
+        progParseErrNot "reserved symbol" "def f = let x = 1"
 
   -------------------------------------------------------------------------
   describe "程序模式：def / SCC / 会话状态" $ do
 
     it "runProg 会跳过行首空白和空行（run 不会）" $ do
-        ss <- okSteps ["\n\n   1 + 2\n"]
+        ss <- okSteps ["\n\n   1 + 2;\n"]
         stmtVal 0 (at 0 ss) `shouldBe` "3"
         runSrc "   1 + 2" `shouldSatisfy` \o -> case o of
             ParseErr _ -> True
             _          -> False
 
     it "0 参 def：def x = 1 先定义，下一行的表达式取到它" $ do
-        ss <- okSteps ["def x = 1", "x"]
+        ss <- okSteps ["def x = 1;", "x;"]
         stmtType 0 (at 0 ss) `shouldBe` "Int"
         stmtVal  0 (at 1 ss) `shouldBe` "1"
 
     it "带参 def 的类型是泛化后的 scheme，不是实例化的 T'" $ do
-        ss <- okSteps ["def id x = x"]
+        ss <- okSteps ["def id x = x;"]
         -- 编号由显示层（prettyS'''）按首次出现重排，所以永远是 a0；
         -- 计数器本身仍是会话全局单调的 —— 真正的单调性断言在下面的
         -- 「计数器跨行单调」里（那一条断的是 prNext，与显示无关）。
         stmtType 0 (at 0 ss) `shouldBe` "Forall a0. (a0 -> a0)"
 
     it "带参 def 能应用" $ do
-        ss <- okSteps ["def f x = x + 1", "f 10"]
+        ss <- okSteps ["def f x = x + 1;", "f 10;"]
         stmtVal 0 (at 1 ss) `shouldBe` "11"
 
     it "多参数 def 等价于柯里化" $ do
-        ss <- okSteps ["def add x y = x + y", "add 3 4"]
+        ss <- okSteps ["def add x y = x + y;", "add 3 4;"]
         stmtVal 0 (at 1 ss) `shouldBe` "7"
 
     -- ---------------------------------------------------------------------
@@ -705,32 +728,32 @@ spec = do
         -- step 是拓扑序跑的，跑到 g 时 env 里已经有 f 了 —— 但 g 的闭包
         -- 捕获的必须是这个 env，而不是只含 g 自己的 knot。
         s <- okProg (T.unlines
-            [ "def f x = x + 1"
-            , "def g x = f x"
-            , "g 1" ])
+            [ "def f x = x + 1;"
+            , "def g x = f x;"
+            , "g 1;" ])
         stmtVal 2 s `shouldBe` "2"
 
     it "def 体能调用【上一行】定义的 def（跨批，会话 Env 必须真的接上）" $ do
-        ss <- okSteps ["def f x = x + 1", "def g x = f x", "g 1"]
+        ss <- okSteps ["def f x = x + 1;", "def g x = f x;", "g 1;"]
         stmtVal 0 (at 2 ss) `shouldBe` "2"
 
     it "跨批三级链 f → g → h" $ do
-        ss <- okSteps ["def f x = x + 1", "def g x = f x", "def h x = g x", "h 1"]
+        ss <- okSteps ["def f x = x + 1;", "def g x = f x;", "def h x = g x;", "h 1;"]
         stmtVal 0 (at 3 ss) `shouldBe` "2"
 
     it "def 体能读到会话里 0 参 def 的值" $ do
-        ss <- okSteps ["def k = 5", "def g x = k + x", "g 1"]
+        ss <- okSteps ["def k = 5;", "def g x = k + x;", "g 1;"]
         stmtVal 0 (at 2 ss) `shouldBe` "6"
 
     it "参数名遮蔽同名的外层 def：def b a = a + 1 里的 a 是参数" $ do
-        ss <- okSteps ["def a x = x", "def b a = a + 1", "b 1"]
+        ss <- okSteps ["def a x = x;", "def b a = a + 1;", "b 1;"]
         stmtVal 0 (at 2 ss) `shouldBe` "2"
 
     it "回归：用户报的 max2/max3 —— 两个 def 分两行，第三行调用" $ do
         ss <- okSteps
-            [ "def max2 a b = if a < b then b else a"
-            , "def max3 a b c = if max2 a b == a then if max2 a c == a then a else c else if max2 b c == b then b else c"
-            , "max3 1 4 3" ]
+            [ "def max2 a b = if a < b then b else a;"
+            , "def max3 a b c = if max2 a b == a then if max2 a c == a then a else c else if max2 b c == b then b else c;"
+            , "max3 1 4 3;" ]
         stmtType 0 (at 2 ss) `shouldBe` "Int"
         stmtVal  0 (at 2 ss) `shouldBe` "4"
 
@@ -739,37 +762,37 @@ spec = do
         -- odd 还没定义，even 的闭包自然看不到它 —— 这是会话语义，不是缺陷。
         -- （同一个批里它们互相可见，靠的仍是 knot 本身。）
         s <- okProg (T.unlines
-            [ "def even n = if n == 0 then true else odd (n - 1)"
-            , "def odd  n = if n == 0 then false else even (n - 1)"
-            , "even 4" ])
+            [ "def even n = if n == 0 then true else odd (n - 1);"
+            , "def odd  n = if n == 0 then false else even (n - 1);"
+            , "even 4;" ])
         stmtType 2 s `shouldBe` "Bool"
-        stmtVal  2 s `shouldBe` "True"
+        stmtVal  2 s `shouldBe` "true"
 
     it "会话里重定义遮蔽旧定义（TEnv 与 Env 都要覆盖）" $ do
-        ss <- okSteps ["def x = 1", "def x = 2", "x"]
+        ss <- okSteps ["def x = 1;", "def x = 2;", "x;"]
         stmtVal 0 (at 2 ss) `shouldBe` "2"
         -- 类型环境里也只剩一份 x，且是新的那次
         stmtType 0 (at 1 ss) `shouldBe` "Int"
 
     it "计数器跨行单调：第二行的类型变量编号不回到 0" $ do
-        ss1 <- okSteps ["lambda a -> a"]
-        ss2 <- okSteps ["lambda a -> a", "lambda b -> b"]
+        ss1 <- okSteps ["lambda a -> a;"]
+        ss2 <- okSteps ["lambda a -> a;", "lambda b -> b;"]
         -- 显示是 a0（每行独立重编号）；真正的"跨行单调"看 prNext。
         stmtType 0 (at 1 ss2) `shouldBe` "(a0 -> a0)"
         prNext (at 1 ss2) `shouldSatisfy` (> prNext (at 0 ss1))
 
     it "一行里只要有类型错误，整行不提交（调用方保留旧会话）" $ do
-        ss <- okSteps ["def x = 1"]
+        ss <- okSteps ["def x = 1;"]
         let s1 = at 0 ss
-        progRun s1 "def x = 1 + true" `shouldSatisfy` isLeft
+        progRun s1 "def x = 1 + true;" `shouldSatisfy` isLeft
         -- 旧的会话没被污染：x 仍然是 1
-        case progRun s1 "x" of
+        case progRun s1 "x;" of
             Right s3 -> stmtVal 0 s3 `shouldBe` "1"
             Left e   -> expectationFailure ("s1 应当还能用：" <> T.unpack e)
 
     it "def 绑定的语法是 =，lambda 参数用 ->（两者不一致，见报告）" $ do
-        progRun emptyProg "def f x = x + 1"  `shouldSatisfy` isRight
-        progRun emptyProg "def f x -> x + 1" `shouldSatisfy` isLeft
+        progRun emptyProg "def f x = x + 1;"  `shouldSatisfy` isRight
+        progRun emptyProg "def f x -> x + 1;" `shouldSatisfy` isLeft
 
   -------------------------------------------------------------------------
   describe "ADT：data / 构造子 / 构造子模式" $ do
@@ -784,60 +807,60 @@ spec = do
     -- 修好之前，这一组里的「带参」用例会红 —— 那正是它们的用途。
 
     it "零参 data：构造子是值，且类型就是 data 名" $ do
-        ss <- okSteps ["data Color = Red | Green", "Red"]
+        ss <- okSteps ["data Color = Red | Green;", "Red;"]
         stmtType 0 (at 1 ss) `shouldBe` "Color"
         stmtVal  0 (at 1 ss) `shouldBe` "Red"
 
     it "带参 data 能声明（当前红：parseData 的 varName 不吃空格）" $ do
-        ss <- okSteps ["data Maybe a = None | Some a", "Some 1", "None"]
+        ss <- okSteps ["data Maybe a = None | Some a;", "Some 1;", "None;"]
         stmtType 0 (at 1 ss) `shouldBe` "Maybe Int"
         stmtVal  0 (at 1 ss) `shouldBe` "(Some 1)"
 
     it "构造子模式：match 能匹配构造子" $ do
         ss <- okSteps
-            [ "data Color = Red | Green"
-            , "def f c = match c with Red -> 1 | Green -> 2"
-            , "f Green" ]
+            [ "data Color = Red | Green;"
+            , "def f c = match c with Red -> 1 | Green -> 2;"
+            , "f Green;" ]
         stmtType 0 (at 1 ss) `shouldBe` "(Color -> Int)"
         stmtVal  0 (at 2 ss) `shouldBe` "2"
 
     it "ADT 让多态 head 第一次写得出来（这是整件事的收益）" $ do
         ss <- okSteps
-            [ "data Maybe a = None | Some a"
-            , "def head l = match l with [] -> None | x: xs -> Some x"
-            , "head [1]" ]
+            [ "data Maybe a = None | Some a;"
+            , "def head l = match l with [] -> None | x: xs -> Some x;"
+            , "head [1];" ]
         stmtType 0 (at 1 ss) `shouldBe` "Forall a0. ([a0] -> Maybe a0)"
         stmtType 0 (at 2 ss) `shouldBe` "Maybe Int"
 
     it "构造子部分应用：还差参数时不报错，饱和后就是值" $ do
-        ss <- okSteps ["data Pair a b = MkPair a b", "MkPair 1"]
+        ss <- okSteps ["data Pair a b = MkPair a b;", "MkPair 1;"]
         stmtType 0 (at 1 ss) `shouldBe` "(a0 -> Pair Int a0)"
 
     it "构造子模式数量不符要报错" $
         -- 必须写在同一个 progRun 里：跨行的 ctor 靠 prDEnv 传（见上面的 unionDEnv）
-        progSteps ["data Maybe a = None | Some a\ndef bad m = match m with Some x y -> x"]
+        progSteps ["data Maybe a = None | Some a;\ndef bad m = match m with Some x y -> x;"]
             `shouldSatisfy` \r -> case r of
                 Left e  -> "expects 1 argument" `T.isInfixOf` e
                 Right _ -> False
 
     it "未声明的构造子在模式里要报错" $ do
-        progSteps ["data Color = Red\ndef f c = match c with Blue -> 1"]
+        progSteps ["data Color = Red;\ndef f c = match c with Blue -> 1;"]
             `shouldSatisfy` \r -> case r of
                 Left e  -> "Unknown constructor" `T.isInfixOf` e
                 Right _ -> False
 
     it "穷尽性：漏了构造子要报错" $ do
-        progSteps ["data Color = Red | Green\ndef f c = match c with Red -> 1"]
+        progSteps ["data Color = Red | Green;\ndef f c = match c with Red -> 1;"]
             `shouldSatisfy` \r -> case r of
                 Left e  -> "not exhaustive" `T.isInfixOf` e
                 Right _ -> False
 
     it "重复的 data / 构造子名要报错" $ do
-        progSteps ["data Color = Red | Green\ndata Color = Blue"]
+        progSteps ["data Color = Red | Green;\ndata Color = Blue;"]
             `shouldSatisfy` \r -> case r of
                 Left e  -> "Duplicate data" `T.isInfixOf` e
                 Right _ -> False
-        progSteps ["data Color = Red\ndata Other = Red"]
+        progSteps ["data Color = Red;\ndata Other = Red;"]
             `shouldSatisfy` \r -> case r of
                 Left e  -> "Duplicate constructor" `T.isInfixOf` e
                 Right _ -> False
@@ -847,21 +870,21 @@ spec = do
     -- 挂死 = 红。
     it "occurs check：Node l l l 要报 Occurs check failed，不能挂死" $ do
         progSteps
-            [ "data Tree a = Leaf | Node (Tree a) a (Tree a)\n\
-              \def f x = match x with Leaf -> Leaf | Node l a r -> Node l l l" ]
+            [ "data Tree a = Leaf | Node (Tree a) a (Tree a);\n\
+              \def f x = match x with Leaf -> Leaf | Node l a r -> Node l l l;" ]
             `shouldSatisfy` \r -> case r of
                 Left e  -> "Occurs check" `T.isInfixOf` e
                 Right _ -> False
 
     it "标注 e :: T 的变量是新鲜的：不泄漏到外面" $ do
-        ss <- okSteps ["def f x = x :: a", "f 1", "f true"]
+        ss <- okSteps ["def f x = x :: a;", "f 1;", "f true;"]
         stmtType 0 (at 0 ss) `shouldBe` "Forall a0. (a0 -> a0)"
         stmtType 0 (at 1 ss) `shouldBe` "Int"
         stmtType 0 (at 2 ss) `shouldBe` "Bool"
 
     it "标注写出了具体类型：对不上要报错" $ do
-        progRun emptyProg "def f x = x :: Int" `shouldSatisfy` isRight
-        progRun emptyProg "1 :: Int"           `shouldSatisfy` isRight
+        progRun emptyProg "def f x = x :: Int;" `shouldSatisfy` isRight
+        progRun emptyProg "1 :: Int;"           `shouldSatisfy` isRight
         runSrc "1 :: Bool" `shouldSatisfy` \o -> case o of
             TypeErr _ -> True
             _         -> False
@@ -907,41 +930,41 @@ spec = do
 
     it "阶乘" $ do
         s <- okProg (T.unlines
-            [ "def fact n = if n == 0 then 1 else n * fact (n - 1)"
-            , "fact 10" ])
+            [ "def fact n = if n == 0 then 1 else n * fact (n - 1);"
+            , "fact 10;" ])
         stmtVal 1 s `shouldBe` "3628800"
 
     it "斐波那契" $ do
         s <- okProg (T.unlines
-            [ "def fib n = if n < 2 then n else fib (n - 1) + fib (n - 2)"
-            , "fib 15" ])
+            [ "def fib n = if n < 2 then n else fib (n - 1) + fib (n - 2);"
+            , "fib 15;" ])
         stmtVal 1 s `shouldBe` "610"
 
     it "尾递归 5000 层" $ do
         s <- okProg (T.unlines
-            [ "def count n = if n == 0 then 0 else count (n - 1)"
-            , "count 5000" ])
+            [ "def count n = if n == 0 then 0 else count (n - 1);"
+            , "count 5000;" ])
         stmtVal 1 s `shouldBe` "0"
 
     it "互递归 5000 层" $ do
         s <- okProg (T.unlines
-            [ "def even n = if n == 0 then true else odd (n - 1)"
-            , "def odd  n = if n == 0 then false else even (n - 1)"
-            , "even 5000" ])
-        stmtVal 2 s `shouldBe` "True"
+            [ "def even n = if n == 0 then true else odd (n - 1);"
+            , "def odd  n = if n == 0 then false else even (n - 1);"
+            , "even 5000;" ])
+        stmtVal 2 s `shouldBe` "true"
 
     it "高阶：把递归函数当参数传来传去" $ do
         s <- okProg (T.unlines
-            [ "def applyN f n x = if n == 0 then x else applyN f (n - 1) (f x)"
-            , "applyN (lambda y -> y + 1) 1000 0" ])
+            [ "def applyN f n x = if n == 0 then x else applyN f (n - 1) (f x);"
+            , "applyN (lambda y -> y + 1) 1000 0;" ])
         stmtVal 1 s `shouldBe` "1000"
 
     it "let 绑定的递归函数" $ do
-        s <- okProg "let lf = lambda n -> if n == 0 then 0 else lf (n - 1) in lf 500"
+        s <- okProg "let lf = lambda n -> if n == 0 then 0 else lf (n - 1) in lf 500;"
         stmtVal 0 s `shouldBe` "0"
 
     it "递归函数跨行定义后仍可调用（会话 Env 接得上）" $ do
-        ss <- okSteps ["def count n = if n == 0 then 0 else count (n - 1)", "count 1000"]
+        ss <- okSteps ["def count n = if n == 0 then 0 else count (n - 1);", "count 1000;"]
         stmtVal 0 (at 1 ss) `shouldBe` "0"
 
   describe "已知缺陷（断言当前行为，修好后请搬走）" $ do
@@ -955,12 +978,8 @@ spec = do
                 TypeErr t -> T.isInfixOf "odd is an unbound variable" t
                 _         -> False
 
-    -- parseMatch 的外层 try 已经去掉（见「模式匹配」组最后三条）；parseIf /
-    -- parseLet 还包着 `withSpan $ try $ ...`，同一类误报仍在：少个 else / in
-    -- 时，报的是 `reserved symbol: "if"` 并指在关键字上。修法与 parseMatch 相同。
-    it "已知缺陷：if / let 少分支时报 reserved symbol，而不是真正缺的 token" $ do
-        progParseErr "reserved symbol: \"if\""  "def f = if true then 1 else"
-        progParseErr "reserved symbol: \"let\"" "def f = let x = 1"
+    -- 2026-09-27：原来这里还有一条「if / let 少分支误报 reserved symbol」，
+    -- 缺陷已修好，翻面成正向断言搬去「模式匹配」组（见那组最后三条）。
 
   -------------------------------------------------------------------------
   describe "属性测试（QuickCheck）" $ do
@@ -990,7 +1009,7 @@ spec = do
         property $ forAll (choose (-1000, 1000) :: Gen Integer) $ \a ->
         forAll (choose (-1000, 1000) :: Gen Integer) $ \b ->
             runSrc (T.pack (show a) <> " < " <> T.pack (show b))
-                === Ok "Bool" (T.pack (show (a < b)))
+                === Ok "Bool" (if a < b then "true" else "false")
 
     it "括号包裹不改变语义" $
         property $ forAll (choose (-1000, 1000) :: Gen Integer) $ \a ->

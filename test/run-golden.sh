@@ -53,7 +53,7 @@ actual () { { timeout 30 "$EXE" "$1" < /dev/null 2>&1 || true; } | tr -d '\r'; }
 # 拿不到 124 以外的退出码就当健康。
 # ---------------------------------------------------------------------------
 
-printf '1+1\n' | timeout 15 "$EXE" >/dev/null 2>&1
+printf '1+1;\n' | timeout 15 "$EXE" >/dev/null 2>&1
 if [ $? -eq 124 ]; then
     echo "★ 解释器在 REPL 里死循环了（喂 1+1 之后 15 秒不返回）。" >&2
     echo "  已知原因：src/Interp/Parser.hs 的" >&2
@@ -82,7 +82,7 @@ fi
 #    2026-09-23 的修法漏了成功路径的深度还原，正是这个方向，见 TODO/02-栈安全.md。
 # ---------------------------------------------------------------------------
 
-rout=$(printf 'def f n = if n == 0 then 1 else f n\nf 1\n' | timeout 5 "$EXE" 2>&1 | tr -d '\r')
+rout=$(printf 'def f n = if n == 0 then 1 else f n;\nf 1;\n' | timeout 5 "$EXE" 2>&1 | tr -d '\r')
 rrc=$?
 guard_ok=1
 if [ "$rrc" -eq 124 ]; then
@@ -221,24 +221,29 @@ repl_check () {
     fi
 }
 
-repl_check "REPL 求值了管道输入的最后一行"        '1+1\n'                 'Value: 2'
-repl_check "REPL 跨行保持定义（def 后能用）"      'def f x = x + 1\nf 10\n' 'Value: 11'
-repl_check "REPL 里 0 参 def 也能用"              'def x = 1\nx\n'        'Value: 1'
-repl_check "REPL 的 :t 打印表达式类型"            ':t 1+1\n'              'Type : Int'
-repl_check "REPL 的 :t 认得会话里的 def"          'def f x = x + 1\n:t f\n' 'Int -> Int'
-repl_check "REPL 解析错误不退出、继续下一行"      '(((\n1+1\n'            'Value: 2'
-repl_check "REPL 类型变量显示从 a0 起编号"        'lambda a -> a\nlambda b -> b\n' 'a0 -> a0'
+# 2026-09-27：语句分隔符改成 `;`（换行不再是终结符），所以下面每条语句末尾都带 `;`。
+# ⚠️ 连 `:t` 也要带 —— 因为 app/Main.hs 的 doTypeOf 走的是 runProg。
+#    如果哪天把 doTypeOf 改成走 run（只认表达式），这三处的 `:t ...;` 要把 `;` 去掉。
+repl_check "REPL 求值了管道输入的最后一行"        '1+1;\n'                 'Value: 2'
+repl_check "REPL 跨行保持定义（def 后能用）"      'def f x = x + 1;\nf 10;\n' 'Value: 11'
+repl_check "REPL 里 0 参 def 也能用"              'def x = 1;\nx;\n'      'Value: 1'
+repl_check "REPL 的 :t 打印表达式类型"            ':t 1+1;\n'             'Type : Int'
+repl_check "REPL 的 :t 认得会话里的 def"          'def f x = x + 1;\n:t f;\n' 'Int -> Int'
+repl_check "REPL 解析错误不退出、继续下一行"      '(((\n1+1;\n'           'Value: 2'
+repl_check "REPL 类型变量显示从 a0 起编号"        'lambda a -> a;\nlambda b -> b;\n' 'a0 -> a0'
 # 会话跑很久之后计数器会到 100+，显示层必须把它压回 a0/a1（旧行为会打 a1xx）。
+# （原来这里是 `:load utils/list.txt` —— 那个文件在 f156c51 已并进 prelude 删掉了，
+#   所以改成 load prelude：既测 :load 本身，也测 toplevel 里 map 的泛化。）
 repl_check "长会话里 :t 仍从 a0 起编号（不泄漏计数器原值）" \
-    ':load utils/list.txt\n:t map\n' '((a0 -> a1) -> ([a0] -> [a1]))'
+    ':load utils/prelude.txt\n:t map;\n' '((a0 -> a1) -> ([a0] -> [a1]))'
 
 # 2026-09-23 补：def 体调用另一个 def。
 # 之前缺这条，于是 Eval.hs「闭包只捕获本 SCC 的 knot」的缺陷没被发现 ——
 # 表现为第二行定义的 def 求值时报「上一行的 def is an unbound variable」。
 repl_check "REPL def 体能调用上一行定义的 def" \
-    'def f x = x + 1\ndef g x = f x\ng 1\n' 'Value: 2'
+    'def f x = x + 1;\ndef g x = f x;\ng 1;\n' 'Value: 2'
 repl_check "REPL 用户报的 max2/max3 三行会话" \
-    'def max2 a b = if a < b then b else a\ndef max3 a b c = if max2 a b == a then if max2 a c == a then a else c else if max2 b c == b then b else c\nmax3 1 4 3\n' \
+    'def max2 a b = if a < b then b else a;\ndef max3 a b c = if max2 a b == a then if max2 a c == a then a else c else if max2 b c == b then b else c;\nmax3 1 4 3;\n' \
     'Value: 4'
 
 echo

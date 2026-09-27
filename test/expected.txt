@@ -22,7 +22,7 @@ Value: -5
 Value: <closure x :: ...>
 12: Type : Int
 Eval Error:
-12 | 1 / 0
+12 | 1 / 0;
    | ^
 Divided by zero.
 13: Type : Int
@@ -63,11 +63,11 @@ Value: 2
 31: Type : Int
 Value: 10
 32: Type Error:
-32 | zzz
+32 | zzz;
    | ^
 zzz is an unbound variable.
 33: Type Error:
-33 | lambda x -> x x
+33 | lambda x -> x x;
    |             ^
 Occurs check failed.
 34: Type : Int
@@ -93,29 +93,29 @@ Value: true
 44: Type : Int
 Value: 2
 45: Type Error:
-45 | let even = lambda n -> if n == 0 then true else odd (n - 1) in even 4
+45 | let even = lambda n -> if n == 0 then true else odd (n - 1) in even 4;
    |                                                 ^
 odd is an unbound variable.
 46: Type Error:
-46 | 1 2
+46 | 1 2;
    | ^
 Type mismatch: expected (Int -> a0) but got Int.
 47: Type Error:
-47 | (lambda x -> x) 1 2
+47 | (lambda x -> x) 1 2;
    | ^
 Type mismatch: expected (Int -> a0) but got Int.
 48: Type : Bool
 Value: false
 49: Type Error:
-49 | 1 + true
+49 | 1 + true;
    | ^
 Type mismatch: expected Int but got Bool.
 50: Type Error:
-50 | if 1 then 2 else 3
+50 | if 1 then 2 else 3;
    | ^
 Type mismatch: expected Bool but got Int.
 51: Type Error:
-51 | 1 + (lambda x -> x)
+51 | 1 + (lambda x -> x);
    | ^
 Type mismatch: expected Int but got (a0 -> a0).
 52: def inc : (Int -> Int)
@@ -154,14 +154,14 @@ Value: (1, true)
 73: Type : (Int, (Int, Bool))
 Value: (1, (2, true))
 74: Type Error:
-74 | [1,true]
+74 | [1,true];
    | ^
 Type mismatch: expected Bool but got Int.
 75: Type Error:
-75 | if true then (1,2) else (1,2,3)
+75 | if true then (1,2) else (1,2,3);
    | ^
 Type mismatch: expected (Int, Int, Int) but got (Int, Int).
 76: Type Error:
-76 | let p = (1,p) in 1
+76 | let p = (1,p) in 1;
    |            ^
 p is an unbound variable.

@@ -3,7 +3,7 @@ module Interp.Parser where
 
 import Interp.Types
 import Text.Megaparsec 
-import Text.Megaparsec.Char (string, char, eol, hspace, hspace1)
+import Text.Megaparsec.Char (string, char, eol, space, hspace1)
 import Text.Megaparsec.Char.Lexer (decimal)
 import Data.Char (isLower, isAlphaNum, isUpper, isAsciiLower, chr)
 import Data.Text (cons, Text, pack, unpack)
@@ -37,7 +37,7 @@ isOpChar :: Char -> Bool
 isOpChar c = c `elem` ("+-*/^=<>!" :: String)
 
 lexeme :: Parser a -> Parser a
-lexeme p = p <* hspace
+lexeme p = p <* space
 
 nextNotVar :: Parser ()
 nextNotVar = notFollowedBy (satisfy isVarLeft)
@@ -53,6 +53,9 @@ toBool p = lexeme $ p >>= \case
 
 comma :: Parser Char
 comma = lexeme (char ',')
+
+semicolon :: Parser Char
+semicolon = lexeme (char ';')
 
 varIndex :: Text -> Maybe TypeVar
 varIndex t = case unpack t of
@@ -220,6 +223,7 @@ parseData = do
         ((c, i): _) -> fail $ unpack (T.unwords
             ["constructor", c, "uses type variable", pack [chr (negate i)], "which is not a parameter of", n]
             <> ".")
+    _ <- semicolon
     return $ DataDecl n ps cs
 
 parseCtorDecl :: [(Text, TypeVar)] -> Parser (Text, [T'])
@@ -237,12 +241,13 @@ parseDef = do
     vs <- many parseVar'
     _ <- lexeme (char '=' <?> "=")
     b <- parseExpr
+    _ <- semicolon
     return $ Def f vs $ foldr Lambda b vs
 
 parseProg :: Parser [(Int, Statement)]
 parseProg = sc *> many 
     (   ((,) . unPos . sourceLine <$> getSourcePos)
-    <*> (StmtDef <$> parseDef <|> StmtData <$> parseData <|> StmtExpr <$> parseExpr) 
+    <*> (StmtDef <$> parseDef <|> StmtData <$> parseData <|> StmtExpr <$> (parseExpr <* semicolon)) 
     <*  sc)
     where
         sc :: Parser ()
@@ -307,6 +312,9 @@ parsePat = do
 parsePatAtom :: Parser P'
 parsePatAtom = parsePatParen <|> parsePatList <|> parsePatCtor <|> parsePatVar <|> parsePatBool <|> parsePatInt
 
+parsePatArg :: Parser P'
+parsePatArg = parsePatParen <|> parsePatList <|> parsePatVar <|> parsePatBool <|> parsePatInt <|> (PCtor <$> upperName <*> pure [])
+
 parsePatParen :: Parser P'
 parsePatParen = do
     _ <- lexeme (char '(')
@@ -348,5 +356,5 @@ parseCons = withSpan $ do
         Just t  -> App (App (Var "#cons") h) t
 
 parsePatCtor :: Parser P'
-parsePatCtor = PCtor <$> upperName <*> many parsePatAtom
+parsePatCtor = PCtor <$> upperName <*> many parsePatArg
 

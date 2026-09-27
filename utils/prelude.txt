@@ -1,212 +1,212 @@
 -- -- predefined types
 
-data Maybe a = None | Just a
-data Either a b = Left a | Right b
-data Ordering = LT | EQ | GT
+data Maybe a = None | Just a;
+data Either a b = Left a | Right b;
+data Ordering = LT | EQ | GT;
 
 
 -- -- functions of numbers
 
 -- mod :: Int -> Int -> Int
-def mod q m = q - (q / m) * m
+def mod q m = q - (q / m) * m;
 
 -- min :: Int -> Int -> Int
-def min a b = if a < b then a else b
+def min a b = if a < b then a else b;
 
 -- max :: Int -> Int -> Int
-def max a b = if a > b then a else b
+def max a b = if a > b then a else b;
 
 -- minimum :: [Int] -> Maybe Int
-def minimum l = let _m = lambda res l -> match l with [] -> res | x: xs -> _m (min x res) xs in match l with [] -> None | x: xs -> Just (_m x xs)
+def minimum l = let _m = lambda res l -> match l with [] -> res | x: xs -> _m (min x res) xs in match l with [] -> None | x: xs -> Just (_m x xs);
 
 -- maximum :: [Int] -> Maybe Int
-def maximum l = let _m = lambda res l -> match l with [] -> res | x: xs -> _m (max x res) xs in match l with [] -> None | x: xs -> Just (_m x xs)
+def maximum l = let _m = lambda res l -> match l with [] -> res | x: xs -> _m (max x res) xs in match l with [] -> None | x: xs -> Just (_m x xs);
 
 -- even :: Int -> Bool
-def even i = mod i 2 == 0
+def even i = mod i 2 == 0;
 
 -- odd :: Int -> Bool
-def odd i = mod i 2 != 0
+def odd i = mod i 2 != 0;
 
 -- abs :: Int -> Int
-def abs n = if n < 0 then -n else n
+def abs n = if n < 0 then -n else n;
 
 -- signum :: Int -> Int
-def signum i = if i < 0 then -1 else if i > 0 then 1 else 0
+def signum i = if i < 0 then -1 else if i > 0 then 1 else 0;
 
 -- divmod :: Int -> Int -> (Int, Int)
-def divmod m n = (m / n, mod m n)
+def divmod m n = (m / n, mod m n);
 
 -- gcd :: Int -> Int -> Int
-def gcd m n = if n == 0 then abs m else gcd n (mod m n)
+def gcd m n = if n == 0 then abs m else gcd n (mod m n);
 
 
 -- -- functions of bool
 
 -- and :: Bool -> Bool -> Bool
-def and x y = match (x, y) with (true, true) -> true | _ -> false
+def and x y = match (x, y) with (true, true) -> true | _ -> false;
 
 -- or :: Bool -> Bool -> Bool
-def or x y = match (x, y) with (false, false) -> false | _ -> true
+def or x y = match (x, y) with (false, false) -> false | _ -> true;
 
 -- not :: Bool -> Bool
-def not x = match x with true -> false | false -> true
+def not x = match x with true -> false | false -> true;
 
 
 -- -- functions of list
 
 -- head :: [a] -> Maybe a
-def head l = match l with [] -> None | x: xs -> Just x
+def head l = match l with [] -> None | x: xs -> Just x;
 
 -- tail :: [a] -> [a]
-def tail l = match l with [] -> [] | x: xs -> xs
+def tail l = match l with [] -> [] | x: xs -> xs;
 
 -- null :: [a] -> Bool
-def null l = match l with [] -> true | _ -> false
+def null l = match l with [] -> true | _ -> false;
 
 -- map :: (a -> b) -> [a] -> [b]
-def map f l = match l with [] -> [] | x: xs -> f x: map f xs
+def map f l = match l with [] -> [] | x: xs -> f x: map f xs;
 
 -- filter :: (a -> Bool) -> [a] -> [a]
-def filter f l = match l with [] -> [] | x: xs -> if f x then x: filter f xs else filter f xs
+def filter f l = match l with [] -> [] | x: xs -> if f x then x: filter f xs else filter f xs;
 
 -- foldr :: (a -> b -> b) -> b -> [a] -> b
-def foldr f z l = match l with [] -> z | x: xs -> f x (foldr f z xs)
+def foldr f z l = match l with [] -> z | x: xs -> f x (foldr f z xs);
 
 -- foldl :: (b -> a -> b) -> b -> [a] -> b
-def foldl f z l = match l with [] -> z | x: xs -> foldl f (f z x) xs
+def foldl f z l = match l with [] -> z | x: xs -> foldl f (f z x) xs;
 
 -- elem :: a -> [a] -> Bool
-def elem e l = match l with [] -> false | x: xs -> or (e == x) (elem e xs) 
+def elem e l = match l with [] -> false | x: xs -> or (e == x) (elem e xs);
 
 -- any :: [Bool] -> Bool
-def any l = match l with [] -> false | x: xs -> if x then true else any xs
+def any l = match l with [] -> false | x: xs -> if x then true else any xs;
 
 -- all :: [Bool] -> Bool
-def all l = match l with [] -> true | x: xs -> if not x then false else all xs
+def all l = match l with [] -> true | x: xs -> if not x then false else all xs;
 
 -- has :: (a -> Bool) -> [a] -> Bool
-def has f l = any (map f l)
+def has f l = any (map f l);
 
 -- index :: Int -> [a] -> Maybe a
-def index n l = if n < 0 then None else match l with [] -> None | x: xs -> if n == 0 then Just x else index (n - 1) xs
+def index n l = if n < 0 then None else match l with [] -> None | x: xs -> if n == 0 then Just x else index (n - 1) xs;
 
 -- find :: a -> [a] -> Int
-def find = let _find = lambda n a l -> match l with [] -> -1 | x: xs -> if x == a then n else _find (n + 1) a xs in _find 0
+def find = let _find = lambda n a l -> match l with [] -> -1 | x: xs -> if x == a then n else _find (n + 1) a xs in _find 0;
 
 -- findMaybe :: a -> [a] -> Maybe Int
-def findMaybe = let _find = lambda n a l -> match l with [] -> None | x: xs -> if x == a then Just n else _find (n + 1) a xs in _find 0
+def findMaybe = let _find = lambda n a l -> match l with [] -> None | x: xs -> if x == a then Just n else _find (n + 1) a xs in _find 0;
 
 -- append :: [a] -> [a] -> [a]
-def append fl bl = match fl with [] -> bl | x: xs -> x: append xs bl
+def append fl bl = match fl with [] -> bl | x: xs -> x: append xs bl;
 
 -- snoc :: a -> [a] -> [a]
-def snoc a l = match l with [] -> [a] | x: xs -> x: snoc a xs
+def snoc a l = match l with [] -> [a] | x: xs -> x: snoc a xs;
 
 -- zip :: [a] -> [b] -> [(a, b)]
-def zip f s = match (f, s) with ([], _) -> [] | (_, []) -> [] | (x: xs, y: ys) -> (x, y): zip xs ys
+def zip f s = match (f, s) with ([], _) -> [] | (_, []) -> [] | (x: xs, y: ys) -> (x, y): zip xs ys;
 
 -- zipWith :: (a -> b -> c) -> ([a] -> [b] -> [c])
-def zipWith f fl bl = match (fl, bl) with ([], _) -> [] | (_, []) -> [] | (x: xs, y: ys) -> f x y: zipWith f xs ys
+def zipWith f fl bl = match (fl, bl) with ([], _) -> [] | (_, []) -> [] | (x: xs, y: ys) -> f x y: zipWith f xs ys;
 
 -- unzip :: [(a, b)] -> ([a], [b])
-def unzip l = match l with [] -> ([], []) | (x, y): rs -> let res = unzip rs in match res with (f, s) -> (x: f, y: s)
+def unzip l = match l with [] -> ([], []) | (x, y): rs -> let res = unzip rs in match res with (f, s) -> (x: f, y: s);
 
 -- range' :: Int -> Int -> [Int]
-def range' a b = if a >= b then [] else a: range' (a + 1) b
+def range' a b = if a >= b then [] else a: range' (a + 1) b;
 
 -- range :: Int -> [Int]
-def range = range' 0
+def range = range' 0;
 
 -- length :: [a] -> Int
-def length l = match l with [] -> 0 | x: xs -> 1 + length xs
+def length l = match l with [] -> 0 | x: xs -> 1 + length xs;
 
 -- concat :: [[a]] -> [a]
-def concat l = foldr append [] l
+def concat l = foldr append [] l;
 
 -- concatMap :: (a -> [b]) -> [a] -> [b]
-def concatMap f l = foldr (lambda x acc -> append (f x) acc) [] l
+def concatMap f l = foldr (lambda x acc -> append (f x) acc) [] l;
 
 -- take :: Int -> [a] -> [a]
-def take n l = if n <= 0 then [] else match l with [] -> [] | x: xs -> x: take (n - 1) xs
+def take n l = if n <= 0 then [] else match l with [] -> [] | x: xs -> x: take (n - 1) xs;
 
 -- drop :: Int -> [a] -> [a]
-def drop n l = if n <= 0 then l else match l with [] -> [] | x: xs -> drop (n - 1) xs
+def drop n l = if n <= 0 then l else match l with [] -> [] | x: xs -> drop (n - 1) xs;
 
 -- takeWhile :: (a -> Bool) -> [a] -> [a]
-def takeWhile f l = match l with [] -> [] | x: xs -> if f x then [] else x: takeWhile f xs
+def takeWhile f l = match l with [] -> [] | x: xs -> if f x then [] else x: takeWhile f xs;
 
 -- dropWhile :: (a -> Bool) -> [a] -> [a]
-def dropWhile f l = match l with [] -> [] | x: xs -> if f x then l else dropWhile f xs
+def dropWhile f l = match l with [] -> [] | x: xs -> if f x then l else dropWhile f xs;
 
 -- replicate :: Int -> a -> [a]
-def replicate n x = if n <= 0 then [] else x: replicate (n - 1) x
+def replicate n x = if n <= 0 then [] else x: replicate (n - 1) x;
 
 -- last :: [a] -> Maybe a
-def last l = match l with [] -> None | x: [] -> Just x | x: xs -> last xs
+def last l = match l with [] -> None | x: [] -> Just x | x: xs -> last xs;
 
 -- nub :: [a] -> [a]
-def nub l = match l with [] -> [] | x: xs -> x: nub (filter (lambda y -> y != x) xs)
+def nub l = match l with [] -> [] | x: xs -> x: nub (filter (lambda y -> y != x) xs);
 
 -- sort :: [a] -> [a]
-def sort l = match l with [] -> [] | x: xs -> concat [sort (filter (lambda y -> y <= x) xs), [x], sort (filter (lambda y -> y > x) xs)]
+def sort l = match l with [] -> [] | x: xs -> concat [sort (filter (lambda y -> y <= x) xs), [x], sort (filter (lambda y -> y > x) xs)];
 
 -- sum :: [Int] -> Int
-def sum l = foldr (lambda a b -> a + b) 0 l
+def sum l = foldr (lambda a b -> a + b) 0 l;
 
 
 -- -- combinators
 
 -- id :: a -> a
-def id a = a
+def id a = a;
 
 -- flip :: (a -> b -> c) -> b -> a -> c
-def flip f y x = f x y
+def flip f y x = f x y;
 
 -- compose :: (b -> c) -> (a -> b) -> a -> c
-def compose g f x = g (f x)
+def compose g f x = g (f x);
 
 -- curry :: ((a, b) -> c) -> a -> b -> c
-def curry f x y = f (x, y)
+def curry f x y = f (x, y);
 
 -- uncurry :: (a -> b -> c) -> (a, b) -> c
-def uncurry f tp = match tp with (x, y) -> f x y
+def uncurry f tp = match tp with (x, y) -> f x y;
 
 
 -- -- functions of tuples
 
 -- fst :: (a, b) -> a
-def fst t = match t with (a, b) -> a
+def fst t = match t with (a, b) -> a;
 
 -- snd :: (a, b) -> b
-def snd t = match t with (a, b) -> b
+def snd t = match t with (a, b) -> b;
 
 
 -- -- functions of datas
 
 -- isNone :: Maybe a -> Bool
-def isNone ma = match ma with None -> true | Just _ -> false
+def isNone ma = match ma with None -> true | Just _ -> false;
 
 -- isJust :: Maybe a -> Bool
-def isJust ma = match ma with Just _ -> true | None -> false
+def isJust ma = match ma with Just _ -> true | None -> false;
 
 -- fromMaybe :: Maybe a -> a -> a
-def fromMaybe ma d = match ma with None -> d | Just a -> a
+def fromMaybe ma d = match ma with None -> d | Just a -> a;
 
 -- fmapMaybe :: (a -> b) -> Maybe a -> Maybe b
-def fmapMaybe f ma = match ma with None -> None | Just a -> Just (f a)
+def fmapMaybe f ma = match ma with None -> None | Just a -> Just (f a);
 
 -- mapMaybe :: (a -> Maybe b) -> [a] -> [b]
-def mapMaybe f l = match l with [] -> [] | x: xs -> match f x with None -> mapMaybe f xs | Just y -> y: mapMaybe f xs
+def mapMaybe f l = match l with [] -> [] | x: xs -> match f x with None -> mapMaybe f xs | Just y -> y: mapMaybe f xs;
 
 -- isLeft :: Either a b -> Bool
-def isLeft e = match e with Left _ -> true | Right _ -> false
+def isLeft e = match e with Left _ -> true | Right _ -> false;
 
 -- isRight :: Either a b -> Bool
-def isRight e = match e with Left _ -> false | Right _ -> true
+def isRight e = match e with Left _ -> false | Right _ -> true;
 
 -- either :: (a -> c) -> (b -> d) -> Either a b -> Either c d
-def either f g e = match e with Left x -> f x | Right y -> g y
+def either f g e = match e with Left x -> f x | Right y -> g y;
 
 
 -- -- functions of Ordering
@@ -215,4 +215,4 @@ def either f g e = match e with Left x -> f x | Right y -> g y
 -- leave for future
 
 -- cmpInt :: Int -> Int -> Ordering
-def cmpInt a b = if a < b then LT else if a > b then GT else EQ
+def cmpInt a b = if a < b then LT else if a > b then GT else EQ;
