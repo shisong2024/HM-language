@@ -22,7 +22,7 @@ consTy :: S'
 consTy = Forall (S.singleton 0) (TFunc (TVar 0) (TFunc (TList (TVar 0)) (TList (TVar 0))))
 
 initSession :: Session
-initSession = Session { sEnv = builtinEnv, sTEnv = builtinTEnv, sNext = 0, sBatch = "", sDEnv = emptyDEnv }
+initSession = Session { sEnv = builtinEnv, sTEnv = builtinTEnv, sNext = 0, sBatch = "", sDEnv = emptyDEnv, sAliases = M.empty }
 
 emptyDEnv :: DEnv
 emptyDEnv = DEnv M.empty M.empty

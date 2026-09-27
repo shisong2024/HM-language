@@ -42,7 +42,7 @@ let x = 1 in(x);
 let fact = lambda n -> if n == 0 then 1 else n * fact (n - 1) in fact 5;
 let id = lambda x -> x in id true;
 let x = 1 in let x = x + 1 in x;
-let even = lambda n -> if n == 0 then true else odd (n - 1) in even 4;
+let even = lambda n -> if n == 0 then true else oddx (n - 1) in even 4;
 1 2;
 (lambda x -> x) 1 2;
 true == false;

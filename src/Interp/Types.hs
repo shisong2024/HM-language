@@ -120,11 +120,12 @@ data DataDecl = DataDecl
     } deriving (Show, Eq)
 
 data Session = Session
-    { sTEnv  :: TEnv
-    , sEnv   :: Env
-    , sNext  :: Counter
-    , sBatch :: BatchName
-    , sDEnv  :: DEnv
+    { sTEnv    :: TEnv
+    , sEnv     :: Env
+    , sNext    :: Counter
+    , sBatch   :: BatchName
+    , sDEnv    :: DEnv
+    , sAliases :: Map Text FilePath
     } deriving (Show, Eq)
 
 data CtorInfo = CtorInfo
@@ -137,6 +138,12 @@ data DEnv = DEnv
     { denvCtors :: Map Text CtorInfo
     , denvDatas :: Map Text [Text]
     } deriving (Show, Eq)
+
+data Tops = Tops 
+    { tVals  :: Set Text
+    , tTypes :: Set Text
+    , tCtors :: Set Text
+    }
 
 opTable :: [(Text, Opr)]
 opTable = 

@@ -13,6 +13,7 @@ library
                       Interp.Eval
                       Interp.Pretty
                       Interp.Builtin
+                      Interp.Qualify
     build-depends:    base
                     , containers
                     , mtl

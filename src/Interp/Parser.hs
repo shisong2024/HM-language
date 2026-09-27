@@ -71,11 +71,20 @@ parseBLit = withSpan $ BLit <$> toBool (symbol "true" <|> symbol "false" <?> "bo
 parseListLit :: Parser E'
 parseListLit = withSpan $ ListLit <$> (lexeme (char '[') *> sepBy parseExpr comma <* lexeme (char ']'))
 
+nameRaw :: (Char -> Bool) -> Parser Text
+nameRaw f = cons <$> satisfy f <*> takeWhileP Nothing isVarLeft
+
+qname :: Parser Text
+qname = lexeme $ do
+    a <- nameRaw isUpper
+    m <- optional (try (char '.' *> (nameRaw isUpper <|> nameRaw isVarFirst)))
+    return $ maybe a (\b -> a <> "." <> b) m
+
 varName :: Parser Text
-varName = lexeme $ cons <$> satisfy isVarFirst <*> takeWhileP Nothing isVarLeft
+varName = lexeme $ nameRaw isVarFirst
 
 upperName :: Parser Text
-upperName = lexeme $ cons <$> satisfy isUpper <*> takeWhileP Nothing isVarLeft 
+upperName = lexeme $ nameRaw isUpper
 
 parseVar' :: Parser Text
 parseVar' = lexeme $ do
@@ -153,7 +162,7 @@ parseTypeAtom vars = parseTypeParen vars <|> parseTypeList vars <|> parseTypeNam
 
 parseTypeName :: [(Text, TypeVar)] -> Parser T'
 parseTypeName vars = do
-    n <- upperName <|> varName
+    n <- qname <|> varName
     case n of
         "Int" -> return TInt
         "Bool" -> return TBool
@@ -233,7 +242,7 @@ parseExpr :: Parser E'
 parseExpr = parseIf <|> parseLet <|> parseLambda <|> parseMatch <|> parseAnn <|> parseCons
 
 parseCtorExpr :: Parser E'
-parseCtorExpr = withSpan (try (Var <$> upperName) <?> "constructor")
+parseCtorExpr = withSpan (try (Var <$> qname) <?> "constructor")
 
 parseDef :: Parser Decl
 parseDef = do
@@ -313,7 +322,7 @@ parsePatAtom :: Parser P'
 parsePatAtom = parsePatParen <|> parsePatList <|> parsePatCtor <|> parsePatVar <|> parsePatBool <|> parsePatInt
 
 parsePatArg :: Parser P'
-parsePatArg = parsePatParen <|> parsePatList <|> parsePatVar <|> parsePatBool <|> parsePatInt <|> (PCtor <$> upperName <*> pure [])
+parsePatArg = parsePatParen <|> parsePatList <|> parsePatVar <|> parsePatBool <|> parsePatInt <|> (PCtor <$> qname <*> pure [])
 
 parsePatParen :: Parser P'
 parsePatParen = do
@@ -356,5 +365,5 @@ parseCons = withSpan $ do
         Just t  -> App (App (Var "#cons") h) t
 
 parsePatCtor :: Parser P'
-parsePatCtor = PCtor <$> upperName <*> many parsePatArg
+parsePatCtor = PCtor <$> qname <*> many parsePatArg
 

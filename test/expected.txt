@@ -93,9 +93,9 @@ Value: true
 44: Type : Int
 Value: 2
 45: Type Error:
-45 | let even = lambda n -> if n == 0 then true else odd (n - 1) in even 4;
+45 | let even = lambda n -> if n == 0 then true else oddx (n - 1) in even 4;
    |                                                 ^
-odd is an unbound variable.
+oddx is an unbound variable.
 46: Type Error:
 46 | 1 2;
    | ^
