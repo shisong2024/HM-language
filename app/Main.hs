@@ -107,9 +107,6 @@ doTypeOf s e = case run (T.dropWhileEnd (== ';') (T.strip e)) of
 loadFile :: Session -> FilePath -> IO Session
 loadFile s path = fst <$> loadWithImports [] False s Nothing path
 
--- REPL 版的 import：语法与文件里那几行**完全一致**（复用 parseImportLine，
--- 于是 R1-R4 的报错措辞自动一致）。区别只有一点：这里 `as` 是必需的 ——
--- 不带别名的裸加载继续走 `:load`（它是「整体不加前缀」的逃生口）。
 doImport :: Session -> Text -> IO Session
 doImport s t = case parseImportLine "<repl>" t of
     Left err -> TIO.putStrLn err >> return s
