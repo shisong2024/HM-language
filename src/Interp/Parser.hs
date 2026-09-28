@@ -119,10 +119,29 @@ parseAtom :: Parser E'
 parseAtom = parseILit <|> parseBLit <|> parseVar <|> parseCtorExpr <|> parseListLit <|> parseParen
 
 parseLet :: Parser E'
-parseLet = withSpan $ Let 
-    <$> (symbol "let" *> parseVar')
-    <*> (lexeme (char '=' <?> "=") *> parseExpr)
-    <*> (symbol "in" *> parseExpr)
+parseLet = do
+    _ <- symbol "let"
+    sp0 <- getSourcePos
+    off0 <- getOffset
+    p <- parsePat
+    if irrefutableP p then return () else setOffset off0 >> fail refutableLetMsg
+    _ <- lexeme (char '=' <?> "=")
+    e1 <- parseExpr
+    _ <- symbol "in"
+    e2 <- parseExpr
+    case p of
+        PVar n -> return $ Let n e1 e2
+        _ -> let tmp = letTmpName sp0 in return $ Let tmp e1 (Match (Var tmp) [(p, e2)])
+    where
+        letTmpName :: SourcePos -> Text
+        letTmpName sp = 
+            "$let@" <> pack (show (unPos (sourceLine sp))) 
+            <> ":" <> pack (show (unPos (sourceColumn sp)))
+
+        refutableLetMsg :: String
+        refutableLetMsg =
+            "this pattern may fail to match, so it cannot be used as a `let` binding. "
+            <> "Bind a variable (or a tuple of variables), or use `match` instead."
 
 parseIf :: Parser E'
 parseIf = withSpan $ If
@@ -281,6 +300,13 @@ stripComment t
         trailing :: Text -> Bool
         trailing l = let (pre, rest) = T.breakOn "--" l in
             not (T.null rest) && not (T.null (T.strip pre))
+
+irrefutableP :: P' -> Bool
+irrefutableP = \case
+    PVar _   -> True
+    PWild    -> True
+    PTuple s -> all irrefutableP s
+    _        -> False
 
 runProg :: Text -> Either Text [(Int, Statement)]
 runProg tx = case stripComment tx of
