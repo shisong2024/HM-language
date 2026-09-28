@@ -471,7 +471,7 @@ calleeNote env f e@(Located sp err) = case stripAt f of
 
 swallowedArmsNote :: Text
 swallowedArmsNote = 
-       "This arm's pattern does not fit the scrutinee's type. One common cause: if "
-    <> "the arm above has an unparenthesised `match` in its body, that inner "
-    <> "`match` has absorbed this `|` arm -- put parentheses around it to keep the "
-    <> "arms where you meant them."
+       "This arm's pattern does not fit the scrutinee's type. One common cause:\n" 
+    <> "if the arm above has an unparenthesised `match` in its body, that inner "
+    <> "`match` has absorbed this `|` arm\n"
+    <> "-- put parentheses around it to keep the arms where you meant them."
