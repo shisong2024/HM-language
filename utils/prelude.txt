@@ -1,5 +1,6 @@
 -- -- predefined types
 
+data Unit = Unit;
 data Maybe a = None | Just a;
 data Either a b = Left a | Right b;
 data Ordering = LT | EQ | GT;

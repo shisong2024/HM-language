@@ -162,11 +162,12 @@ renderLocated f batchName tx (Located msp err) = case msp of
 printBatch :: Text -> BatchName -> [(Int, Statement)] -> M.Map Int StmtTy -> M.Map Int (Either (Located EvalError) V') -> [(Int, Text)] -> IO ()
 printBatch src bn lprs tps vals perr = 
     mapM_ (TIO.putStr . snd) . sortOn fst $
-        [(i, renderStmt i st) | (i, st) <- lprs] <>
+        [(ln, renderStmt ln i st) | (i, (ln, st)) <- zip [0..] lprs] <>
         [(i, T.pack (show i) <> ": Parse Error:\n" <> msg <> "\n") | (i, msg) <- perr]
 
     where
-        renderStmt i st = T.pack (show i) <> ": " <> case st of
+        renderStmt :: Show a => a -> Int -> Statement -> Text
+        renderStmt ln i st = T.pack (show ln) <> ": " <> case st of
             StmtDef (Def n _ _) -> case M.lookup i tps of
                 Just (TyDef _ sch) -> "def " <> n <> " : " <> prettyS' sch <> "\n"
                 _ -> ""

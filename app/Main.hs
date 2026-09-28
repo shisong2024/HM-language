@@ -78,7 +78,7 @@ execBatch loud ss src lprs perr = do
                     TIO.putStrLn ("Eval Error:\n" <> prettyEvalErrorWith (sBatch ss) src eerr)
                     return (ss { sNext = n }, False)
                 Right (env', vals) -> do
-                    when loud $ printBatch (sBatch ss) src lprs (relabel lprs tps) (relabel lprs vals) perr
+                    when loud $ printBatch (sBatch ss) src lprs tps vals perr
                     let newCs = concatMap (map fst . dCtors) (dataDeclsOf prs)
                         stale = [c | d <- dataDeclsOf prs
                                    , Just cs <- [M.lookup (dName d) (denvDatas (sDEnv ss))]

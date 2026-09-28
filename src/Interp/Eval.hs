@@ -190,10 +190,6 @@ flatten = \case
 tryEnv :: MonadError e m => m a -> m (Either e a)
 tryEnv act = (Right <$> act) `catchError` (return . Left)
 
-relabel :: [(Int, Statement)] -> M.Map Int a -> M.Map Int a
-relabel lprs m = M.fromList [(l, v) | (k, v) <- M.toList m, Just l <- [M.lookup k idx]]
-    where idx = M.fromList (zip [0 ..] (map fst lprs))
-
 patVars :: P' -> Set Text
 patVars = S.fromList . patVarsList
 

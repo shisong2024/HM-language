@@ -453,6 +453,65 @@ spec = do
         runSrc "let x = 1 in let y = x + 1 in y" `shouldBe` Ok "Int" "2"
 
   -------------------------------------------------------------------------
+  -- 解构 let：绑定位置收不可反驳模式（变量 / _ / 元组，含嵌套）。
+  -- 实现是纯解析器脱糖：
+  --     let (a, b) = e in body
+  --   ==> Let "$let@L:C" e (Match (Var "$let@L:C") [(PTuple [PVar a, PVar b], body)])
+  -- 单变量仍走原来的 Let，所以「let 绑定的递归函数」那条特例不受影响。
+  -- 可反驳的模式（Just x / [] / 1 / h: t）直接是 Parse error —— let 没有失败分支。
+  describe "let 解构绑定" $ do
+
+    it "二元组" $
+        runSrc "let (a, b) = (1, 2) in a + b" `shouldBe` Ok "Int" "3"
+
+    it "三元组" $
+        runSrc "let (a, b, c) = (1, 2, 3) in a * b + c" `shouldBe` Ok "Int" "5"
+
+    it "嵌套元组" $
+        runSrc "let (a, (b, c)) = (1, (2, 3)) in a + b + c" `shouldBe` Ok "Int" "6"
+
+    it "元组里的 _" $
+        runSrc "let (a, _) = (1, 2) in a" `shouldBe` Ok "Int" "1"
+
+    it "整个模式就是 _" $
+        runSrc "let _ = 5 in 7" `shouldBe` Ok "Int" "7"
+
+    -- 脱糖成 Match 之后，PTuple 通过合一反过来把 e 的类型钉住 —— 这条是它的哨兵。
+    it "被绑定的分量类型由 e 决定（不是自由变量）" $
+        runSrc "let (a, b) = (1, true) in b" `shouldBe` Ok "Bool" "true"
+
+    -- 回归哨兵：单变量路径必须原样保留 TypeCheck 里 recEnv 的自递归特例。
+    it "单变量 let 的自递归没被影响" $
+        runSrc "let f = lambda n -> if n == 0 then 1 else n * f (n - 1) in f 5"
+            `shouldBe` Ok "Int" "120"
+
+    it "脱糖后的体会正常报类型错" $
+        runSrc "let (a, b) = (1, 2) in c"
+            `shouldBe` TypeErr "c is an unbound variable."
+
+    it "e 不是元组 → 类型错" $
+        runSrc "let (a, b) = 1 in a" `shouldSatisfy` hasTypeErrText "Type mismatch"
+
+    -- 临时名以 $ 开头（用户打不出来）。它绝不该出现在报错里。
+    it "脱糖临时名（$let@…）不泄漏进报错" $
+        case runSrc "let (a, b) = 1 in a" of
+            TypeErr t -> t `shouldNotSatisfy` T.isInfixOf "$let"
+            other     -> expectationFailure $ "期待 Type error，实际是: " <> show other
+
+    -- 可反驳模式：解析期就拒，错误文案指向模式起点（列 5，正是 ( 的位置）。
+    it "Just x → Parse error" $
+        parseErr "cannot be used as a `let` binding" "let Just x = 1 in x"
+
+    it "[] → Parse error" $
+        parseErr "cannot be used as a `let` binding" "let [] = 1 in 1"
+
+    it "整数字面量 → Parse error" $
+        parseErr "cannot be used as a `let` binding" "let 1 = 2 in 1"
+
+    it "h: t → Parse error" $
+        parseErr "cannot be used as a `let` binding" "let h: t = [1] in h"
+
+  -------------------------------------------------------------------------
   describe "列表与元组" $ do
 
     it "列表字面量：类型与渲染" $
