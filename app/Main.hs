@@ -91,11 +91,11 @@ execBatch loud ss src lprs perr = do
                                , sNext = n, sDEnv = denv }, ok)
 
 doTypeOf :: Session -> Text -> IO Session
-doTypeOf s e = case runProg e of
+doTypeOf s e = case run (T.dropWhileEnd (== ';') (T.strip e)) of
     Left perr -> TIO.putStrLn ("Parse Error:\n" <> perr) >> return s
-    Right lprs -> do
-        let denv = unionDEnv (buildDEnv (dataDeclsOf (map snd lprs))) (sDEnv s)
-            (tcRes, n) = runState (runExceptT (runReaderT (programChecker (sTEnv s) (map snd lprs)) denv)) (sNext s)
+    Right ex -> do
+        let prs = [StmtExpr ex]
+            (tcRes, n) = runState (runExceptT (runReaderT (programChecker (sTEnv s) prs) (sDEnv s))) (sNext s)
         case tcRes of
             Left terr -> TIO.putStrLn $ "Type Error:\n" <> prettyTypeErrorWith (sBatch s) e terr
             Right (_, _, tps) -> forM_ (M.toAscList tps) $ \(_, info) -> case info of
