@@ -1,4 +1,4 @@
-{-# LANGUAGE LambdaCase, FlexibleContexts, TupleSections #-}
+{-# LANGUAGE LambdaCase, FlexibleContexts, TupleSections, OverloadedStrings #-}
 module Interp.TypeCheck where
 
 import Interp.Types
@@ -96,9 +96,11 @@ typeChecker env = \case
 
     App f arg -> do
         (ts1, ft) <- typeChecker env f
-        (ts2, argt) <- typeChecker (applyTEnv ts1 env) arg
+        let env1 = applyTEnv ts1 env
+        (ts2, argt) <- typeChecker env1 arg
         rt <- fresh
         ts3 <- unify (apply ts2 ft, TFunc argt rt) 
+            `catchError` calleeNote (applyTEnv ts2 env1) f
         return (compose ts3 $ compose ts2 ts1, apply ts3 rt)
 
     Match e arms -> do
@@ -128,7 +130,7 @@ sccChecker env bs = do
     let ns   = map fst bs
         genv = M.union (M.fromList (zip ns (map (Forall S.empty) tvs))) env
         bds  = map snd bs
-    res <- mapM (typeChecker genv) bds
+    res <- mapM (\(n, b) -> withNote ("in definition of `" <> n <> "`" ) (typeChecker genv b)) (zip ns bds)
     let tps = map snd res
         ts0 = foldr (compose .fst) M.empty res
     ts <- foldM 
@@ -342,8 +344,11 @@ matchType env t (ts, mtp) (p, b) = do
     checkDupPatVar p
     let env' = applyTEnv ts env
     (ts2, tp, benv) <- patType p
-    let tsA = compose ts2 ts
-    ts3 <- unify (apply tsA tp, apply tsA t)
+    let tsA  = compose ts2 ts
+        note = case mtp of
+            Just _ -> withNote swallowedArmsNote
+            Nothing -> id
+    ts3 <- note $ unify (apply tsA tp, apply tsA t)
     let tsB = compose ts3 tsA
     (ts4, tb) <- typeChecker (M.union (applyTEnv tsB benv) env') b
     let tsC = compose ts4 tsB
@@ -447,3 +452,26 @@ checkDataDecls ds = do
         (c: _) -> throwError $ Located Nothing $ DuplicateCtor c
         [] -> return ()
 
+withNote :: MonadError (Located TypeError) m => Text -> m a -> m a
+withNote nt act = catchError act $ \(Located sp err) -> throwError (Located sp $ WithNote nt err)
+
+
+calleeNote :: MonadError (Located TypeError) m => M.Map Text S' -> E' -> Located TypeError -> m a
+calleeNote env f e@(Located sp err) = case stripAt f of
+    Var n | Just sch <- env !? n, informative sch -> throwError $ Located sp $ CalleeNote n sch err
+    _ -> throwError e
+    where
+        bareVar :: T' -> Bool
+        bareVar = \case
+            TVar _ -> True
+            _ -> False
+
+        informative :: S' -> Bool
+        informative (Forall tvs tp) = not (null tvs) || not (bareVar tp)
+
+swallowedArmsNote :: Text
+swallowedArmsNote = 
+       "This arm's pattern does not fit the scrutinee's type. One common cause: if "
+    <> "the arm above has an unparenthesised `match` in its body, that inner "
+    <> "`match` has absorbed this `|` arm -- put parentheses around it to keep the "
+    <> "arms where you meant them."

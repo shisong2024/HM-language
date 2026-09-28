@@ -222,20 +222,21 @@ repl_check () {
 }
 
 # 2026-09-27：语句分隔符改成 `;`（换行不再是终结符），所以下面每条语句末尾都带 `;`。
-# ⚠️ 连 `:t` 也要带 —— 因为 app/Main.hs 的 doTypeOf 走的是 runProg。
-#    如果哪天把 doTypeOf 改成走 run（只认表达式），这三处的 `:t ...;` 要把 `;` 去掉。
+# 2026-09-28：`:t` 是例外 —— doTypeOf 现在走 run（只认表达式），尾部 `;` 可有可无。
 repl_check "REPL 求值了管道输入的最后一行"        '1+1;\n'                 'Value: 2'
 repl_check "REPL 跨行保持定义（def 后能用）"      'def f x = x + 1;\nf 10;\n' 'Value: 11'
 repl_check "REPL 里 0 参 def 也能用"              'def x = 1;\nx;\n'      'Value: 1'
-repl_check "REPL 的 :t 打印表达式类型"            ':t 1+1;\n'             'Type : Int'
-repl_check "REPL 的 :t 认得会话里的 def"          'def f x = x + 1;\n:t f;\n' 'Int -> Int'
+repl_check "REPL 的 :t 打印表达式类型"            ':t 1+1\n'              'Type : Int'
+# 尾部分号可有可无（两种写法都得收），但两条语句仍必须拒。
+repl_check "REPL 的 :t 尾部带分号也收"            ':t 1+1;\n'             'Type : Int'
+repl_check "REPL 的 :t 认得会话里的 def"          'def f x = x + 1;\n:t f\n' 'Int -> Int'
 repl_check "REPL 解析错误不退出、继续下一行"      '(((\n1+1;\n'           'Value: 2'
 repl_check "REPL 类型变量显示从 a0 起编号"        'lambda a -> a;\nlambda b -> b;\n' 'a0 -> a0'
 # 会话跑很久之后计数器会到 100+，显示层必须把它压回 a0/a1（旧行为会打 a1xx）。
 # （原来这里是 `:load utils/list.txt` —— 那个文件在 f156c51 已并进 prelude 删掉了，
 #   所以改成 load prelude：既测 :load 本身，也测 toplevel 里 map 的泛化。）
 repl_check "长会话里 :t 仍从 a0 起编号（不泄漏计数器原值）" \
-    ':load utils/prelude.txt\n:t map;\n' '((a0 -> a1) -> ([a0] -> [a1]))'
+    ':load utils/prelude.txt\n:t map\n' '((a0 -> a1) -> ([a0] -> [a1]))'
 
 # 2026-09-23 补：def 体调用另一个 def。
 # 之前缺这条，于是 Eval.hs「闭包只捕获本 SCC 的 knot」的缺陷没被发现 ——

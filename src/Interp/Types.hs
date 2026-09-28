@@ -98,6 +98,8 @@ data TypeError
     | UnknownTypeCtor Text
     | TypeCtorArityMisMatch Text Int Int
     | OccurCheck
+    | CalleeNote Text S' TypeError
+    | WithNote Text TypeError
     deriving (Show, Eq)
 
 type Env  = Map Text V'

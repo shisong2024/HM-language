@@ -119,7 +119,7 @@ parseAtom :: Parser E'
 parseAtom = parseILit <|> parseBLit <|> parseVar <|> parseCtorExpr <|> parseListLit <|> parseParen
 
 parseLet :: Parser E'
-parseLet = do
+parseLet = withSpan $ do
     _ <- symbol "let"
     sp0 <- getSourcePos
     off0 <- getOffset

@@ -101,6 +101,9 @@ prettyTypeError = \case
     UnknownTypeCtor t -> "Unknown type: " <> t <> "."
     TypeCtorArityMisMatch t n m -> 
         T.unwords ["Type", t, "expects", pack (show n), "argument(s) but got", pack (show m)] <> "."
+    CalleeNote n sch e ->
+        prettyTypeError e <> "\n  note: `" <> n <> "` is bound here with type " <> prettyS' sch <> "."
+    WithNote nt e -> prettyTypeError e <> "\n" <> T.unlines (map ("  " <>) (T.lines nt))
 
 prettyS' :: S' -> Text
 prettyS' (Forall tvs t)
