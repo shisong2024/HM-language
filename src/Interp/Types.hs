@@ -15,6 +15,7 @@ data P'
     | PWild
     | PInt Integer
     | PBool Bool
+    | PStr Text
     | PNil
     | PCons P' P'
     | PTuple [P']
@@ -24,6 +25,7 @@ data P'
 data E'
     = ILit Integer
     | BLit Bool
+    | SLit Text
     | Var Text
     | ListLit [E']
     | TupleLit [E']
@@ -48,6 +50,7 @@ type Lev = Int
 data V'
     = VInt Integer
     | VBool Bool
+    | VStr Text
     | VList [V']
     | VTuple [V']
     | VClosure Text E' Env
@@ -67,13 +70,15 @@ data EvalError
     | NonExhaustiveMatch V'
     | ConsNeedsList V'
     | OprArgIsNotComparable V' V'
+    | NotACodepoint Integer
+    | PrimArgMismatch Text [V']
     deriving (Show, Eq)
 
 newtype Depth = Depth Int deriving (Show, Eq, Ord, Generic)
 data Located e = Located (Maybe Span) e deriving (Show, Eq)
 
 data T' 
-    = TInt | TBool 
+    = TInt | TBool | TString 
     | TVar TypeVar 
     | TList T'
     | TTuple [T']

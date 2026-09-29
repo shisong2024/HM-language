@@ -22,6 +22,7 @@ debugE' :: E' -> Text
 debugE' = \case
     ILit n -> pack (show n)
     BLit b -> pack (show b)
+    SLit s -> quoted s
     Var t -> t
     ListLit es -> "[" <> T.intercalate ", " (fmap debugE' es) <> "]"
     TupleLit es -> "(" <> T.intercalate ", " (fmap debugE' es) <> ")"
@@ -39,6 +40,7 @@ prettyV' :: V' -> Text
 prettyV' = \case
     VInt n -> pack $ show n
     VBool b -> if b then "true" else "false"
+    VStr s -> quoted s
     VList vs -> "[" <> T.intercalate ", " (fmap prettyV' vs) <> "]"
     VTuple vs -> "(" <> T.intercalate ", " (fmap prettyV' vs) <> ")"
     VClosure t _ _ -> T.unwords ["<closure", t, "::", "...>"]
@@ -63,6 +65,9 @@ prettyEvalError = \case
     NonExhaustiveMatch v -> "Pattern match is not exhaustive: no arm matches " <> prettyV' v <> "."
     ConsNeedsList v -> "cons expects a list as its second argument but gets " <> prettyV' v <> "."
     OprArgIsNotComparable v1 v2 -> T.unwords [prettyV' v1, "and", prettyV' v2, "are not comparable"] <> "."
+    NotACodepoint i -> "Not a Unicode code point: " <> pack (show i) <> "."
+    PrimArgMismatch p args ->
+        "`" <> p <> "` does not accept " <> T.intercalate ", " (fmap prettyV' args) <> "."
 
 printT' :: T' -> Text
 printT' = go False
@@ -71,6 +76,7 @@ printT' = go False
         go needParen = \case
             TInt -> "Int"
             TBool -> "Bool"
+            TString -> "String"
             TList tp -> "[" <> go False tp <> "]"
             TTuple tps -> "(" <> T.intercalate ", " (fmap (go False) tps) <> ")"
             TVar i -> "a" <> pack (show i)
@@ -130,6 +136,7 @@ prettyP = \case
     PWild -> "_"
     PInt n -> pack $ show n
     PBool b ->  if b then "true" else "false"
+    PStr s -> quoted s
     PNil -> "[]"
     PCons h t -> prettyP h <> " : " <> prettyP t
     PTuple ps -> "(" <> T.intercalate ", " (map prettyP ps) <> ")"
@@ -207,12 +214,14 @@ renumberT m = go
             TTuple ts -> TTuple (fmap go ts)
             TFunc g r -> TFunc (go g) (go r)
             TVar i -> TVar (M.findWithDefault i i m)
+            TString -> TString
             TCon n args -> TCon n (fmap go args)
 
 varOrder :: T' -> [TypeVar]
 varOrder = \case
     TInt -> []
     TBool -> [] 
+    TString -> []
     TVar i -> [i]
     TList t -> varOrder t
     TTuple ts -> concatMap varOrder ts
@@ -228,6 +237,37 @@ normalizeTs ts = fmap (renumberT $ M.fromList (zip (dedup (concatMap varOrder ts
 dedup :: Eq a => [a] -> [a]
 dedup [] = []
 dedup (x: xs) = x: dedup (filter (/= x) xs)
+
+-- Quoted, with everything outside printable ASCII escaped: `\n \t \r` in
+-- the short form, anything else as `\uXXXX`. Four hex digits always suffice
+-- -- literals and `fromCode` are both limited to the BMP -- and keeping the
+-- output pure ASCII keeps it readable in a console that is not UTF-8.
+quoted :: Text -> Text
+quoted s = "\"" <> escape s <> "\""
+
+escape :: Text -> Text
+escape = T.concatMap esc
+    where
+        esc :: Char -> Text
+        esc c = case c of
+            '"'  -> "\\\""
+            '\\' -> "\\\\"
+            '\n' -> "\\n"
+            '\t' -> "\\t"
+            '\r' -> "\\r"
+            _ | c < ' ' || c > '~' -> "\\u" <> hex4 (fromEnum c)
+              | otherwise -> T.singleton c
+
+hex4 :: Int -> Text
+hex4 n = T.justifyRight 4 '0' (T.pack (digits n))
+    where
+        digits :: Int -> String
+        digits 0 = "0"
+        digits k = reverse (go k)
+
+        go :: Int -> String
+        go 0 = []
+        go k = "0123456789ABCDEF" !! (k `mod` 16) : go (k `div` 16)
 
 tick :: Text -> Text
 tick n = "`" <> n <> "`"

@@ -6,10 +6,10 @@ import Interp.Types
 import qualified Data.Text as T
 
 import Text.Megaparsec 
-import Text.Megaparsec.Char (string, char, eol, space, hspace1)
+import Text.Megaparsec.Char (string, char, eol, space, hspace1, hexDigitChar)
 import Text.Megaparsec.Char.Lexer (decimal)
 
-import Data.Char (isLower, isAlphaNum, isUpper, isAsciiLower, chr)
+import Data.Char (isLower, isAlphaNum, isUpper, isAsciiLower, chr, digitToInt)
 import Data.Text (cons, Text, pack, unpack)
 import Data.Functor(($>), void)
 
@@ -25,6 +25,18 @@ opInfo = \case
         OpPow -> (3, AssocR)
     OCmp _ -> (0, AssocL)
 
+-- Operators that are just function names rather than built-in `Opr`s:
+-- `a ++ b` means `(++) a b`, so no new `Opr` constructor and no new rule in
+-- the checker is needed. Stage 5 replaces this table with the one built from
+-- the user's `infixl`/`infixr` declarations.
+--
+-- `++` sits at level 1, next to `+`: it only ever combines strings, so no
+-- expression that type checks can tell a wrong precedence here from the
+-- right one. (`++` is infixr 5 in Haskell; stage 5's 0..9 re-levelling
+-- puts it there.)
+fnOpTable :: [(Text, (Lev, Assoc))]
+fnOpTable = [("++", (1, AssocR))]
+
 reserved :: [Text]
 reserved = 
     [ "let", "in", "lambda", "def"
@@ -33,7 +45,7 @@ reserved =
     ]
 
 reservedType :: [Text]
-reservedType = ["Int", "Bool"]
+reservedType = ["Int", "Bool", "String"]
 
 isVarFirst :: Char -> Bool
 isVarFirst c = isLower c || c == '_'
@@ -103,6 +115,39 @@ parseVar' = lexeme $ do
 parseVar :: Parser E'
 parseVar = withSpan (try (Var <$> parseVar') <?> "variable")
 
+-- `"..."`, with `\n \t \r \\ \"` and `\uXXXX`.
+--
+-- No raw newline: `stripComment` scans line by line, so a string that
+-- spanned lines could hide a `--` from it. `\uXXXX` is the only way to
+-- write a non-ASCII character -- source files have to stay pure ASCII.
+parseStrLit :: Parser E'
+parseStrLit = withSpan (SLit <$> lexeme strLiteral)
+
+strLiteral :: Parser Text
+strLiteral = do
+    _ <- char '"'
+    cs <- manyTill strChar (char '"' <?> "closing quote")
+    return $ T.concat cs
+
+strChar :: Parser Text
+strChar = T.singleton <$> (strEscape <|> satisfy plain)
+    where
+        plain c = c /= '"' && c /= '\\' && c /= '\n' && c /= '\r'
+
+strEscape :: Parser Char
+strEscape = do
+    _ <- char '\\'
+    anySingle >>= \case
+        'n'  -> return '\n'
+        't'  -> return '\t'
+        'r'  -> return '\r'
+        '\\' -> return '\\'
+        '"'  -> return '"'
+        'u'  -> do
+            ds <- count 4 hexDigitChar
+            return $ chr (foldl (\a d -> a * 16 + digitToInt d) 0 ds)
+        c    -> fail $ "unknown escape `\\" <> [c] <> "`"
+
 parseParen :: Parser E'
 parseParen = withSpan $ do
     _ <- lexeme (char '(')
@@ -124,7 +169,7 @@ parseUnary = withSpan $ do
                 _      -> return $ BOpr (OArith OpSub) (ILit 0) e
 
 parseAtom :: Parser E'
-parseAtom = parseILit <|> parseBLit <|> parseVar <|> parseCtorExpr <|> parseListLit <|> parseParen
+parseAtom = parseILit <|> parseBLit <|> parseStrLit <|> parseVar <|> parseCtorExpr <|> parseListLit <|> parseParen
 
 parseLet :: Parser E'
 parseLet = withSpan $ do
@@ -163,15 +208,19 @@ parseOpr l = withSpan $ parseUnary >>= \t -> lexeme (loop t)
         loop :: E' -> Parser E'
         loop lhs = do
             mop <- optional $ try $ do
-                op <- choice [lexeme (try (string s <* notFollowedBy (satisfy isOpChar))) $> op | (s, op) <- opTable]
-                guard (fst (opInfo op) >= l)
-                return op
+                tok <- choice $
+                    [ lexeme (try (string s <* notFollowedBy (satisfy isOpChar))) $> (opInfo op, BOpr op)
+                    | (s, op) <- opTable ]
+                    <> [ lexeme (try (string s <* notFollowedBy (satisfy isOpChar))) $> (fx, App . App (Var s))
+                       | (s, fx) <- fnOpTable ]
+                guard (fst (fst tok) >= l)
+                return tok
             case mop of
                 Nothing -> return lhs
-                Just op -> let opt = opInfo op in do
+                Just (opt, mk) -> do
                     let nl = if snd opt == AssocL then fst opt + 1 else fst opt
                     rhs <- parseOpr nl
-                    loop (BOpr op lhs rhs)
+                    loop (mk lhs rhs)
 
 parseLambda :: Parser E'
 parseLambda = withSpan $ do
@@ -193,6 +242,7 @@ parseTypeName vars = do
     case n of
         "Int" -> return TInt
         "Bool" -> return TBool
+        "String" -> return TString
         _ -> case (lookup n vars, varIndex n) of
             (Just i, _) -> return $ TVar i
             (Nothing, Just i) -> return $ TVar i
@@ -314,6 +364,19 @@ run t = case runParser (parseExpr <* eof) "" t of
     Left  err -> Left $ pack (errorBundlePretty err)
     Right res -> Right res
 
+-- Everything up to a `--` that is not inside a string literal. A backslash
+-- inside a string escapes the next character, so `"a\"--b"` is one string.
+codeOf :: Text -> Text
+codeOf = T.pack . go False . T.unpack
+    where
+        go :: Bool -> String -> String
+        go _ [] = []
+        go True ('\\': c: rest) = '\\' : c : go True rest
+        go True ('"': rest) = '"' : go False rest
+        go False ('"': rest) = '"' : go True rest
+        go False ('-': '-': _) = []
+        go inStr (c: rest) = c : go inStr rest
+
 stripComment :: Text -> Either Text Text
 stripComment t
     | ((i, _): _) <- [(i, l) | (i, l) <- zip [1 :: Int ..] (T.lines t), trailing l] =
@@ -322,12 +385,16 @@ stripComment t
     where
         blanck :: Text -> Text
         blanck l
-            | "--" `T.isPrefixOf` T.stripStart l = ""
+            | commented l && T.null (T.strip (codeOf l)) = ""
             | otherwise = l
-        
+
+-- A `--` outside a string cuts the line: everything from there on is a
+-- comment. A trailing comment is still an error (stage 7 lifts that).
+        commented :: Text -> Bool
+        commented l = codeOf l /= l
+
         trailing :: Text -> Bool
-        trailing l = let (pre, rest) = T.breakOn "--" l in
-            not (T.null rest) && not (T.null (T.strip pre))
+        trailing l = commented l && not (T.null (T.strip (codeOf l)))
 
 irrefutableP :: P' -> Bool
 irrefutableP = \case
@@ -355,6 +422,7 @@ strayTvs :: T' -> [TypeVar]
 strayTvs = \case
     TInt -> []
     TBool -> []
+    TString -> []
     TVar i -> [i | i < 0]
     TList t -> strayTvs t
     TTuple ts -> concatMap strayTvs ts
@@ -373,10 +441,13 @@ parsePat = do
     return $ case m of Nothing -> h; Just t -> PCons h t
 
 parsePatAtom :: Parser P'
-parsePatAtom = parsePatParen <|> parsePatList <|> parsePatCtor <|> parsePatVar <|> parsePatBool <|> parsePatInt
+parsePatAtom = parsePatParen <|> parsePatList <|> parsePatCtor <|> parsePatVar <|> parsePatBool <|> parsePatStr <|> parsePatInt
 
 parsePatArg :: Parser P'
-parsePatArg = parsePatParen <|> parsePatList <|> parsePatVar <|> parsePatBool <|> parsePatInt <|> (PCtor <$> qname <*> pure [])
+parsePatArg = parsePatParen <|> parsePatList <|> parsePatVar <|> parsePatBool <|> parsePatStr <|> parsePatInt <|> (PCtor <$> qname <*> pure [])
+
+parsePatStr :: Parser P'
+parsePatStr = PStr <$> lexeme strLiteral
 
 parsePatParen :: Parser P'
 parsePatParen = do

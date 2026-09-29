@@ -37,6 +37,7 @@ qualifyProgram a prs = map (stmt (topsOf prs)) prs
             Var n -> Var (if n `S.member` bs then n else qual (S.union (tVals t) (tCtors t)) n)
             ILit i -> ILit i
             BLit b -> BLit b
+            SLit s -> SLit s
             ListLit es -> ListLit (map (expr t bs) es)
             TupleLit es -> TupleLit (map (expr t bs) es)
             Let n u v -> Let n (expr t bs u) (expr t (S.insert n bs) v)
@@ -58,6 +59,7 @@ qualifyProgram a prs = map (stmt (topsOf prs)) prs
             PWild      -> PWild
             PInt n     -> PInt n
             PBool b    -> PBool b
+            PStr s     -> PStr s
             PNil       -> PNil
 
         typ :: Tops -> T' -> T'
@@ -68,4 +70,5 @@ qualifyProgram a prs = map (stmt (topsOf prs)) prs
             TFunc u v -> TFunc (typ t u) (typ t v)
             TInt      -> TInt
             TBool     -> TBool
+            TString   -> TString
             TVar i    -> TVar i

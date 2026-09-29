@@ -26,6 +26,8 @@ typeChecker env = \case
 
     BLit _ -> return (M.empty, TBool)
 
+    SLit _ -> return (M.empty, TString)
+
     Var t -> case env !? t of
         Nothing -> throwError (Located Nothing $ UnboundVar t)
         Just s  -> do
@@ -203,6 +205,7 @@ apply :: TSub -> T' -> T'
 apply ts = \case
     TInt -> TInt
     TBool -> TBool
+    TString -> TString
     TVar i -> case ts !? i of
         Nothing -> TVar i
         Just (TVar j) | j == i -> TVar i
@@ -225,6 +228,7 @@ unify :: MonadError (Located TypeError) m => (T', T') -> m TSub
 unify = \case
     (TInt, TInt) -> return M.empty
     (TBool, TBool) -> return M.empty
+    (TString, TString) -> return M.empty
     (TList t1, TList t2) -> unify (t1, t2)
     (TCon n1 a1, TCon n2 a2) | n1 == n2 && length a1 == length a2 ->
         let step ts (x, y) = unify (apply ts x, apply ts y) >>= \ts1 -> return $ compose ts1 ts in
@@ -255,6 +259,7 @@ occursIn :: TypeVar -> T' -> Bool
 occursIn i = \case
     TInt -> False
     TBool -> False 
+    TString -> False
     TVar j -> i == j
     TList tp -> i `occursIn` tp
     TTuple tps -> any (occursIn i) tps
@@ -268,6 +273,7 @@ ftv :: T' -> Set TypeVar
 ftv = \case
     TInt -> S.empty
     TBool -> S.empty
+    TString -> S.empty
     TVar i -> S.singleton i
     TList tp -> ftv tp
     TTuple tps -> S.unions (fmap ftv tps)
@@ -293,6 +299,7 @@ checkTypeCons :: MonadError (Located TypeError) m => DEnv -> T' -> m ()
 checkTypeCons denv = \case
     TInt -> return ()
     TBool -> return ()
+    TString -> return ()
     TVar _ -> return ()
     TList t -> checkTypeCons denv t
     TTuple ts -> mapM_ (checkTypeCons denv) ts
@@ -323,6 +330,7 @@ patType = \case
     PWild -> fresh <&> (M.empty, , M.empty)
     PVar x -> fresh >>= \v -> return (M.empty, v, M.singleton x (Forall S.empty v))
     PInt _ -> return (M.empty, TInt, M.empty)
+    PStr _ -> return (M.empty, TString, M.empty)
     PBool _ -> return (M.empty, TBool, M.empty)
     PNil -> fresh <&> ((M.empty, , M.empty) . TList)
 
@@ -411,6 +419,7 @@ checkNonExhaustive denv t arms
 exhaustive :: DEnv -> T' -> [P'] -> Bool
 exhaustive denv t ps = any irrefutable ps || case t of
     TInt -> True
+    TString -> True
     TVar _ -> True
     TFunc _ _ -> True
     TList te -> 

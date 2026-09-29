@@ -13,7 +13,9 @@ import Control.Monad.State (MonadState (get, put), modify)
 
 import Data.Map ((!?))
 import Data.Graph (stronglyConnComp, SCC (AcyclicSCC, CyclicSCC))
-import Data.Text (Text, unpack)
+import Data.Char (chr, ord)
+import qualified Data.Text as T
+import Data.Text (Text)
 import Data.Set (Set)
 import Data.Maybe (isJust)
 
@@ -31,6 +33,8 @@ eval = \case
     ILit i -> return $ VInt i
 
     BLit b -> return $ VBool b
+
+    SLit s -> return $ VStr s
 
     Var v -> do
         env <- ask
@@ -168,6 +172,7 @@ freeVars = \case
     Var v -> S.singleton v
     ILit _ -> S.empty
     BLit _ -> S.empty
+    SLit _ -> S.empty
     ListLit vs -> S.unions (map freeVars vs)
     TupleLit vs -> S.unions (map freeVars vs)
     Lambda x e -> S.delete x (freeVars e)
@@ -211,6 +216,7 @@ matchP = \case
 
     (PInt n, VInt m) | n == m -> Just []
     (PBool n, VBool m) | n == m -> Just []
+    (PStr a, VStr b) | a == b -> Just []
 
     (PNil, VList []) -> Just []
     (PCons ph pt, VList (x: xs)) -> (++) <$> matchP (ph, x) <*> matchP (pt, VList xs)
@@ -223,11 +229,32 @@ matchP = \case
     
     _ -> Nothing
 
-applyPrim :: MonadError (Located EvalError) m => Text -> [V'] -> m V'
+-- `uncons` answers with the prelude's `Maybe`, so the two constructors have
+-- to be looked up by name: this module knows nothing else about `Maybe`, and
+-- inventing `VCtor "Just" ...` from thin air would silently make a value
+-- that no pattern can match if the prelude ever renames them.
+applyPrim :: (MonadReader Env m, MonadError (Located EvalError) m) => Text -> [V'] -> m V'
 applyPrim "#cons" [h, t] = case t of
     VList xs -> return $ VList (h: xs)
     _ -> throwError $ Located Nothing $ ConsNeedsList t
-applyPrim n _ = error $ unpack ("unknown primitive: " <> n)
+applyPrim "++" [VStr a, VStr b] = return $ VStr (a <> b)
+applyPrim "fromCode" [VInt i]
+    | i < 0 || i > 0xFFFF = throwError $ Located Nothing $ NotACodepoint i
+    | otherwise = return $ VStr (T.singleton (chr (fromInteger i)))
+applyPrim "uncons" [VStr s] = case T.uncons s of
+    Nothing -> ctor "None" []
+    Just (c, rest) -> ctor "Just" [VTuple [VInt (fromIntegral (ord c)), VStr rest]]
+    where
+        ctor n args = do
+            env <- ask
+            case env !? n of
+                Just (VCtor _ ar _) -> return $ VCtor n ar args
+                _ -> throwError $ Located Nothing $ UnboundVariable n
+-- Wrong argument types land here. They can only be reached *after* the type
+-- checker has already reported the error (an ill-typed expression is still
+-- evaluated, and only the report is suppressed), so this must not `error`:
+-- a crash would swallow the very message that explains what happened.
+applyPrim n args = throwError $ Located Nothing $ PrimArgMismatch n args
 
 matchArms :: (MonadError (Located EvalError) m, MonadReader Env m,  MonadState Depth m) => V' -> [(P', E')] -> m V'
 matchArms v = \case
@@ -240,6 +267,7 @@ eqV :: (V', V') -> Maybe Bool
 eqV = \case
     (VInt a, VInt b) -> Just (a == b)
     (VBool a, VBool b) -> Just (a == b)
+    (VStr a, VStr b) -> Just (a == b)
     (VList a, VList b) -> if length a == length b then and <$> mapM eqV (zip a b) else Just False
     (VTuple a, VTuple b) -> if length a == length b then and <$> mapM eqV (zip a b) else Just False
     (VCtor n _ a, VCtor m _ b) -> 

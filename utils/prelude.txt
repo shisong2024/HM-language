@@ -217,3 +217,86 @@ def either f g e = match e with Left x -> f x | Right y -> g y;
 
 -- cmpInt :: Int -> Int -> Ordering
 def cmpInt a b = if a < b then LT else if a > b then GT else EQ;
+
+-- -- functions of String
+
+-- A String is a primitive type built from three primitives:
+--   ++       : String -> String -> String
+--   uncons   : String -> Maybe (Int, String)
+--   fromCode : Int -> String
+-- A character is just its Int code point, so both `==` and `<` already work on
+-- it. Everything below is ordinary source, the same way the list library above
+-- is built on `cons` and `match`.
+
+-- strLength :: String -> Int
+def strLength s = match uncons s with None -> 0 | Just (_, rest) -> 1 + strLength rest;
+
+-- strConcat :: [String] -> String
+def strConcat ss = match ss with [] -> "" | s: rest -> s ++ strConcat rest;
+
+-- strReverse :: String -> String
+def strReverse s = match uncons s with None -> "" | Just (c, rest) -> strReverse rest ++ fromCode c;
+
+-- strTake :: Int -> String -> String
+def strTake n s = if n <= 0 then "" else (match uncons s with None -> "" | Just (c, rest) -> fromCode c ++ strTake (n - 1) rest);
+
+-- strDrop :: Int -> String -> String
+def strDrop n s = if n <= 0 then s else (match uncons s with None -> "" | Just (_, rest) -> strDrop (n - 1) rest);
+
+-- strIndex :: Int -> String -> Maybe Int
+def strIndex n s = if n < 0 then None else (match uncons s with None -> None | Just (c, rest) -> if n == 0 then Just c else strIndex (n - 1) rest);
+
+-- strElem :: Int -> String -> Bool
+def strElem c s = match uncons s with None -> false | Just (d, rest) -> or (c == d) (strElem c rest);
+
+-- strMap :: (Int -> Int) -> String -> String
+def strMap f s = match uncons s with None -> "" | Just (c, rest) -> fromCode (f c) ++ strMap f rest;
+
+-- strFilter :: (Int -> Bool) -> String -> String
+def strFilter p s = match uncons s with None -> "" | Just (c, rest) -> if p c then fromCode c ++ strFilter p rest else strFilter p rest;
+
+-- strSplitAt :: Int -> String -> (String, String)
+def strSplitAt n s = if n <= 0 then ("", s) else (match uncons s with None -> ("", "") | Just (c, rest) -> let (a, b) = strSplitAt (n - 1) rest in (fromCode c ++ a, b));
+
+-- Character classes. The code points are decimal because there are no
+-- character literals -- a String is the only way to write one.
+
+-- isDigit :: Int -> Bool
+def isDigit c = and (c >= 48) (c <= 57);
+-- isUpper :: Int -> Bool
+def isUpper c = and (c >= 65) (c <= 90);
+-- isLower :: Int -> Bool
+def isLower c = and (c >= 97) (c <= 122);
+-- isAlpha :: Int -> Bool
+def isAlpha c = or (isUpper c) (isLower c);
+-- isSpace :: Int -> Bool
+def isSpace c = or (c == 32) (and (c >= 9) (c <= 13));
+
+-- toUpperChar :: Int -> Int
+def toUpperChar c = if isLower c then c - 32 else c;
+-- toLowerChar :: Int -> Int
+def toLowerChar c = if isUpper c then c + 32 else c;
+
+-- strToUpper :: String -> String
+def strToUpper s = strMap toUpperChar s;
+-- strToLower :: String -> String
+def strToLower s = strMap toLowerChar s;
+
+-- strWords :: String -> [String]
+def strWords s = let go = lambda acc cur t -> match uncons t with None -> if strLength cur == 0 then acc else snoc (strReverse cur) acc | Just (c, rest) -> if isSpace c then (if strLength cur == 0 then go acc "" rest else go (snoc (strReverse cur) acc) "" rest) else go acc (fromCode c ++ cur) rest in go [] "" s;
+
+-- strUnwords :: [String] -> String
+def strUnwords ws = match ws with [] -> "" | w: [] -> w | w: rest -> w ++ " " ++ strUnwords rest;
+
+-- strLines :: String -> [String]
+-- Same as the usual `lines`: a single trailing newline does not add a line.
+def strLines s = if strLength s == 0 then [] else let go = lambda acc cur t -> match uncons t with None -> if strLength cur == 0 then acc else snoc (strReverse cur) acc | Just (c, rest) -> if c == 10 then go (snoc (strReverse cur) acc) "" rest else go acc (fromCode c ++ cur) rest in go [] "" s;
+
+-- strUnlines :: [String] -> String
+def strUnlines ls = match ls with [] -> "" | l: rest -> l ++ fromCode 10 ++ strUnlines rest;
+
+-- showInt :: Int -> String
+def showInt n = if n < 0 then "-" ++ showInt (0 - n) else if n < 10 then fromCode (n + 48) else showInt (n / 10) ++ fromCode (n - (n / 10) * 10 + 48);
+
+-- readInt :: String -> Maybe Int
+def readInt s = let go = lambda acc t -> match uncons t with None -> Just acc | Just (c, rest) -> if isDigit c then go (acc * 10 + (c - 48)) rest else None in match uncons s with Just (45, rest) -> (if strLength rest == 0 then None else (match go 0 rest with None -> None | Just n -> Just (0 - n))) | _ -> go 0 s;

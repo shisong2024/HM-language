@@ -35,6 +35,7 @@ expandE :: SynTable -> E' -> Either Text E'
 expandE tab = \case
     ILit i      -> Right (ILit i)
     BLit b      -> Right (BLit b)
+    SLit s      -> Right (SLit s)
     Var n       -> Right (Var n)
     ListLit es  -> ListLit <$> mapM (expandE tab) es
     TupleLit es -> TupleLit <$> mapM (expandE tab) es
@@ -55,6 +56,7 @@ expandT tab = go S.empty
         go seen = \case
             TInt      -> Right TInt
             TBool     -> Right TBool
+            TString   -> Right TString
             TVar i    -> Right (TVar i)
             TList t   -> TList <$> go seen t
             TTuple ts -> TTuple <$> mapM (go seen) ts
@@ -75,6 +77,7 @@ subst :: M.Map TypeVar T' -> T' -> T'
 subst m = \case
     TInt      -> TInt
     TBool     -> TBool
+    TString   -> TString
     TVar i    -> M.findWithDefault (TVar i) i m
     TList t   -> TList (subst m t)
     TTuple ts -> TTuple (map (subst m) ts)
