@@ -88,7 +88,24 @@ data ProgRes = ProgRes
     , prDEnv :: DEnv      -- ^ data 声明累积出来的构造子/类型环境，跨批保留
     , prTys  :: M.Map Int StmtTy
     , prVals :: M.Map Int (Either (Located EvalError) V')
-    } deriving (Show)
+    }
+
+-- | ⚠️ 手写 Show，**不能** derive。
+--
+--   `Env = Map Text V'`、`V' = VClosure Text E' Env`，而 Eval 给递归 def 打结
+--   （闭包捕获的环境里就有它自己）：于是 `show` 任何一个含 def 的 Env 都会
+--   无限展开 —— 不是打印得难看，是**挂死并吃光内存**。
+--
+--   这不是假想的：hspec 的 `shouldSatisfy` / `shouldBe` 失败时会把实际值
+--   `show` 进失败消息，所以只要有一条断言在这一层失败，整个 spec.exe 就
+--   变成「卡住 + OOM」（2026-09-28 实测，见 TODO 14）。环境字段一律只打大小。
+instance Show ProgRes where
+    show s = "ProgRes { prTEnv = <" <> show (M.size (prTEnv s)) <> " defs>"
+        <> ", prEnv = <" <> show (M.size (prEnv s)) <> " closures>"
+        <> ", prNext = " <> show (prNext s)
+        <> ", prDEnv = <" <> show (M.size (denvCtors (prDEnv s))) <> " ctors>"
+        <> ", prTys = " <> show (prTys s)
+        <> ", prVals = <" <> show (M.size (prVals s)) <> " values> }"
 
 -- | 空会话 = 只有内置函数的起点，和 app/Main.hs 用 initSession 起的会话一致。
 emptyProg :: ProgRes
@@ -119,19 +136,44 @@ progRun s src = case runProg src of
             -- 编译器分不出来。这里必须按【实现】的顺序传：batchName 在前。
             -- Spec 里的 span 名是 runProg 用的 ""，所以插入符照常渲染。
             Left terr -> Left ("Type error: " <> prettyTypeErrorWith "" src terr)
-            Right (_, tenv', tys) ->
-                let (evRes, _) = runState
-                        (runReaderT (runExceptT (evalProgram prs)) (prEnv s)) (Depth 0)
-                in case evRes of
-                    Left eerr -> Left ("Eval error: " <> prettyEvalErrorWith "" src eerr)
-                    Right (env', vals) -> Right ProgRes
-                        { prTEnv = M.union tenv' (prTEnv s)   -- 新定义遮蔽旧定义
-                        , prEnv  = env'
-                        , prNext = n'
-                        , prDEnv = denv
-                        , prTys  = tys
-                        , prVals = vals
-                        }
+            Right (_, tenv', tys) -> case defFailure src tys of
+                -- 一个 def 没通过（或因为依赖失败而没检查），这一批就不算成功。
+                -- 和 app/Main.hs 的 execBatch 同构：只报错，不求值。
+                Just msg -> Left ("Type error: " <> msg)
+                Nothing ->
+                    let (evRes, _) = runState
+                            (runReaderT (runExceptT (evalProgram prs)) (prEnv s)) (Depth 0)
+                    in case evRes of
+                        Left eerr -> Left ("Eval error: " <> prettyEvalErrorWith "" src eerr)
+                        Right (env', vals) -> Right ProgRes
+                            { prTEnv = M.union tenv' (prTEnv s)   -- 新定义遮蔽旧定义
+                            , prEnv  = env'
+                            , prNext = n'
+                            , prDEnv = denv
+                            , prTys  = tys
+                            , prVals = vals
+                            }
+
+-- | per-SCC 恢复（2026-09-28）之后，一批里有一个坏 def 不再让 programChecker
+--   整体 Left —— 它返回 Right，把每个 def 的结果分别放进 prTys，于是一批里的
+--   **所有** def 错误都能报出来，而不是只报第一个（见 app/Main.hs 的 printBatch）。
+--
+--   但「这一批算不算成功」不能跟着放宽：类型没定下来的程序求值没有意义，
+--   而且闭包环境是自指的，`show` 一个求值结果会挂死。所以这里把 def 级失败
+--   重新收成 Left。取**第一个**坏 def（M.elems 按语句下标升序，即最早那个）；
+--   正常情况下 TyDefFailed 必然存在（有 def 被 skip 就说明它的依赖失败了）。
+--
+--   ⚠️ 因此本文件**依赖** test/rev/stage2b-scc.patch 引进的三个构造子
+--      （TyDefFailed / TyDefSkipped / CalleeNotChecked）。补丁还没进 src/ 时
+--      `test/run-spec.sh` 会**编译失败**（不是用例红，是压根编不过）——
+--      那是缺补丁，不是 src 有类型错误。先打补丁，或跑
+--      `SRC=test/rev/s2c/src bash test/run-spec.sh` 用影子副本验。
+defFailure :: Text -> M.Map Int StmtTy -> Maybe Text
+defFailure src tys = case [e | TyDefFailed e <- M.elems tys] of
+    (e: _)  -> Just (prettyTypeErrorWith "" src e)
+    []      -> case [ns | TyDefSkipped ns <- M.elems tys, not (null ns)] of
+        (ns: _) -> Just ("not checked: " <> T.intercalate ", " ns)
+        []      -> Nothing
 
 -- | 多行会话：一行一次 progRun（模拟 REPL 逐行提交），
 --   返回每一行跑完之后的会话；ss !! 0 是第一行之后的。任一行出错就 Left。

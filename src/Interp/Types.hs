@@ -80,7 +80,12 @@ data T'
     | TCon Text [T'] 
     deriving (Show, Eq)
 
-data StmtTy = TyDef Text S' | TyExpr (Either (Located TypeError) T') deriving (Show, Eq)
+data StmtTy 
+    = TyDef Text S'
+    | TyDefFailed (Located TypeError)
+    | TyDefSkipped [Text]
+    | TyExpr (Either (Located TypeError) T') 
+    deriving (Show, Eq)
 
 type TypeVar = Int
 type Counter = Int
@@ -100,6 +105,7 @@ data TypeError
     | OccurCheck
     | CalleeNote Text S' TypeError
     | WithNote Text TypeError
+    | CalleeNotChecked Text
     deriving (Show, Eq)
 
 type Env  = Map Text V'

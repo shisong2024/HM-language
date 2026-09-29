@@ -102,8 +102,11 @@ prettyTypeError = \case
     TypeCtorArityMisMatch t n m -> 
         T.unwords ["Type", t, "expects", pack (show n), "argument(s) but got", pack (show m)] <> "."
     CalleeNote n sch e ->
-        prettyTypeError e <> "\n  note: `" <> n <> "` is bound here with type " <> prettyS' sch <> "."
+        prettyTypeError e <> "\n  note: " <> tick n <> " is bound here with type " <> prettyS' sch <> "."
     WithNote nt e -> prettyTypeError e <> "\n" <> T.unlines (map ("  " <>) (T.lines nt))
+    CalleeNotChecked n ->
+        tick n <> " has no type because its definition did not check, so this "
+            <> "expression was not checked either."
 
 prettyS' :: S' -> Text
 prettyS' (Forall tvs t)
@@ -173,7 +176,12 @@ printBatch src bn lprs tps vals perr =
         renderStmt ln i st = T.pack (show ln) <> ": " <> case st of
             StmtDef (Def n _ _) -> case M.lookup i tps of
                 Just (TyDef _ sch) -> "def " <> n <> " : " <> prettyS' sch <> "\n"
-                _ -> ""
+                Just (TyDefFailed terr) -> "Type Error:\n" <> prettyTypeErrorWith src bn terr <> "\n"
+                Just (TyDefSkipped []) -> "Not checked.\n"
+                Just (TyDefSkipped ds) -> "Not checked: " <> T.intercalate ", " (map tick ds)
+                    <> " did not type check.\n"
+                Just (TyExpr _) -> ""
+                Nothing -> ""
             StmtExpr _ -> case (M.lookup i tps, M.lookup i vals) of
                 (Just (TyExpr (Left terr)), _) -> "Type Error:\n" <> prettyTypeErrorWith src bn terr <> "\n"
                 (Just (TyExpr (Right tp)), Just (Left eerr)) -> "Type : " <> prettyT' tp <> "\n" <>
@@ -216,3 +224,6 @@ normalizeTs ts = fmap (renumberT $ M.fromList (zip (dedup (concatMap varOrder ts
 dedup :: Eq a => [a] -> [a]
 dedup [] = []
 dedup (x: xs) = x: dedup (filter (/= x) xs)
+
+tick :: Text -> Text
+tick n = "`" <> n <> "`"

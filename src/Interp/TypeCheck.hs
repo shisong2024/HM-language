@@ -151,19 +151,46 @@ programChecker outer prs = do
     case fstDuplicate [n | StmtDef (Def n _ _) <- prs] of
         Just tx -> throwError $ Located Nothing $ DuplicateDef tx
         Nothing -> do
-            (ts, nTEnv) <- go M.empty outer' (stronglyConnComp $ deps prs)
+            (ts, nTEnv, defRes, failed) <- go M.empty outer' S.empty (stronglyConnComp $ deps prs)
             let env' = applyTEnv ts (M.union nTEnv outer')
-            exprs <- forM [(i, e) | (i, StmtExpr e) <- zip [0..] prs] $ \(i, e) -> (i, ) <$> tryEnv (fmap (apply ts . snd) (typeChecker env' e))
-            let defTps = M.fromList [(i, TyDef n (nTEnv M.! n)) | (i, StmtDef (Def n _ _)) <- zip [0..] prs]
+            exprs <- forM [(i, e) | (i, StmtExpr e) <- zip [0..] prs] $ \(i, e) -> (i, ) <$> 
+                case [n | n <- S.toList (freeVars e), S.member n failed] of
+                    [] -> tryEnv (fmap (apply ts . snd) (typeChecker env' e))
+                    n: _ -> return $ Left $ Located Nothing $ CalleeNotChecked n
+            let defTps = M.fromList 
+                    [(i, M.findWithDefault (TyDefSkipped []) n defRes)
+                    | (i, StmtDef (Def n _ _)) <- zip [0..] prs]
             return (ts, M.union ctorEnv nTEnv, M.union defTps (M.fromList (map (fmap TyExpr) exprs)))
     where
-        go :: (MonadState Counter m, MonadReader DEnv m, MonadError (Located TypeError) m) => TSub -> TEnv -> [SCC Decl] -> m (TSub, TEnv)
-        go ts env = \case
-            [] -> return (ts, env)
+        depsOf :: M.Map Text [Text]
+        depsOf = M.fromList [(n, ds) | (_, n, ds) <- deps prs]
+
+        go :: (MonadState Counter m, MonadReader DEnv m, MonadError (Located TypeError) m) 
+           => TSub -> TEnv -> Set Text -> [SCC Decl] -> m (TSub, TEnv, M.Map Text StmtTy, Set Text)
+        go ts env fd = \case
+            [] -> return (ts, env, M.empty, fd)
             (scc: rest) -> do
                 let grp = [(n, b) | Def n _ b <- flatten scc]
-                (ts1, new) <- sccChecker env grp
-                go (compose ts1 ts) (M.union new env) rest
+                    ns  = map fst grp
+                    brk = [d | n <- ns, d <- M.findWithDefault [] n depsOf
+                             , d `notElem` ns, S.member d fd]
+                if not (null brk) then do
+                    let skipped = M.fromList [(n, TyDefSkipped brk) | n <- ns]
+                    (ts', env', rest', fd') <- go ts env (S.union (S.fromList ns) fd) rest
+                    return (ts', env', M.union skipped rest', fd')
+                else do
+                    r <- tryEnv (sccChecker env grp)
+                    let failedHere = case r of
+                            Right _ -> S.empty
+                            Left _  -> S.fromList ns
+                        (tsNext, envNext, here) = case r of
+                            Right (ts1, new) -> (compose ts1 ts, M.union new env, M.mapWithKey TyDef new)
+                            Left err -> (ts, env, case ns of
+                                []         -> M.empty
+                                (n0: more) -> M.fromList ((n0, TyDefFailed err) :
+                                    [(n, TyDefSkipped (filter (/= n) ns)) | n <- more]))
+                    (ts', env', rest', failed') <- go tsNext envNext (S.union failedHere fd) rest
+                    return (ts', env', M.union here rest', failed')
 
 fresh :: MonadState Counter m => m T'
 fresh = get >>= \n -> put (n + 1) >> return (TVar n)
