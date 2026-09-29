@@ -68,6 +68,7 @@ prettyEvalError = \case
     NotACodepoint i -> "Not a Unicode code point: " <> pack (show i) <> "."
     PrimArgMismatch p args ->
         "`" <> p <> "` does not accept " <> T.intercalate ", " (fmap prettyV' args) <> "."
+    NoSuchField f v -> "`" <> f <> "` is not a field of " <> prettyV' v <> "."
 
 printT' :: T' -> Text
 printT' = go False
@@ -129,6 +130,14 @@ prettyS' (Forall tvs t)
             ren = M.fromList (zip bsOrd [0..] <> zip frees [l..])
         in "Forall " <> T.unwords ["a" <> pack (show i) | i <- [0..l]] <> ". " <> printT' (renumberT ren t)
 
+
+-- `Node { key, val }` -- the fields a constructor declares, in argument
+-- order, appended to the constructor's name in the `data` echo.
+fieldNames :: DataDecl -> Text -> Text
+fieldNames d c = case sortOn (snd . snd)
+        [(f, ci) | (f, ci@(c', _)) <- M.toList (dFields d), c' == c] of
+    [] -> ""
+    fs -> " {" <> T.intercalate ", " (map fst fs) <> "}"
 
 prettyP :: P' -> Text
 prettyP = \case
@@ -199,8 +208,9 @@ printBatch src bn lprs tps vals perr =
                 (Just (TyExpr (Right tp)), Just (Right v)) -> "Type : " <> prettyT' tp <> "\n" <> "Value: " <> prettyV' v <> "\n"
                 _ -> ""
             StmtData d -> "data " <> T.unwords (dName d : dParams d) <> "\n"
-                <> T.concat [ "  " <> c <> " : " <> (\(Forall _ t) -> prettyT' t) sch <> "\n"
-                | (c, sch) <- M.toAscList (ctorSchemes d) ]
+                <> T.concat [ "  " <> c <> fieldNames d c <> " : "
+                              <> (\(Forall _ t) -> prettyT' t) sch <> "\n"
+                            | (c, sch) <- M.toAscList (ctorSchemes d) ]
             StmtType n ps t -> "type " <> T.unwords (n : ps) <> " = " <> prettyT' t <> "\n"
             StmtInfix n fx -> fixityTxt n fx <> "\n"
 

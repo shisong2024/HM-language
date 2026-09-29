@@ -55,9 +55,10 @@ loop s = do
             | Just p <- T.stripPrefix ":load " src -> loop =<< loadFile s (T.unpack (T.strip p))
             | Just _ <- T.stripPrefix "import " src -> loop =<< doImport s src
             | T.isPrefixOf ":" src -> TIO.putStrLn ("Unknown command: " <> src <> ".") >> loop s
-            | otherwise -> case runProgWith (sFixities s) src of
+            | otherwise -> case runProgWith (Tabs (sFixities s) (sFields s)) src of
                 Left perr -> TIO.putStrLn ("Parse Error:\n" <> perr) >> loop s
-                Right (fx, lprs) -> loop . fst =<< execBatch True (s { sFixities = fx }) src lprs []
+                Right (tb, lprs) -> loop . fst =<< execBatch True
+                    (s { sFixities = tbFix tb, sFields = tbFld tb }) src lprs []
 
 runFile :: FilePath -> IO ()
 runFile path = do
@@ -110,10 +111,11 @@ execBatch' loud ss src lprs perr = do
                                && not (any (\case TyExpr (Left _) -> True; _ -> False) (M.elems tps))
                         return (ss { sTEnv = foldr M.delete (M.union nTEnv (sTEnv ss)) stale
                                 , sEnv  = foldr M.delete env' stale
-                                , sNext = n, sDEnv = denv }, ok)
+                                , sNext = n, sDEnv = denv
+                                , sFields = M.filter (\fi -> fiCtor fi `notElem` stale) (sFields ss) }, ok)
 
 doTypeOf :: Session -> Text -> IO Session
-doTypeOf s e = case runWith (sFixities s) (T.dropWhileEnd (== ';') (T.strip e)) of
+doTypeOf s e = case runWith (Tabs (sFixities s) (sFields s)) (T.dropWhileEnd (== ';') (T.strip e)) of
     Left perr -> TIO.putStrLn ("Parse Error:\n" <> perr) >> return s
     Right ex -> case expandProgram (sSyns s) [StmtExpr ex] of
       Left msg -> TIO.putStrLn ("Type Error:\n" <> msg) >> return s
@@ -167,10 +169,28 @@ withPrelude s = do
         Left _ -> return s
         Right tx -> do
             s' <- loadFile s preludePath
-            case runProgWith (sFixities s') (blanckImportLines tx) of
+            case runProgWith (Tabs (sFixities s') (sFields s')) (blanckImportLines tx) of
                 Left _ -> return s'
-                Right (_, lprs) -> 
-                    return $ addPreludePrefix [n | (_, StmtDef (Def n _ _)) <- lprs] s'
+                Right (tb, lprs) -> 
+                    return $ addPreludePrefix [n | (_, StmtDef (Def n _ _)) <- lprs]
+                             (s' { sFixities = tbFix tb, sFields = tbFld tb })
+
+-- A module loaded as `M` has its constructors qualified, so its field
+-- table has to be too: `M.Node { ... }` and `p.key` have to agree on a name.
+aliasFields :: Maybe Text -> [(Int, Statement)] -> Session -> Session
+aliasFields ma lprs s = case ma of
+    Nothing -> s
+    Just a  -> s { sFields = M.map pre (sFields s) }
+        where
+            ctors, datas :: S.Set Text
+            ctors = S.fromList [c | (_, StmtData d) <- lprs, (c, _) <- dCtors d]
+            datas = S.fromList [dName d | (_, StmtData d) <- lprs]
+
+            pre :: FieldInfo -> FieldInfo
+            pre fi = fi { fiCtor = qua ctors (fiCtor fi), fiData = qua datas (fiData fi) }
+
+            qua :: S.Set Text -> Text -> Text
+            qua set n = if n `S.member` set then a <> "." <> n else n
 
 addPreludePrefix :: [Text] -> Session -> Session
 addPreludePrefix ns s = s { sTEnv = add (sTEnv s), sEnv = add (sEnv s) }
@@ -240,15 +260,17 @@ loadWithImports seen loud s malias path
                             (sb, okb) <- loadWithImports (path: seen) loud sa (Just a) (resolve dir p)
                             return (sb, oka && okb)) 
                             (s, True) imps
-                        case runProgWith (sFixities s1) body of
+                        case runProgWith (Tabs (sFixities s1) (sFields s1)) body of
                             Left perr -> TIO.putStrLn ("Parse Error:\n" <> perr) >> return (s1, False)
-                            Right (fx, lprs) -> do
+                            Right (tb, lprs) -> do
                                 let sndl = map snd lprs
                                     prs = case malias of
                                         Nothing -> sndl
                                         Just a -> qualifyProgram a sndl
                                     lprs' = zip (map fst lprs) prs
-                                (s2, ok2) <- execBatch loud (s1 { sFixities = fx }) body lprs' []
+                                    s1' = aliasFields malias lprs
+                                            (s1 { sFixities = tbFix tb, sFields = tbFld tb })
+                                (s2, ok2) <- execBatch loud s1' body lprs' []
                                 let s3 = maybe s2 (\a -> s2 { sAliases = M.insert a path (sAliases s2) }) malias
                                 return (s3, ok2 && ok1)
     where
@@ -263,6 +285,7 @@ unload a s = s
     , sDEnv = DEnv (strip (denvCtors d)) (strip (denvDatas d))
     , sSyns = strip (sSyns s)
     , sFixities = strip (sFixities s)
+    , sFields = M.filter (not . gone) (sFields s)
     }
     where
         d :: DEnv
@@ -270,6 +293,11 @@ unload a s = s
 
         strip :: M.Map Text a -> M.Map Text a
         strip = M.filterWithKey (\k _ -> not ((a <> ".") `T.isPrefixOf` k))
+
+        -- Field names are kept bare, so they go by the constructor they
+        -- belong to rather than by their own key.
+        gone :: FieldInfo -> Bool
+        gone fi = (a <> ".") `T.isPrefixOf` fiCtor fi
 
 aliasOf :: Session -> FilePath -> Maybe Text
 aliasOf s p = case [a | (a, p') <- M.toList (sAliases s), p' == p] of

@@ -51,6 +51,33 @@ type Lev = Int
 data Fixity = Fixity { fixLev :: Lev, fixAssoc :: Assoc } deriving (Show, Eq)
 type FixTab = Map Text Fixity
 
+-- Where a field lives: which constructor it belongs to, its position among
+-- that constructor's arguments, how many arguments there are, and whether
+-- that constructor is the only one of its type. The rewrite needs all four:
+-- the position to project, the arity to build a full pattern, and `fiSolo`
+-- to know whether a one arm match is already exhaustive. `fiData` is the
+-- type it was declared in, so that re-declaring that type can take its old
+-- fields away again.
+data FieldInfo = FieldInfo
+    { fiCtor  :: Text
+    , fiData  :: Text
+    , fiIdx   :: Int
+    , fiArity :: Int
+    , fiSolo  :: Bool
+    } deriving (Show, Eq)
+
+-- Fields are keyed by their bare name: a field of a qualified constructor
+-- cannot be written as `p.x`, and a field name means one constructor in a
+-- whole session, so a single table covers every module.
+type FieldTab = Map Text FieldInfo
+
+-- What the parser threads through: fixity while it reads expressions,
+-- fields to rewrite records once the whole chunk has been read.
+data Tabs = Tabs
+    { tbFix :: FixTab
+    , tbFld :: FieldTab
+    } deriving (Show, Eq)
+
 -- The characters an operator name may be built from. `.` (qualified names),
 -- `|` (separating match arms), `:` (cons), `$` (the parser's `$let@`
 -- temporaries) and `#` (`#cons`) are all left out on purpose.
@@ -85,6 +112,7 @@ data EvalError
     | OprArgIsNotComparable V' V'
     | NotACodepoint Integer
     | PrimArgMismatch Text [V']
+    | NoSuchField Text V'
     deriving (Show, Eq)
 
 newtype Depth = Depth Int deriving (Show, Eq, Ord, Generic)
@@ -153,6 +181,8 @@ data DataDecl = DataDecl
     { dName   :: Text
     , dParams :: [Text]
     , dCtors  :: [(Text, [T'])]
+    -- Field name -> (constructor, position). Empty for an ordinary `data`.
+    , dFields :: Map Text (Text, Int)
     } deriving (Show, Eq)
 
 data Session = Session
@@ -164,6 +194,7 @@ data Session = Session
     , sAliases :: Map Text FilePath
     , sSyns    :: SynTable
     , sFixities :: FixTab
+    , sFields  :: FieldTab
     } deriving (Show, Eq)
 
 data CtorInfo = CtorInfo

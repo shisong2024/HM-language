@@ -13,6 +13,7 @@ builtinEnv = M.fromList
     , ("++", VPrim "++" 2 [])
     , ("uncons", VPrim "uncons" 1 [])
     , ("fromCode", VPrim "fromCode" 1 [])
+    , ("$fieldErr", VPrim "$fieldErr" 2 [])
     ]
 
 builtinTEnv :: TEnv
@@ -22,6 +23,7 @@ builtinTEnv = M.fromList
     , ("++", strAppTy)
     , ("uncons", unconsTy)
     , ("fromCode", fromCodeTy)
+    , ("$fieldErr", fieldErrTy)
     ]
 
 consTy :: S'
@@ -44,6 +46,12 @@ unconsTy = Forall S.empty (TFunc TString (TCon "Maybe" [TTuple [TInt, TString]])
 fromCodeTy :: S'
 fromCodeTy = Forall S.empty (TFunc TInt TString)
 
+-- The catch-all arm of a rewritten field access: `p.h` where `p` turned
+-- out to be a `Leaf`. It is never written by hand, and it never returns, so
+-- its type says `forall a b. String -> a -> b`.
+fieldErrTy :: S'
+fieldErrTy = Forall (S.fromList [0, 1]) (TFunc TString (TFunc (TVar 0) (TVar 1)))
+
 initSession :: Session
 initSession = Session 
     { sEnv     = builtinEnv
@@ -54,6 +62,7 @@ initSession = Session
     , sAliases = M.empty
     , sSyns    = M.empty
     , sFixities = M.empty
+    , sFields  = M.empty
     }
 
 emptyDEnv :: DEnv

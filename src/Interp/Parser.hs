@@ -15,9 +15,8 @@ import Data.Text (cons, Text, pack, unpack)
 import Data.Functor(($>), void)
 
 import Control.Monad (guard, when, foldM)
+import Data.List (sortOn)
 
--- Fixity levels, renumbered into the Haskell 0..9 range. Only the order
--- matters: comparisons 4, `+ -` 6, `* /` 7, `^` 8.
 opInfo :: Opr -> Fixity
 opInfo = \case
     OCmp _ -> Fixity 4 AssocL
@@ -28,19 +27,12 @@ opInfo = \case
         OpDiv -> Fixity 7 AssocL
         OpPow -> Fixity 8 AssocR
 
--- `++` is a builtin function, not an `Opr`, so its level cannot come from
--- `opInfo`. `infixr 5` is the level Haskell gives it. The level of anything
--- already built in comes from the interpreter and is not redeclarable.
 builtinFix :: FixTab
 builtinFix = M.fromList [("++", Fixity 5 AssocR)]
 
--- Names whose precedence comes from the interpreter rather than the source:
--- the `Opr`s (`opInfo`) and the primitive functions used infix (`builtinFix`).
 builtinOp :: Text -> Bool
 builtinOp n = n `elem` map fst opTable || M.member n builtinFix
 
--- What a symbolic `def` name gets when nothing says otherwise, same as an
--- undeclared operator in Haskell.
 defaultFix :: Fixity
 defaultFix = Fixity 9 AssocL
 
@@ -93,7 +85,7 @@ parseILit = withSpan $ ILit <$> lexeme (decimal <* nextNotVar <?> "integer liter
 parseBLit :: Parser E'
 parseBLit = withSpan $ BLit <$> toBool (symbol "true" <|> symbol "false" <?> "bool")
 
-parseListLit :: FixTab -> Parser E'
+parseListLit :: Tabs -> Parser E'
 parseListLit tab = withSpan $ ListLit <$> (lexeme (char '[') *> sepBy (parseExpr tab) comma <* lexeme (char ']'))
 
 nameRaw :: (Char -> Bool) -> Parser Text
@@ -120,11 +112,6 @@ parseVar' = lexeme $ do
 parseVar :: Parser E'
 parseVar = withSpan (try (Var <$> parseVar') <?> "variable")
 
--- `"..."`, with `\n \t \r \\ \"` and `\uXXXX`.
---
--- No raw newline: `stripComment` scans line by line, so a string that
--- spanned lines could hide a `--` from it. `\uXXXX` is the only way to
--- write a non-ASCII character -- source files have to stay pure ASCII.
 parseStrLit :: Parser E'
 parseStrLit = withSpan (SLit <$> lexeme strLiteral)
 
@@ -153,7 +140,7 @@ strEscape = do
             return $ chr (foldl (\a d -> a * 16 + digitToInt d) 0 ds)
         c    -> fail $ "unknown escape `\\" <> [c] <> "`"
 
-parseParen :: FixTab -> Parser E'
+parseParen :: Tabs -> Parser E'
 parseParen tab = withSpan $ do
     _ <- lexeme (char '(')
     ls <- sepBy1 (parseExpr tab) comma
@@ -162,30 +149,65 @@ parseParen tab = withSpan $ do
         [x] -> x
         es  -> TupleLit es
 
--- A unary `-` takes only the built-in operators, and of those only `^` is
--- above level 8: `-2 ^ 2` is `-(2 ^ 2)` and `-7 / 2` is `(-7) / 2`, both as
--- before. User operators are left out on purpose, so `-x <+> y` means
--- `(-x) <+> y` whatever level `<+>` was declared at.
-parseUnary :: FixTab -> Parser E'
+parseUnary :: Tabs -> Parser E'
 parseUnary tab = withSpan $ do
     m <- optional $ try $ lexeme $ char '-'
     case m of
         Nothing -> parseApp tab
         Just _  -> do
-            e <- parseOpr M.empty 8
+            -- `-` binds looser than `^` but tighter than `*`, which is what
+            -- an empty fixity table at level 8 gives.
+            e <- parseOpr (Tabs M.empty (tbFld tab)) 8
             case e of
                 ILit n -> return $ ILit (-n)
                 _      -> return $ BOpr (OArith OpSub) (ILit 0) e
 
-parseAtom :: FixTab -> Parser E'
-parseAtom tab = parseILit <|> parseBLit <|> parseStrLit <|> parseVar <|> parseCtorExpr <|> parseListLit tab <|> parseParen tab
+parseAtom :: Tabs -> Parser E'
+parseAtom tab = withSpan (parseAtomHead tab >>= atomTail tab)
 
-parseLet :: FixTab -> Parser E'
+parseAtomHead :: Tabs -> Parser E'
+parseAtomHead tab = parseILit <|> parseBLit <|> parseStrLit <|> parseVar <|> parseCtorExpr tab <|> parseListLit tab <|> parseParen tab
+
+-- `p.x` and `p { x = 3 }` are suffixes on an atom rather than infix
+-- operators, and they chain, so `p.l.h` walks down two levels. No `try`: a
+-- `{` that does not open a field list is an error, not something to back out
+-- of, and `fieldSel` fails without consuming when there is no `.`.
+atomTail :: Tabs -> E' -> Parser E'
+atomTail tab e = do
+    m <- optional (fieldSel <|> recUpdE tab)
+    case m of
+        Nothing -> return e
+        Just f  -> atomTail tab (f e)
+
+fieldSel :: Parser (E' -> E')
+fieldSel = do
+    sp <- getSourcePos
+    _ <- lexeme (char '.')
+    f <- parseVar'
+    return $ \e -> App (At (Span sp sp) (Var ("$fld@" <> f))) e
+
+-- `{ x = 1, y = 2 }`, shared by record literals, updates and patterns.
+fldBraces :: Parser a -> Parser b -> Parser [(Text, b)]
+fldBraces sep p = do
+    _ <- lexeme (char '{')
+    fs <- sepBy1 fld comma
+    _ <- lexeme (char '}')
+    return fs
+    where
+        fld = (,) <$> parseVar' <* lexeme sep <*> p
+
+recUpdE :: Tabs -> Parser (E' -> E')
+recUpdE tab = do
+    fs <- fldBraces (char '=' <?> "=") (parseExpr tab)
+    return $ \e -> App (Var ("$upd@" <> T.intercalate "," (map fst fs)))
+                       (TupleLit (e : map snd fs))
+
+parseLet :: Tabs -> Parser E'
 parseLet tab = withSpan $ do
     _ <- symbol "let"
     sp0 <- getSourcePos
     off0 <- getOffset
-    p <- parsePat
+    p <- parsePat tab
     if irrefutableP p then return () else setOffset off0 >> fail refutableLetMsg
     _ <- lexeme (char '=' <?> "=")
     e1 <- parseExpr tab
@@ -205,19 +227,13 @@ parseLet tab = withSpan $ do
             "this pattern may fail to match, so it cannot be used as a `let` binding. "
             <> "Bind a variable (or a tuple of variables), or use `match` instead."
 
-parseIf :: FixTab -> Parser E'
+parseIf :: Tabs -> Parser E'
 parseIf tab = withSpan $ If
     <$> (symbol "if" *> parseExpr tab)
     <*> (symbol "then" *> parseExpr tab)
     <*> (symbol "else" *> parseExpr tab)
 
--- Precedence climbing. Two tables are in play: `opTable` for the built-in
--- `Opr`s, and the declared operators, which are ordinary function names --
--- `a <+> b` is `(<+>) a b`, so `Eval` and `TypeCheck` never hear about them.
---
--- `prev` is the operator that produced the left operand at this level; it is
--- what makes `a <+> b <+> c` an error when `<+>` is `infix`.
-parseOpr :: FixTab -> Lev -> Parser E'
+parseOpr :: Tabs -> Lev -> Parser E'
 parseOpr tab l = withSpan $ parseUnary tab >>= \t -> lexeme (loop t Nothing)
     where
         loop :: E' -> Maybe (Text, Assoc) -> Parser E'
@@ -227,7 +243,7 @@ parseOpr tab l = withSpan $ parseUnary tab >>= \t -> lexeme (loop t Nothing)
                     [ lexeme (try (string s <* notFollowedBy (satisfy isOpChar))) $> (opInfo op, s, BOpr op)
                     | (s, op) <- opTable ]
                     <> [ lexeme (try (string s <* notFollowedBy (satisfy isOpChar))) $> (fx, s, App . App (Var s))
-                       | (s, fx) <- M.toList tab ]
+                       | (s, fx) <- M.toList (tbFix tab) ]
                 guard (fixLev fx >= l)
                 return (fx, nm, mk)
             case mop of
@@ -239,7 +255,7 @@ parseOpr tab l = withSpan $ parseUnary tab >>= \t -> lexeme (loop t Nothing)
                     rhs <- parseOpr tab nl
                     loop (mk lhs rhs) (Just (nm, fixAssoc fx))
 
-parseLambda :: FixTab -> Parser E'
+parseLambda :: Tabs -> Parser E'
 parseLambda tab = withSpan $ do
     _ <- lexeme (symbol "lambda")
     vars <- some parseVar'
@@ -247,7 +263,7 @@ parseLambda tab = withSpan $ do
     b <- parseExpr tab
     return $ foldr Lambda b vars
 
-parseApp :: FixTab -> Parser E'
+parseApp :: Tabs -> Parser E'
 parseApp tab = withSpan $ foldl App <$> parseAtom tab <*> many (parseAtom tab)
 
 parseTypeAtom :: [(Text, TypeVar)] -> Parser T'
@@ -300,7 +316,7 @@ parseTypeApp vars = do
         (_, []) -> return h
         _ -> fail "type application on a non-type-constructor"
 
-parseAnn :: FixTab -> Parser E'
+parseAnn :: Tabs -> Parser E'
 parseAnn tab = do
     e <- parseCons tab
     m <- optional (try (lexeme (string "::") *> parseType))
@@ -321,28 +337,52 @@ parseData = do
     let vars = zip ps [0..]
     _ <- lexeme (char '=' <?> "=")
     cs <- sepBy1 (parseCtorDecl vars) (lexeme (char '|' <?> "|"))
-    case [(c, i) | (c, args) <- cs, i <- concatMap strayTvs args] of
+    case [(c, i) | (c, args, _) <- cs, i <- concatMap strayTvs args] of
         [] -> return ()
         ((c, i): _) -> fail $ unpack (T.unwords
             ["constructor", c, "uses type variable", pack [chr (negate i)], "which is not a parameter of", n]
             <> ".")
+    -- Two fields with the same name would make `p.f` ambiguous, so they are
+    -- rejected here as well as across declarations (see `recProgram`).
+    case dups [f | (_, _, fs) <- cs, f <- fs] of
+        (f: _) -> fail $ unpack $ "duplicate field " <> f <> " in data " <> n <> "."
+        [] -> return ()
     _ <- semicolon
-    return $ DataDecl n ps cs
+    return $ DataDecl n ps [(c, as) | (c, as, _) <- cs]
+        (M.fromList [(f, (c, i)) | (c, _, fs) <- cs, (i, f) <- zip [0 :: Int ..] fs])
 
-parseCtorDecl :: [(Text, TypeVar)] -> Parser (Text, [T'])
-parseCtorDecl vars = (,) <$> upperName <*> many (parseTypeAtom vars)
+dups :: Eq a => [a] -> [a]
+dups xs = [x | (i, x) <- zip [0 :: Int ..] xs, x `elem` drop (i + 1) xs]
 
-parseExpr :: FixTab -> Parser E'
+parseCtorDecl :: [(Text, TypeVar)] -> Parser (Text, [T'], [Text])
+parseCtorDecl vars = do
+    n <- upperName
+    m <- optional (fldBraces (string "::" <?> "::") (parseTypeWith vars))
+    case m of
+        Just fs -> return (n, map snd fs, map fst fs)
+        Nothing -> do
+            as <- many (parseTypeAtom vars)
+            return (n, as, [])
+
+parseExpr :: Tabs -> Parser E'
 parseExpr tab = parseIf tab <|> parseLet tab <|> parseLambda tab <|> parseMatch tab <|> parseAnn tab <|> parseCons tab
 
-parseCtorExpr :: Parser E'
-parseCtorExpr = withSpan (try (Var <$> qname) <?> "constructor")
+parseCtorExpr :: Tabs -> Parser E'
+parseCtorExpr tab = withSpan ((try qname >>= ctorExpr tab) <?> "constructor")
+
+ctorExpr :: Tabs -> Text -> Parser E'
+ctorExpr tab n = do
+    m <- optional (fldBraces (char '=' <?> "=") (parseExpr tab))
+    return $ case m of
+        Nothing -> Var n
+        Just fs -> App (Var ("$rec@" <> n <> "@" <> T.intercalate "," (map fst fs)))
+                       (TupleLit (map snd fs))
 
 -- `def (<+>) a b = ...` and `def <+> a b = ...` both name the function
 -- `<+>`, which is what `a <+> b` calls. Such a name is never qualified --
 -- there is no way to write `M.<+>` -- so a declared operator is visible in
 -- every module that is loaded.
-parseDef :: FixTab -> Parser Decl
+parseDef :: Tabs -> Parser Decl
 parseDef tab = do
     f <- symbol "def" *> defName
     vs <- many parseVar'
@@ -390,7 +430,7 @@ assocOf = \case
     "infixr" -> AssocR
     _        -> AssocN
 
-parseProg :: FixTab -> Parser [(Int, Statement)]
+parseProg :: Tabs -> Parser [(Int, Statement)]
 parseProg tab = sc *> many 
     (   ((,) . unPos . sourceLine <$> getSourcePos)
     <*> (   StmtDef <$> parseDef tab 
@@ -404,13 +444,16 @@ parseProg tab = sc *> many
         sc :: Parser ()
         sc = skipMany (hspace1 <|> void eol)
 
-run :: Text -> Either Text E'
-run = runWith M.empty
+emptyTabs :: Tabs
+emptyTabs = Tabs M.empty M.empty
 
-runWith :: FixTab -> Text -> Either Text E'
-runWith tab t = case runParser (parseExpr (effFix tab) <* eof) "" t of
+run :: Text -> Either Text E'
+run = runWith emptyTabs
+
+runWith :: Tabs -> Text -> Either Text E'
+runWith tab t = case runParser (parseExpr (tab { tbFix = effFix (tbFix tab) }) <* eof) "" t of
     Left  err -> Left $ pack (errorBundlePretty err)
-    Right res -> Right res
+    Right res -> desugarE (tbFld tab) res
 
 -- The table a parse really uses: the declared operators plus the built-in
 -- `++` (which no declaration can collide with).
@@ -457,16 +500,18 @@ irrefutableP = \case
     _        -> False
 
 runProg :: Text -> Either Text [(Int, Statement)]
-runProg = fmap snd . runProgWith M.empty
+runProg = fmap snd . runProgWith emptyTabs
 
-runProgWith :: FixTab -> Text -> Either Text (FixTab, [(Int, Statement)])
+runProgWith :: Tabs -> Text -> Either Text (Tabs, [(Int, Statement)])
 runProgWith tab0 tx = case stripComment tx of
     Left msg -> Left msg
-    Right t -> case scanFixities tab0 t of
+    Right t -> case scanFixities (tbFix tab0) t of
         Left msg -> Left msg
-        Right tab -> case runParser (parseProg (effFix tab) <* eof) "" t of
+        Right fix -> case runParser (parseProg (tab0 { tbFix = effFix fix }) <* eof) "" t of
             Left err -> Left $ pack $ errorBundlePretty err
-            Right r  -> Right (tab, r)
+            Right r  -> do
+                (fld, ss) <- recProgram (tbFld tab0) (map snd r)
+                return (Tabs fix fld, zip (map fst r) ss)
 
 -- Fixity has to be known while the expressions are being read, so it is
 -- collected from the text before the parser runs: a declaration further down
@@ -550,32 +595,32 @@ strayTvs = \case
 colonTok :: Parser Char
 colonTok = lexeme (char ':' <* notFollowedBy (char ':'))
 
-parsePat :: Parser P'
-parsePat = do
-    h <- parsePatAtom
-    m <- optional (try (colonTok *> parsePat))
+parsePat :: Tabs -> Parser P'
+parsePat tab = do
+    h <- parsePatAtom tab
+    m <- optional (try (colonTok *> parsePat tab))
     return $ case m of Nothing -> h; Just t -> PCons h t
 
-parsePatAtom :: Parser P'
-parsePatAtom = parsePatParen <|> parsePatList <|> parsePatCtor <|> parsePatVar <|> parsePatBool <|> parsePatStr <|> parsePatInt
+parsePatAtom :: Tabs -> Parser P'
+parsePatAtom tab = parsePatParen tab <|> parsePatList tab <|> parsePatCtor tab <|> parsePatVar <|> parsePatBool <|> parsePatStr <|> parsePatInt
 
-parsePatArg :: Parser P'
-parsePatArg = parsePatParen <|> parsePatList <|> parsePatVar <|> parsePatBool <|> parsePatStr <|> parsePatInt <|> (PCtor <$> qname <*> pure [])
+parsePatArg :: Tabs -> Parser P'
+parsePatArg tab = parsePatParen tab <|> parsePatList tab <|> parsePatVar <|> parsePatBool <|> parsePatStr <|> parsePatInt <|> (PCtor <$> qname <*> pure [])
 
 parsePatStr :: Parser P'
 parsePatStr = PStr <$> lexeme strLiteral
 
-parsePatParen :: Parser P'
-parsePatParen = do
+parsePatParen :: Tabs -> Parser P'
+parsePatParen tab = do
     _ <- lexeme (char '(')
-    ls <- sepBy1 parsePat comma
+    ls <- sepBy1 (parsePat tab) comma
     _ <- lexeme (char ')')
     return $ case ls of
         [x] -> x
         es  -> PTuple es
 
-parsePatList :: Parser P'
-parsePatList = foldr PCons PNil <$> (lexeme (char '[') *> sepBy parsePat comma <* lexeme (char ']'))
+parsePatList :: Tabs -> Parser P'
+parsePatList tab = foldr PCons PNil <$> (lexeme (char '[') *> sepBy (parsePat tab) comma <* lexeme (char ']'))
 
 parsePatVar :: Parser P'
 parsePatVar = parseVar' >>= \n -> return $ if n == "_" then PWild else PVar n
@@ -589,15 +634,15 @@ parsePatInt = try $ do
 parsePatBool :: Parser P'
 parsePatBool = PBool <$> toBool (symbol "true" <|> symbol "false")
 
-parseMatch :: FixTab -> Parser E'
+parseMatch :: Tabs -> Parser E'
 parseMatch tab = withSpan $ Match
     <$> (symbol "match" *> parseExpr tab <* symbol "with")
     <*> sepBy1 (parseArm tab) (lexeme (char '|'))
 
-parseArm :: FixTab -> Parser (P', E')
-parseArm tab = (,) <$> (parsePat <* lexeme (string "->" <?> "->")) <*> parseExpr tab
+parseArm :: Tabs -> Parser (P', E')
+parseArm tab = (,) <$> (parsePat tab <* lexeme (string "->" <?> "->")) <*> parseExpr tab
 
-parseCons :: FixTab -> Parser E'
+parseCons :: Tabs -> Parser E'
 parseCons tab = withSpan $ do
     h <- parseOpr tab 0
     m <- optional (try (colonTok *> parseCons tab))
@@ -605,6 +650,230 @@ parseCons tab = withSpan $ do
         Nothing -> h
         Just t  -> App (App (Var "#cons") h) t
 
-parsePatCtor :: Parser P'
-parsePatCtor = PCtor <$> qname <*> many parsePatArg
+parsePatCtor :: Tabs -> Parser P'
+parsePatCtor tab = do
+    n <- qname
+    m <- optional (fldBraces (char '=' <?> "=") (parsePat tab))
+    case m of
+        Just fs -> return $ PCtor ("$pat@" <> n <> "@" <> T.intercalate "," (map fst fs))
+                                  (map snd fs)
+        Nothing -> PCtor n <$> many (parsePatArg tab)
 
+
+---
+-- Records
+--
+-- A record cannot be resolved while it is being read: `p.x` may appear above
+-- the `data` line that says which constructor `x` belongs to, and a REPL line
+-- may name a type declared in an earlier line. So the parser emits a marker
+-- instead -- `$fld@x`, `$rec@C@x,y`, `$upd@x,y`, `$pat@C@x,y` -- and
+-- `recProgram` rewrites every marker into plain `match` and application once
+-- the declarations of the chunk are in hand. `$` and `@` are outside every
+-- name the lexer accepts, so a marker can never collide with a user name, and
+-- no marker survives the rewrite.
+
+recProgram :: FieldTab -> [Statement] -> Either Text (FieldTab, [Statement])
+recProgram tab0 ss = do
+    tab <- foldM addDecl tab0 [d | StmtData d <- ss]
+    ss' <- mapM (recStmt tab) ss
+    return (tab, ss')
+    where
+        addDecl :: FieldTab -> DataDecl -> Either Text FieldTab
+        addDecl tab d = foldM (addField d) (dropData (dName d) tab) (M.toList (dFields d))
+
+        -- A type that is declared again replaces its fields: the old ones
+        -- name constructors that no longer exist. Without this, a second
+        -- `data T = ... { y :: Bool }` could not re-use `y`, which is what
+        -- re-loading a file -- the usual way to fix a declaration -- does.
+        dropData :: Text -> FieldTab -> FieldTab
+        dropData n = M.filter (\fi -> fiData fi /= n)
+
+        -- One field name means one constructor, or `p.f` would have nothing
+        -- to pick. Reloading a module re-declares the same fields, and a
+        -- module loaded as `M` stores them as `M.C`, so names that differ
+        -- only in the qualifier are the same field.
+        addField :: DataDecl -> FieldTab -> (Text, (Text, Int)) -> Either Text FieldTab
+        addField d tab (f, (c, i)) = case M.lookup f tab of
+            Just old | not (agrees old new) -> Left $
+                "data " <> dName d <> ": field `" <> f <> "` is already a field of `"
+                    <> fiCtor old <> "`."
+            _ -> Right (M.insert f new tab)
+            where
+                new = FieldInfo
+                    { fiCtor  = c
+                    , fiData  = dName d
+                    , fiIdx   = i
+                    , fiArity = maybe 0 length (lookup c (dCtors d))
+                    , fiSolo  = length (dCtors d) == 1
+                    }
+
+        agrees :: FieldInfo -> FieldInfo -> Bool
+        agrees a b = base (fiCtor a) == base (fiCtor b)
+                  && fiIdx a == fiIdx b && fiArity a == fiArity b
+
+        base :: Text -> Text
+        base n = snd (T.breakOnEnd "." n)
+
+recStmt :: FieldTab -> Statement -> Either Text Statement
+recStmt tab = \case
+    StmtDef (Def n vs b) -> StmtDef . Def n vs <$> desugarE tab b
+    StmtExpr e           -> StmtExpr <$> desugarE tab e
+    s                    -> Right s
+
+desugarE :: FieldTab -> E' -> Either Text E'
+desugarE tab = \case
+    ILit i      -> Right (ILit i)
+    BLit b      -> Right (BLit b)
+    SLit s      -> Right (SLit s)
+    Var n       -> Right (Var n)
+    ListLit es  -> ListLit <$> mapM (desugarE tab) es
+    TupleLit es -> TupleLit <$> mapM (desugarE tab) es
+    Let n u v   -> Let n <$> desugarE tab u <*> desugarE tab v
+    If b u v    -> If <$> desugarE tab b <*> desugarE tab u <*> desugarE tab v
+    BOpr o u v  -> BOpr o <$> desugarE tab u <*> desugarE tab v
+    Lambda n b  -> Lambda n <$> desugarE tab b
+    AnnT e t    -> AnnT <$> desugarE tab e <*> pure t
+    At sp e     -> At sp <$> desugarE tab e
+    Match e as  -> Match <$> desugarE tab e
+        <*> mapM (\(p, b) -> (,) <$> desugarP tab p <*> desugarE tab b) as
+    App f a     -> do
+        f' <- desugarE tab f
+        a' <- desugarE tab a
+        case spanOf f' of
+            (sp, Var n) | isMarker n -> recUse tab sp n a'
+            _                        -> Right (App f' a')
+
+-- The innermost `At`, kept so an error can name a line.
+spanOf :: E' -> (Maybe Span, E')
+spanOf = \case
+    At sp e -> case spanOf e of
+        (Nothing, e') -> (Just sp, e')
+        (s, e')       -> (s, e')
+    e -> (Nothing, e)
+
+isMarker :: Text -> Bool
+isMarker n = any (`T.isPrefixOf` n) ["$fld@", "$rec@", "$upd@", "$pat@"]
+
+recUse :: FieldTab -> Maybe Span -> Text -> E' -> Either Text E'
+recUse tab sp n a
+    | Just f <- T.stripPrefix "$fld@" n = fieldGet sp tab f a
+    | Just r <- T.stripPrefix "$rec@" n = recBuild sp tab r a
+    | Just f <- T.stripPrefix "$upd@" n = recUpdate sp tab f a
+    | otherwise = Right (App (Var n) a)
+
+-- `p.x` becomes a one arm match that re-uses the constructor's own pattern:
+-- the type checker already knows how to check that, and it pins `p` to the
+-- right type, so a field on the wrong constructor is a plain `TypeMismatch`.
+-- A type with more than one constructor needs the second arm to keep the
+-- match exhaustive; `p.h` on a `Leaf` is then a runtime error, because both
+-- constructors share one static type.
+fieldGet :: Maybe Span -> FieldTab -> Text -> E' -> Either Text E'
+fieldGet sp tab f a = do
+    fi <- lookupField sp tab f
+    let i  = fiIdx fi
+        ar = fiArity fi
+        ps = [if j == i then PVar recVal else PWild | j <- [0 .. ar - 1]]
+        bad = (PVar recOther, App (App (Var fieldErr) (SLit f)) (Var recOther))
+    return $ Match a ((PCtor (fiCtor fi) ps, Var recVal) : [bad | not (fiSolo fi)])
+
+recVal, recOther, fieldErr :: Text
+recVal   = "$recVal"
+recOther = "$recOther"
+fieldErr = "$fieldErr"
+
+lookupField :: Maybe Span -> FieldTab -> Text -> Either Text FieldInfo
+lookupField sp tab f =
+    maybe (Left $ badSpan sp ("unknown field `" <> f <> "`.")) Right (M.lookup f tab)
+
+-- The fields of `c`, in argument order.
+ctorFields :: Maybe Span -> FieldTab -> Text -> Either Text [Text]
+ctorFields sp tab c =
+    case sortOn (fiIdx . snd) [(f, fi) | (f, fi) <- M.toList tab, fiCtor fi == c] of
+        [] -> Left $ badSpan sp ("`" <> c <> "` is not a record constructor.")
+        fs -> Right (map fst fs)
+
+-- `{ x = 1, y = 2 }` becomes `C 1 2`: names back into argument order.
+recBuild :: Maybe Span -> FieldTab -> Text -> E' -> Either Text E'
+recBuild sp tab rest a = case T.splitOn "@" rest of
+    [c, flds] -> do
+        order <- ctorFields sp tab c
+        given <- zipFields sp c (T.splitOn "," flds) a
+        case [f | (f, _) <- given, f `notElem` order] of
+            (f: _) -> Left $ badSpan sp ("`" <> f <> "` is not a field of `" <> c <> "`.")
+            [] -> case [f | f <- order, f `notElem` map fst given] of
+                (f: _) -> Left $ badSpan sp ("`" <> c <> "` still needs field `" <> f <> "`.")
+                [] -> Right $ foldl App (Var c) [v | f <- order, Just v <- [lookup f given]]
+    _ -> Left $ badSpan sp "malformed record."
+
+-- `p { x = 3 }` becomes `match p with C a _ c -> C a 3 c`, keeping every
+-- field that was not named.
+recUpdate :: Maybe Span -> FieldTab -> Text -> E' -> Either Text E'
+recUpdate sp tab flds a = case a of
+    TupleLit (r: vs) -> do
+        given <- zipFields sp "$update" (T.splitOn "," flds) (TupleLit vs)
+        fis <- mapM (\(f, _) -> (,) f <$> lookupField sp tab f) given
+        let fi = snd (head fis)
+        if any ((/= fiCtor fi) . fiCtor . snd) fis
+            then Left $ badSpan sp "a record update cannot mix fields of different constructors."
+            else do
+                let ar = fiArity fi
+                    idxs = map (fiIdx . snd) fis
+                    valAt j = case [v | ((_, g), v) <- zip fis vs, fiIdx g == j] of
+                        (v: _) -> v
+                        []     -> Var (oldTmp j)
+                    pat = PCtor (fiCtor fi)
+                        [if j `elem` idxs then PWild else PVar (oldTmp j) | j <- [0 .. ar - 1]]
+                    body = foldl App (Var (fiCtor fi)) [valAt j | j <- [0 .. ar - 1]]
+                    bad = (PVar recOther,
+                           App (App (Var fieldErr) (SLit (fst (head given)))) (Var recOther))
+                return $ Match r ((pat, body) : [bad | not (fiSolo fi)])
+    _ -> Left $ badSpan sp "malformed record update."
+
+oldTmp :: Int -> Text
+oldTmp j = "$recOld" <> pack (show j)
+
+-- The names and the values of one field list. The marker carries the names
+-- in the order the parser read them, so they line up with the tuple.
+zipFields :: Maybe Span -> Text -> [Text] -> E' -> Either Text [(Text, E')]
+zipFields sp c flds a = case a of
+    TupleLit vs
+        | length flds /= length vs -> Left $ badSpan sp (malformed c)
+        | (d: _) <- dups flds -> Left $ badSpan sp ("field `" <> d <> "` is given twice.")
+        | otherwise -> Right (zip flds vs)
+    _ -> Left $ badSpan sp (malformed c)
+    where
+        malformed :: Text -> Text
+        malformed n = "malformed record for `" <> n <> "`."
+
+badSpan :: Maybe Span -> Text -> Text
+badSpan msp msg = case msp of
+    Just (Span st _) -> T.unlines [pack (show (unPos (sourceLine st))) <> ":", msg]
+    Nothing          -> msg
+
+desugarP :: FieldTab -> P' -> Either Text P'
+desugarP tab = \case
+    PCtor n ps | Just rest <- T.stripPrefix "$pat@" n -> patBuild tab rest ps
+    PCtor n ps -> PCtor n <$> mapM (desugarP tab) ps
+    PCons u v  -> PCons <$> desugarP tab u <*> desugarP tab v
+    PTuple ps  -> PTuple <$> mapM (desugarP tab) ps
+    p          -> Right p
+
+-- `C { x = p }` becomes `C p _`: every field that was not named is a
+-- wildcard, and the rest is the ordinary constructor pattern.
+patBuild :: FieldTab -> Text -> [P'] -> Either Text P'
+patBuild tab rest ps = case T.splitOn "@" rest of
+    [c, flds] -> do
+        let given = if T.null flds then [] else T.splitOn "," flds
+        case dups given of
+            (d: _) -> Left $ "field `" <> d <> "` is given twice in the same pattern."
+            [] -> do
+                order <- ctorFields Nothing tab c
+                ps' <- mapM (desugarP tab) ps
+                case [f | f <- given, f `notElem` order] of
+                    (f: _) -> Left $ "`" <> f <> "` is not a field of `" <> c <> "`."
+                    [] -> Right $ PCtor c
+                        [case [k | (k, g) <- zip [0 :: Int ..] given, g == o] of
+                             (k: _) -> ps' !! k
+                             []     -> PWild
+                        | o <- order]
+    _ -> Left "malformed record pattern."

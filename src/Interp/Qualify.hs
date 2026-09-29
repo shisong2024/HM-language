@@ -5,6 +5,7 @@ module Interp.Qualify where
 import Interp.Types
 import Interp.Eval
 
+import qualified Data.Map as M
 import qualified Data.Set as S
 
 import Data.Text (Text)
@@ -31,6 +32,9 @@ qualifyProgram a prs = map (stmt (topsOf prs)) prs
             StmtData d -> StmtData d
                 { dName  = qual (tTypes t) (dName d)
                 , dCtors = [(qual (tCtors t) c, map (typ t) as) | (c, as) <- dCtors d]
+                -- The constructor names in the field table are shown back in
+                -- the `data` echo, so they have to be qualified in step.
+                , dFields = M.map (\(c, i) -> (qual (tCtors t) c, i)) (dFields d)
                 }
             StmtType n ps ty -> StmtType (qual (tTypes t) n) ps (typ t ty)
             StmtInfix n fx -> StmtInfix n fx
