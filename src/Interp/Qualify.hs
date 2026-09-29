@@ -9,11 +9,10 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 
 import Data.Text (Text)
+import Data.Bifunctor (Bifunctor(first))
 
 topsOf :: Program -> Tops
 topsOf prs = Tops
-    -- A symbolic `def` name is left unqualified: `M.<+>` cannot be written
-    -- (and cannot be parsed), so an operator is global once it is declared.
     { tVals  = S.fromList [n | StmtDef (Def n _ _ ) <- prs, not (isOpName n)]
     , tTypes = S.fromList ([dName d | StmtData d <- prs] ++ [n | StmtType n _ _ <- prs])
     , tCtors = S.fromList [c | StmtData d <- prs, (c, _) <- dCtors d]
@@ -32,9 +31,7 @@ qualifyProgram a prs = map (stmt (topsOf prs)) prs
             StmtData d -> StmtData d
                 { dName  = qual (tTypes t) (dName d)
                 , dCtors = [(qual (tCtors t) c, map (typ t) as) | (c, as) <- dCtors d]
-                -- The constructor names in the field table are shown back in
-                -- the `data` echo, so they have to be qualified in step.
-                , dFields = M.map (\(c, i) -> (qual (tCtors t) c, i)) (dFields d)
+                , dFields = M.map (first (qual (tCtors t))) (dFields d)
                 }
             StmtType n ps ty -> StmtType (qual (tTypes t) n) ps (typ t ty)
             StmtInfix n fx -> StmtInfix n fx

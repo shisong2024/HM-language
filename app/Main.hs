@@ -175,8 +175,6 @@ withPrelude s = do
                     return $ addPreludePrefix [n | (_, StmtDef (Def n _ _)) <- lprs]
                              (s' { sFixities = tbFix tb, sFields = tbFld tb })
 
--- A module loaded as `M` has its constructors qualified, so its field
--- table has to be too: `M.Node { ... }` and `p.key` have to agree on a name.
 aliasFields :: Maybe Text -> [(Int, Statement)] -> Session -> Session
 aliasFields ma lprs s = case ma of
     Nothing -> s
@@ -294,8 +292,6 @@ unload a s = s
         strip :: M.Map Text a -> M.Map Text a
         strip = M.filterWithKey (\k _ -> not ((a <> ".") `T.isPrefixOf` k))
 
-        -- Field names are kept bare, so they go by the constructor they
-        -- belong to rather than by their own key.
         gone :: FieldInfo -> Bool
         gone fi = (a <> ".") `T.isPrefixOf` fiCtor fi
 

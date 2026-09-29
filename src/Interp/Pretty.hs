@@ -131,8 +131,6 @@ prettyS' (Forall tvs t)
         in "Forall " <> T.unwords ["a" <> pack (show i) | i <- [0..l]] <> ". " <> printT' (renumberT ren t)
 
 
--- `Node { key, val }` -- the fields a constructor declares, in argument
--- order, appended to the constructor's name in the `data` echo.
 fieldNames :: DataDecl -> Text -> Text
 fieldNames d c = case sortOn (snd . snd)
         [(f, ci) | (f, ci@(c', _)) <- M.toList (dFields d), c' == c] of
@@ -249,7 +247,6 @@ dedup :: Eq a => [a] -> [a]
 dedup [] = []
 dedup (x: xs) = x: dedup (filter (/= x) xs)
 
--- `infixl 6 <+>` / `infixr 5 <+>` / `infix 4 <+>`
 fixityTxt :: Text -> Fixity -> Text
 fixityTxt n (Fixity lev a) = kw a <> " " <> T.pack (show lev) <> " " <> n <> ";"
     where
@@ -259,10 +256,6 @@ fixityTxt n (Fixity lev a) = kw a <> " " <> T.pack (show lev) <> " " <> n <> ";"
             AssocR -> "infixr"
             AssocN -> "infix"
 
--- Quoted, with everything outside printable ASCII escaped: `\n \t \r` in
--- the short form, anything else as `\uXXXX`. Four hex digits always suffice
--- -- literals and `fromCode` are both limited to the BMP -- and keeping the
--- output pure ASCII keeps it readable in a console that is not UTF-8.
 quoted :: Text -> Text
 quoted s = "\"" <> escape s <> "\""
 

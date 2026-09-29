@@ -10,7 +10,7 @@ import Text.Megaparsec
 import Text.Megaparsec.Char (string, char, eol, space, hspace1, hexDigitChar)
 import Text.Megaparsec.Char.Lexer (decimal)
 
-import Data.Char (isLower, isAlphaNum, isUpper, isAsciiLower, chr, digitToInt)
+import Data.Char (isLower, isAlphaNum, isUpper, isAsciiLower, chr, digitToInt, isDigit)
 import Data.Text (cons, Text, pack, unpack)
 import Data.Functor(($>), void)
 
@@ -155,8 +155,6 @@ parseUnary tab = withSpan $ do
     case m of
         Nothing -> parseApp tab
         Just _  -> do
-            -- `-` binds looser than `^` but tighter than `*`, which is what
-            -- an empty fixity table at level 8 gives.
             e <- parseOpr (Tabs M.empty (tbFld tab)) 8
             case e of
                 ILit n -> return $ ILit (-n)
@@ -168,10 +166,6 @@ parseAtom tab = withSpan (parseAtomHead tab >>= atomTail tab)
 parseAtomHead :: Tabs -> Parser E'
 parseAtomHead tab = parseILit <|> parseBLit <|> parseStrLit <|> parseVar <|> parseCtorExpr tab <|> parseListLit tab <|> parseParen tab
 
--- `p.x` and `p { x = 3 }` are suffixes on an atom rather than infix
--- operators, and they chain, so `p.l.h` walks down two levels. No `try`: a
--- `{` that does not open a field list is an error, not something to back out
--- of, and `fieldSel` fails without consuming when there is no `.`.
 atomTail :: Tabs -> E' -> Parser E'
 atomTail tab e = do
     m <- optional (fieldSel <|> recUpdE tab)
@@ -186,7 +180,6 @@ fieldSel = do
     f <- parseVar'
     return $ \e -> App (At (Span sp sp) (Var ("$fld@" <> f))) e
 
--- `{ x = 1, y = 2 }`, shared by record literals, updates and patterns.
 fldBraces :: Parser a -> Parser b -> Parser [(Text, b)]
 fldBraces sep p = do
     _ <- lexeme (char '{')
@@ -342,8 +335,6 @@ parseData = do
         ((c, i): _) -> fail $ unpack (T.unwords
             ["constructor", c, "uses type variable", pack [chr (negate i)], "which is not a parameter of", n]
             <> ".")
-    -- Two fields with the same name would make `p.f` ambiguous, so they are
-    -- rejected here as well as across declarations (see `recProgram`).
     case dups [f | (_, _, fs) <- cs, f <- fs] of
         (f: _) -> fail $ unpack $ "duplicate field " <> f <> " in data " <> n <> "."
         [] -> return ()
@@ -378,10 +369,6 @@ ctorExpr tab n = do
         Just fs -> App (Var ("$rec@" <> n <> "@" <> T.intercalate "," (map fst fs)))
                        (TupleLit (map snd fs))
 
--- `def (<+>) a b = ...` and `def <+> a b = ...` both name the function
--- `<+>`, which is what `a <+> b` calls. Such a name is never qualified --
--- there is no way to write `M.<+>` -- so a declared operator is visible in
--- every module that is loaded.
 parseDef :: Tabs -> Parser Decl
 parseDef tab = do
     f <- symbol "def" *> defName
@@ -413,9 +400,6 @@ parseTypeDecl = do
     _ <- semicolon
     return $ StmtType name ps t
 
--- `infixl 6 <+>;` -- only the shape is recognised here. Which names are
--- legal is settled by `scanFixities`, which reads the text first and is the
--- one that knows the line numbers.
 parseInfixDecl :: Parser Statement
 parseInfixDecl = do
     kw <- lexeme (try ((string "infixl" <|> string "infixr" <|> string "infix") <* nextNotVar))
@@ -455,13 +439,9 @@ runWith tab t = case runParser (parseExpr (tab { tbFix = effFix (tbFix tab) }) <
     Left  err -> Left $ pack (errorBundlePretty err)
     Right res -> desugarE (tbFld tab) res
 
--- The table a parse really uses: the declared operators plus the built-in
--- `++` (which no declaration can collide with).
 effFix :: FixTab -> FixTab
 effFix tab = M.union tab builtinFix
 
--- Everything up to a `--` that is not inside a string literal. A backslash
--- inside a string escapes the next character, so `"a\"--b"` is one string.
 codeOf :: Text -> Text
 codeOf = T.pack . go False . T.unpack
     where
@@ -484,8 +464,6 @@ stripComment t
             | commented l && T.null (T.strip (codeOf l)) = ""
             | otherwise = l
 
--- A `--` outside a string cuts the line: everything from there on is a
--- comment. A trailing comment is still an error (stage 7 lifts that).
         commented :: Text -> Bool
         commented l = codeOf l /= l
 
@@ -513,14 +491,6 @@ runProgWith tab0 tx = case stripComment tx of
                 (fld, ss) <- recProgram (tbFld tab0) (map snd r)
                 return (Tabs fix fld, zip (map fst r) ss)
 
--- Fixity has to be known while the expressions are being read, so it is
--- collected from the text before the parser runs: a declaration further down
--- the file is in force for the lines above it, the same as anywhere else.
---
--- Two passes: a symbolic `def` name registers at the default level (that is
--- the only way to learn an operator exists), then the `infixl`/`infixr`/
--- `infix` lines set the real ones. Both passes consult `tab0`, so operators
--- from earlier REPL lines and already-loaded modules are in scope too.
 scanFixities :: FixTab -> Text -> Either Text FixTab
 scanFixities tab0 t = do
     tab <- foldM symDef tab0 (zip [1 :: Int ..] ls)
@@ -528,9 +498,7 @@ scanFixities tab0 t = do
     where
         ls :: [Text]
         ls = T.lines t
-
-        -- `;` is dropped wherever it sits, so `infixl 6 <+>;` and
-        -- `def (<+>) a b = ...` both come down to plain words.
+        
         wordsOf :: Text -> [Text]
         wordsOf = filter (/= ";") . T.words . T.strip
 
@@ -558,7 +526,7 @@ scanFixities tab0 t = do
         declOf i kw rest = case rest of
             [lv, w] -> do
                 lev <- case T.unpack lv of
-                    [c] | c >= '0' && c <= '9' -> Right (fromEnum c - fromEnum '0')
+                    [c] | isDigit c -> Right (fromEnum c - fromEnum '0')
                     _ -> Left $ badAt i "the precedence must be a single digit 0-9."
                 let nm = bare w
                 if not (isOpName nm)
@@ -659,19 +627,6 @@ parsePatCtor tab = do
                                   (map snd fs)
         Nothing -> PCtor n <$> many (parsePatArg tab)
 
-
----
--- Records
---
--- A record cannot be resolved while it is being read: `p.x` may appear above
--- the `data` line that says which constructor `x` belongs to, and a REPL line
--- may name a type declared in an earlier line. So the parser emits a marker
--- instead -- `$fld@x`, `$rec@C@x,y`, `$upd@x,y`, `$pat@C@x,y` -- and
--- `recProgram` rewrites every marker into plain `match` and application once
--- the declarations of the chunk are in hand. `$` and `@` are outside every
--- name the lexer accepts, so a marker can never collide with a user name, and
--- no marker survives the rewrite.
-
 recProgram :: FieldTab -> [Statement] -> Either Text (FieldTab, [Statement])
 recProgram tab0 ss = do
     tab <- foldM addDecl tab0 [d | StmtData d <- ss]
@@ -681,17 +636,9 @@ recProgram tab0 ss = do
         addDecl :: FieldTab -> DataDecl -> Either Text FieldTab
         addDecl tab d = foldM (addField d) (dropData (dName d) tab) (M.toList (dFields d))
 
-        -- A type that is declared again replaces its fields: the old ones
-        -- name constructors that no longer exist. Without this, a second
-        -- `data T = ... { y :: Bool }` could not re-use `y`, which is what
-        -- re-loading a file -- the usual way to fix a declaration -- does.
         dropData :: Text -> FieldTab -> FieldTab
         dropData n = M.filter (\fi -> fiData fi /= n)
 
-        -- One field name means one constructor, or `p.f` would have nothing
-        -- to pick. Reloading a module re-declares the same fields, and a
-        -- module loaded as `M` stores them as `M.C`, so names that differ
-        -- only in the qualifier are the same field.
         addField :: DataDecl -> FieldTab -> (Text, (Text, Int)) -> Either Text FieldTab
         addField d tab (f, (c, i)) = case M.lookup f tab of
             Just old | not (agrees old new) -> Left $
@@ -743,7 +690,6 @@ desugarE tab = \case
             (sp, Var n) | isMarker n -> recUse tab sp n a'
             _                        -> Right (App f' a')
 
--- The innermost `At`, kept so an error can name a line.
 spanOf :: E' -> (Maybe Span, E')
 spanOf = \case
     At sp e -> case spanOf e of
@@ -761,12 +707,6 @@ recUse tab sp n a
     | Just f <- T.stripPrefix "$upd@" n = recUpdate sp tab f a
     | otherwise = Right (App (Var n) a)
 
--- `p.x` becomes a one arm match that re-uses the constructor's own pattern:
--- the type checker already knows how to check that, and it pins `p` to the
--- right type, so a field on the wrong constructor is a plain `TypeMismatch`.
--- A type with more than one constructor needs the second arm to keep the
--- match exhaustive; `p.h` on a `Leaf` is then a runtime error, because both
--- constructors share one static type.
 fieldGet :: Maybe Span -> FieldTab -> Text -> E' -> Either Text E'
 fieldGet sp tab f a = do
     fi <- lookupField sp tab f
@@ -785,14 +725,12 @@ lookupField :: Maybe Span -> FieldTab -> Text -> Either Text FieldInfo
 lookupField sp tab f =
     maybe (Left $ badSpan sp ("unknown field `" <> f <> "`.")) Right (M.lookup f tab)
 
--- The fields of `c`, in argument order.
 ctorFields :: Maybe Span -> FieldTab -> Text -> Either Text [Text]
 ctorFields sp tab c =
     case sortOn (fiIdx . snd) [(f, fi) | (f, fi) <- M.toList tab, fiCtor fi == c] of
         [] -> Left $ badSpan sp ("`" <> c <> "` is not a record constructor.")
         fs -> Right (map fst fs)
 
--- `{ x = 1, y = 2 }` becomes `C 1 2`: names back into argument order.
 recBuild :: Maybe Span -> FieldTab -> Text -> E' -> Either Text E'
 recBuild sp tab rest a = case T.splitOn "@" rest of
     [c, flds] -> do
@@ -805,8 +743,6 @@ recBuild sp tab rest a = case T.splitOn "@" rest of
                 [] -> Right $ foldl App (Var c) [v | f <- order, Just v <- [lookup f given]]
     _ -> Left $ badSpan sp "malformed record."
 
--- `p { x = 3 }` becomes `match p with C a _ c -> C a 3 c`, keeping every
--- field that was not named.
 recUpdate :: Maybe Span -> FieldTab -> Text -> E' -> Either Text E'
 recUpdate sp tab flds a = case a of
     TupleLit (r: vs) -> do
@@ -832,8 +768,6 @@ recUpdate sp tab flds a = case a of
 oldTmp :: Int -> Text
 oldTmp j = "$recOld" <> pack (show j)
 
--- The names and the values of one field list. The marker carries the names
--- in the order the parser read them, so they line up with the tuple.
 zipFields :: Maybe Span -> Text -> [Text] -> E' -> Either Text [(Text, E')]
 zipFields sp c flds a = case a of
     TupleLit vs
@@ -858,8 +792,6 @@ desugarP tab = \case
     PTuple ps  -> PTuple <$> mapM (desugarP tab) ps
     p          -> Right p
 
--- `C { x = p }` becomes `C p _`: every field that was not named is a
--- wildcard, and the rest is the ordinary constructor pattern.
 patBuild :: FieldTab -> Text -> [P'] -> Either Text P'
 patBuild tab rest ps = case T.splitOn "@" rest of
     [c, flds] -> do
