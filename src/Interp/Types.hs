@@ -112,12 +112,20 @@ data TypeError
 type Env  = Map Text V'
 type TEnv = Map Text S'
 type TSub = Map TypeVar T'
+
+type SynTable = Map Text ([Text], T')
 type Parser a = Parsec Void Text a
 
 data S' = Forall (Set TypeVar) T' deriving (Show, Eq)
-
 data Decl = Def Text [Text] E' deriving (Show, Eq)
-data Statement = StmtDef Decl | StmtExpr E' | StmtData DataDecl deriving (Show, Eq)
+
+data Statement 
+    = StmtDef Decl 
+    | StmtExpr E' 
+    | StmtData DataDecl
+    | StmtType Text [Text] T'
+    deriving (Show, Eq)
+
 type Program = [Statement]
 type Binding = (Text, E')
 type BatchName = Text
@@ -135,6 +143,7 @@ data Session = Session
     , sBatch   :: BatchName
     , sDEnv    :: DEnv
     , sAliases :: Map Text FilePath
+    , sSyns    :: SynTable
     } deriving (Show, Eq)
 
 data CtorInfo = CtorInfo

@@ -12,7 +12,7 @@ import Data.Text (Text)
 topsOf :: Program -> Tops
 topsOf prs = Tops
     { tVals  = S.fromList [n | StmtDef (Def n _ _ ) <- prs]
-    , tTypes = S.fromList [dName d | StmtData d <- prs]
+    , tTypes = S.fromList ([dName d | StmtData d <- prs] ++ [n | StmtType n _ _ <- prs])
     , tCtors = S.fromList [c | StmtData d <- prs, (c, _) <- dCtors d]
     }
 
@@ -30,6 +30,7 @@ qualifyProgram a prs = map (stmt (topsOf prs)) prs
                 { dName  = qual (tTypes t) (dName d)
                 , dCtors = [(qual (tCtors t) c, map (typ t) as) | (c, as) <- dCtors d]
                 }
+            StmtType n ps ty -> StmtType (qual (tTypes t) n) ps (typ t ty)
         
         expr :: Tops -> S.Set Text -> E' -> E'
         expr t bs = \case

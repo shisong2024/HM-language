@@ -26,7 +26,11 @@ opInfo = \case
     OCmp _ -> (0, AssocL)
 
 reserved :: [Text]
-reserved = ["let", "in", "lambda", "def", "if", "then", "else", "true", "false", "match", "with", "data"]
+reserved = 
+    [ "let", "in", "lambda", "def"
+    , "if", "then", "else", "true", "false"
+    , "match", "with", "data", "type"
+    ]
 
 reservedType :: [Text]
 reservedType = ["Int", "Bool"]
@@ -276,10 +280,29 @@ parseDef = do
     _ <- semicolon
     return $ Def f vs $ foldr Lambda b vs
 
+parseTypeDecl :: Parser Statement
+parseTypeDecl = do
+    _ <- symbol "type"
+    name <- upperName
+    when (name `elem` reservedType) $
+        fail (unpack (name <> " is a built-in type name and cannot redeclared"))
+    ps <- many varName
+    case [v | (i, v) <- zip [0..] ps, v `elem` drop (i + 1) ps] of
+        (v: _) -> fail $ unpack $ "duplicate type parameter " <> v <> " in type " <> name <> "."
+        _ -> return ()
+    _ <- lexeme (char '=' <?> "=")
+    t <- parseTypeWith (zip ps [0..])
+    _ <- semicolon
+    return $ StmtType name ps t
+
 parseProg :: Parser [(Int, Statement)]
 parseProg = sc *> many 
     (   ((,) . unPos . sourceLine <$> getSourcePos)
-    <*> (StmtDef <$> parseDef <|> StmtData <$> parseData <|> StmtExpr <$> (parseExpr <* semicolon)) 
+    <*> (   StmtDef <$> parseDef 
+        <|> StmtData <$> parseData 
+        <|> parseTypeDecl 
+        <|> StmtExpr <$> (parseExpr <* semicolon)
+        ) 
     <*  sc)
     where
         sc :: Parser ()

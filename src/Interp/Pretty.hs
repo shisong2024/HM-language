@@ -194,6 +194,7 @@ printBatch src bn lprs tps vals perr =
             StmtData d -> "data " <> T.unwords (dName d : dParams d) <> "\n"
                 <> T.concat [ "  " <> c <> " : " <> (\(Forall _ t) -> prettyT' t) sch <> "\n"
                 | (c, sch) <- M.toAscList (ctorSchemes d) ]
+            StmtType n ps t -> "type " <> T.unwords (n : ps) <> " = " <> prettyT' t <> "\n"
 
 renumberT :: M.Map TypeVar TypeVar -> T' -> T'
 renumberT m = go
