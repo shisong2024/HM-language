@@ -53,6 +53,7 @@ initSession = Session
     , sDEnv    = emptyDEnv
     , sAliases = M.empty
     , sSyns    = M.empty
+    , sFixities = M.empty
     }
 
 emptyDEnv :: DEnv

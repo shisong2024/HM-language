@@ -55,9 +55,9 @@ loop s = do
             | Just p <- T.stripPrefix ":load " src -> loop =<< loadFile s (T.unpack (T.strip p))
             | Just _ <- T.stripPrefix "import " src -> loop =<< doImport s src
             | T.isPrefixOf ":" src -> TIO.putStrLn ("Unknown command: " <> src <> ".") >> loop s
-            | otherwise -> case runProg src of
+            | otherwise -> case runProgWith (sFixities s) src of
                 Left perr -> TIO.putStrLn ("Parse Error:\n" <> perr) >> loop s
-                Right lprs -> loop . fst =<< execBatch True s src lprs []
+                Right (fx, lprs) -> loop . fst =<< execBatch True (s { sFixities = fx }) src lprs []
 
 runFile :: FilePath -> IO ()
 runFile path = do
@@ -113,7 +113,7 @@ execBatch' loud ss src lprs perr = do
                                 , sNext = n, sDEnv = denv }, ok)
 
 doTypeOf :: Session -> Text -> IO Session
-doTypeOf s e = case run (T.dropWhileEnd (== ';') (T.strip e)) of
+doTypeOf s e = case runWith (sFixities s) (T.dropWhileEnd (== ';') (T.strip e)) of
     Left perr -> TIO.putStrLn ("Parse Error:\n" <> perr) >> return s
     Right ex -> case expandProgram (sSyns s) [StmtExpr ex] of
       Left msg -> TIO.putStrLn ("Type Error:\n" <> msg) >> return s
@@ -167,9 +167,9 @@ withPrelude s = do
         Left _ -> return s
         Right tx -> do
             s' <- loadFile s preludePath
-            case runProg (blanckImportLines tx) of
+            case runProgWith (sFixities s') (blanckImportLines tx) of
                 Left _ -> return s'
-                Right lprs -> 
+                Right (_, lprs) -> 
                     return $ addPreludePrefix [n | (_, StmtDef (Def n _ _)) <- lprs] s'
 
 addPreludePrefix :: [Text] -> Session -> Session
@@ -240,15 +240,15 @@ loadWithImports seen loud s malias path
                             (sb, okb) <- loadWithImports (path: seen) loud sa (Just a) (resolve dir p)
                             return (sb, oka && okb)) 
                             (s, True) imps
-                        case runProg body of
+                        case runProgWith (sFixities s1) body of
                             Left perr -> TIO.putStrLn ("Parse Error:\n" <> perr) >> return (s1, False)
-                            Right lprs -> do
+                            Right (fx, lprs) -> do
                                 let sndl = map snd lprs
                                     prs = case malias of
                                         Nothing -> sndl
                                         Just a -> qualifyProgram a sndl
                                     lprs' = zip (map fst lprs) prs
-                                (s2, ok2) <- execBatch loud s1 body lprs' []
+                                (s2, ok2) <- execBatch loud (s1 { sFixities = fx }) body lprs' []
                                 let s3 = maybe s2 (\a -> s2 { sAliases = M.insert a path (sAliases s2) }) malias
                                 return (s3, ok2 && ok1)
     where
@@ -262,6 +262,7 @@ unload a s = s
     , sTEnv = strip (sTEnv s)
     , sDEnv = DEnv (strip (denvCtors d)) (strip (denvDatas d))
     , sSyns = strip (sSyns s)
+    , sFixities = strip (sFixities s)
     }
     where
         d :: DEnv

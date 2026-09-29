@@ -30,6 +30,7 @@ expandStmt tab = \case
         cs <- mapM (\(c, as) -> (,) c <$> mapM (expandT tab) as) (dCtors d)
         return $ StmtData d { dCtors = cs }
     StmtType n ps t      -> Right (StmtType n ps t)
+    StmtInfix n fx       -> Right (StmtInfix n fx)
 
 expandE :: SynTable -> E' -> Either Text E'
 expandE tab = \case

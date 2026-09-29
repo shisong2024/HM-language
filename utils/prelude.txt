@@ -218,6 +218,17 @@ def either f g e = match e with Left x -> f x | Right y -> g y;
 -- cmpInt :: Int -> Int -> Ordering
 def cmpInt a b = if a < b then LT else if a > b then GT else EQ;
 
+-- cmpString :: String -> String -> Ordering
+def cmpString a b = match (uncons a, uncons b) with
+      (None, None) -> EQ
+    | (None, _) -> LT
+    | (_, None) -> GT
+    | (Just (i, ra), Just (j, rb)) ->
+        if i < j then LT
+        else if i > j then GT
+        else cmpString ra rb
+    ;
+
 -- -- functions of String
 
 -- strLen :: String -> Int
@@ -298,7 +309,6 @@ def strWords s = let go = lambda acc cur t -> match uncons t with
 def strUnwords ws = match ws with [] -> "" | w: [] -> w | w: rest -> w ++ " " ++ strUnwords rest;
 
 -- strLines :: String -> [String]
--- Same as the usual `lines`: a single trailing newline does not add a line.
 def strLines s = 
     if strLen s == 0 
         then [] 

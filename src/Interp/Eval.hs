@@ -229,10 +229,6 @@ matchP = \case
     
     _ -> Nothing
 
--- `uncons` answers with the prelude's `Maybe`, so the two constructors have
--- to be looked up by name: this module knows nothing else about `Maybe`, and
--- inventing `VCtor "Just" ...` from thin air would silently make a value
--- that no pattern can match if the prelude ever renames them.
 applyPrim :: (MonadReader Env m, MonadError (Located EvalError) m) => Text -> [V'] -> m V'
 applyPrim "#cons" [h, t] = case t of
     VList xs -> return $ VList (h: xs)
@@ -250,10 +246,6 @@ applyPrim "uncons" [VStr s] = case T.uncons s of
             case env !? n of
                 Just (VCtor _ ar _) -> return $ VCtor n ar args
                 _ -> throwError $ Located Nothing $ UnboundVariable n
--- Wrong argument types land here. They can only be reached *after* the type
--- checker has already reported the error (an ill-typed expression is still
--- evaluated, and only the report is suppressed), so this must not `error`:
--- a crash would swallow the very message that explains what happened.
 applyPrim n args = throwError $ Located Nothing $ PrimArgMismatch n args
 
 matchArms :: (MonadError (Located EvalError) m, MonadReader Env m,  MonadState Depth m) => V' -> [(P', E')] -> m V'

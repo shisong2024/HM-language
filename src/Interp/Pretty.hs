@@ -202,6 +202,7 @@ printBatch src bn lprs tps vals perr =
                 <> T.concat [ "  " <> c <> " : " <> (\(Forall _ t) -> prettyT' t) sch <> "\n"
                 | (c, sch) <- M.toAscList (ctorSchemes d) ]
             StmtType n ps t -> "type " <> T.unwords (n : ps) <> " = " <> prettyT' t <> "\n"
+            StmtInfix n fx -> fixityTxt n fx <> "\n"
 
 renumberT :: M.Map TypeVar TypeVar -> T' -> T'
 renumberT m = go
@@ -237,6 +238,16 @@ normalizeTs ts = fmap (renumberT $ M.fromList (zip (dedup (concatMap varOrder ts
 dedup :: Eq a => [a] -> [a]
 dedup [] = []
 dedup (x: xs) = x: dedup (filter (/= x) xs)
+
+-- `infixl 6 <+>` / `infixr 5 <+>` / `infix 4 <+>`
+fixityTxt :: Text -> Fixity -> Text
+fixityTxt n (Fixity lev a) = kw a <> " " <> T.pack (show lev) <> " " <> n <> ";"
+    where
+        kw :: Assoc -> Text
+        kw = \case
+            AssocL -> "infixl"
+            AssocR -> "infixr"
+            AssocN -> "infix"
 
 -- Quoted, with everything outside printable ASCII escaped: `\n \t \r` in
 -- the short form, anything else as `\uXXXX`. Four hex digits always suffice

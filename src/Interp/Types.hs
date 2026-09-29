@@ -3,6 +3,7 @@
 module Interp.Types where
 
 import Data.Map (Map)
+import qualified Data.Text as T
 import Data.Text (Text)
 import Data.Void (Void)
 import Data.Set (Set)
@@ -42,10 +43,22 @@ data E'
 data Opr    = OArith LitOpr | OCmp CmpOpr deriving (Show, Eq)
 data LitOpr = OpAdd | OpMul | OpSub | OpDiv | OpPow deriving (Show, Eq)
 data CmpOpr = OpEq | OpNe | OpLt | OpGt | OpLe | OpGe deriving (Show, Eq)
-data Assoc  = AssocL | AssocR deriving (Show, Eq)
+data Assoc  = AssocL | AssocR | AssocN deriving (Show, Eq)
 data Span   = Span SourcePos SourcePos deriving (Show, Eq)
 
 type Lev = Int
+
+data Fixity = Fixity { fixLev :: Lev, fixAssoc :: Assoc } deriving (Show, Eq)
+type FixTab = Map Text Fixity
+
+-- The characters an operator name may be built from. `.` (qualified names),
+-- `|` (separating match arms), `:` (cons), `$` (the parser's `$let@`
+-- temporaries) and `#` (`#cons`) are all left out on purpose.
+isOpChar :: Char -> Bool
+isOpChar c = c `elem` ("+-*/^=<>!%&~?" :: String)
+
+isOpName :: Text -> Bool
+isOpName n = not (T.null n) && T.all isOpChar n
 
 data V'
     = VInt Integer
@@ -129,6 +142,7 @@ data Statement
     | StmtExpr E' 
     | StmtData DataDecl
     | StmtType Text [Text] T'
+    | StmtInfix Text Fixity
     deriving (Show, Eq)
 
 type Program = [Statement]
@@ -149,6 +163,7 @@ data Session = Session
     , sDEnv    :: DEnv
     , sAliases :: Map Text FilePath
     , sSyns    :: SynTable
+    , sFixities :: FixTab
     } deriving (Show, Eq)
 
 data CtorInfo = CtorInfo
