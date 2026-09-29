@@ -66,10 +66,10 @@ runFile path = do
     unless ok $ exitWith (ExitFailure 1)
 
 execBatch :: Bool -> Session -> Text -> [(Int, Statement)] -> [(Int, Text)] -> IO (Session, Bool)
-execBatch loud ss src lprs perr = case expandProgram (sSynonyms ss) (map snd lprs) of
+execBatch loud ss src lprs perr = case expandProgram (sSyns ss) (map snd lprs) of
     Left msg -> TIO.putStrLn ("Type Error:\n" <> msg) >> return (ss, False)
     Right (syns, prs) ->
-        execBatch' loud (ss { sSynonyms = syns }) src (zip (map fst lprs) prs) perr
+        execBatch' loud (ss { sSyns = syns }) src (zip (map fst lprs) prs) perr
 
 execBatch' :: Bool -> Session -> Text -> [(Int, Statement)] -> [(Int, Text)] -> IO (Session, Bool)
 execBatch' loud ss src lprs perr = do
@@ -115,7 +115,7 @@ execBatch' loud ss src lprs perr = do
 doTypeOf :: Session -> Text -> IO Session
 doTypeOf s e = case run (T.dropWhileEnd (== ';') (T.strip e)) of
     Left perr -> TIO.putStrLn ("Parse Error:\n" <> perr) >> return s
-    Right ex -> case expandProgram (sSynonyms s) [StmtExpr ex] of
+    Right ex -> case expandProgram (sSyns s) [StmtExpr ex] of
       Left msg -> TIO.putStrLn ("Type Error:\n" <> msg) >> return s
       Right (_, prs) -> do
         let (tcRes, n) = runState (runExceptT (runReaderT (programChecker (sTEnv s) prs) (sDEnv s))) (sNext s)
@@ -261,7 +261,7 @@ unload a s = s
     , sEnv = strip (sEnv s)
     , sTEnv = strip (sTEnv s)
     , sDEnv = DEnv (strip (denvCtors d)) (strip (denvDatas d))
-    , sSynonyms = strip (sSynonyms s)
+    , sSyns = strip (sSyns s)
     }
     where
         d :: DEnv

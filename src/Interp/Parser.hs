@@ -288,7 +288,8 @@ parseTypeDecl = do
         fail (unpack (name <> " is a built-in type name and cannot redeclared"))
     ps <- many varName
     case [v | (i, v) <- zip [0..] ps, v `elem` drop (i + 1) ps] of
-        (v: _) -> fail $ unpack $ "duplicate type parameter " <> v <> " in type " <> name <> "."
+        (v: _) -> 
+            fail $ unpack $ "duplicate type parameter " <> v <> " in type " <> name <> "."
         _ -> return ()
     _ <- lexeme (char '=' <?> "=")
     t <- parseTypeWith (zip ps [0..])
