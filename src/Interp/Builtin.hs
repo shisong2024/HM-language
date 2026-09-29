@@ -1,10 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Interp.Builtin where
 
+import Interp.Types
+
 import qualified Data.Map as M
 import qualified Data.Set as S
-
-import Interp.Types
 
 builtinEnv :: Env 
 builtinEnv = M.fromList

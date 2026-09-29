@@ -1,19 +1,23 @@
 {-# LANGUAGE LambdaCase, FlexibleContexts, TupleSections, OverloadedStrings #-}
 module Interp.TypeCheck where
 
+import Interp.Eval
 import Interp.Types
-import Data.Map ((!?))
+
 import qualified Data.Map as M
-import Data.Set (Set)
 import qualified Data.Set as S
+
+import Control.Monad (foldM, forM)
 import Control.Monad.Error.Class (MonadError (throwError, catchError))
 import Control.Monad.State (MonadState, get, put)
-import Interp.Eval
-import Data.Graph (stronglyConnComp, SCC)
-import Control.Monad (foldM, forM)
-import Data.Functor ((<&>))
 import Control.Monad.Reader (MonadReader (ask))
+
+import Data.Map ((!?))
+import Data.Set (Set)
+import Data.Graph (stronglyConnComp, SCC)
+import Data.Functor ((<&>))
 import Data.Text (Text)
+
 import Text.Megaparsec (unPos, SourcePos (sourceLine, sourceColumn))
 
 typeChecker :: (MonadState Counter m, MonadReader DEnv m, MonadError (Located TypeError) m) => TEnv -> E' -> m (TSub, T')

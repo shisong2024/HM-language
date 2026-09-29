@@ -2,16 +2,19 @@
 
 module Interp.Eval where
 import Interp.Types
-import Data.Map ((!?))
+
+import qualified Data.Set as S
 import qualified Data.Map as M
+
+import Control.Monad (when, foldM, forM)
 import Control.Monad.Reader (MonadReader, ask, local, asks)
 import Control.Monad.Error.Class (MonadError (throwError, catchError))
 import Control.Monad.State (MonadState (get, put), modify)
-import Control.Monad (when, foldM, forM)
+
+import Data.Map ((!?))
 import Data.Graph (stronglyConnComp, SCC (AcyclicSCC, CyclicSCC))
 import Data.Text (Text, unpack)
 import Data.Set (Set)
-import qualified Data.Set as S
 import Data.Maybe (isJust)
 
 evalwDepth :: (MonadState Depth m, MonadReader Env m, MonadError (Located EvalError) m) => E' -> m V'

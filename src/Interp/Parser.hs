@@ -2,14 +2,18 @@
 module Interp.Parser where
 
 import Interp.Types
+
+import qualified Data.Text as T
+
 import Text.Megaparsec 
 import Text.Megaparsec.Char (string, char, eol, space, hspace1)
 import Text.Megaparsec.Char.Lexer (decimal)
+
 import Data.Char (isLower, isAlphaNum, isUpper, isAsciiLower, chr)
 import Data.Text (cons, Text, pack, unpack)
 import Data.Functor(($>), void)
+
 import Control.Monad (guard, when)
-import qualified Data.Text as T
 
 opInfo :: Opr -> (Lev, Assoc)
 opInfo = \case

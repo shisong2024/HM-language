@@ -4,7 +4,9 @@ module Interp.Qualify where
 
 import Interp.Types
 import Interp.Eval
+
 import qualified Data.Set as S
+
 import Data.Text (Text)
 
 topsOf :: Program -> Tops

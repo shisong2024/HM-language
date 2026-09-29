@@ -3,11 +3,12 @@
 module Interp.Types where
 
 import Data.Map (Map)
-import Text.Megaparsec (Parsec, SourcePos)
 import Data.Text (Text)
 import Data.Void (Void)
 import Data.Set (Set)
+
 import GHC.Generics (Generic)
+import Text.Megaparsec (Parsec, SourcePos)
 
 data P'
     = PVar Text

@@ -7,23 +7,26 @@ import Interp.Pretty
 import Interp.Types
 import Interp.TypeCheck
 import Interp.Builtin
+import Interp.Qualify
 
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
+import qualified Data.Set as S
 import qualified Data.Map as M
+
+import Control.Monad (forM_, unless, when, foldM)
 import Control.Monad.Reader (runReaderT)
 import Control.Monad.Except (runExceptT)
-import System.IO (stdout, hFlush, isEOF)
 import Control.Monad.State (runState)
-import System.Environment (getArgs)
-import Data.Text (Text)
-import System.Exit (exitWith, ExitCode (ExitFailure))
-import Control.Monad (forM_, unless, when, foldM)
-import Data.Either (isLeft)
 import Control.Exception (try, IOException)
+
+import System.IO (stdout, hFlush, isEOF)
+import System.Environment (getArgs)
+import System.Exit (exitWith, ExitCode (ExitFailure))
+
+import Data.Text (Text)
+import Data.Either (isLeft)
 import Data.Char (isAlphaNum, isUpper)
-import Interp.Qualify (qualifyProgram)
-import qualified Data.Set as S
 import Data.Maybe (fromMaybe)
 
 main :: IO ()

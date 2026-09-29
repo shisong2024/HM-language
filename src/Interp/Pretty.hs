@@ -1,16 +1,19 @@
 {-# LANGUAGE LambdaCase, OverloadedStrings #-}
 module Interp.Pretty where
 
+import Interp.TypeCheck
 import Interp.Types
-import Data.Text (Text, pack)
+
 import qualified Data.Text as T
-import Text.Megaparsec (SourcePos (sourceName))
 import qualified Data.Text.IO as TIO
-import Data.List (sortOn, find)
 import qualified Data.Map as M
 import qualified Data.Set as S
 import qualified Data.List as L
-import Interp.TypeCheck
+
+import Data.Text (Text, pack)
+import Data.List (sortOn, find)
+import Text.Megaparsec (SourcePos (sourceName))
+
 
 prettyBOpr :: Opr -> Text
 prettyBOpr opr = maybe "?" fst (find ((== opr) . snd) opTable)
