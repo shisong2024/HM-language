@@ -1,0 +1,201 @@
+-- utils/data/map.txt
+
+data Map' k v = Leaf | Node Int k v (Map' k v) (Map' k v);
+data Map k v = Map { compare :: k -> k -> Ordering, dict :: Map' k v };
+
+def lookup k mp = lookup_ mp.compare k mp.dict;
+def (!!) = lookup;
+infix 5 !!;
+
+def member k mp = member_ mp.compare k mp.dict;
+def findMin mp = _findMin mp.dict;
+def findMax mp = _findMax mp.dict;
+
+def insert k v mp = insert_ mp.compare k v mp.dict;
+def delete k mp = delete_ mp.compare k mp.dict;
+
+def map f mp = _map f mp.dict;
+def foldr f z mp = _foldr f z mp.dict;
+def toList = foldr (lambda k v tps -> (k, v): tps) [];
+def keys = foldr (lambda k _ l -> cons k l) [];
+def values = foldr (lambda _ -> cons) [];
+
+def fromListWithCmp cmp l = Map { compare = cmp, dict = fromList_ cmp l };
+def fromListInt = fromListWithCmp cmpInt;
+def fromListString = fromListWithCmp cmpString;
+
+
+---
+
+def empty = Leaf;
+
+def height m = match m with
+      Leaf -> 0
+    | Node h _ _ _ _ -> h
+    ;
+
+def node k v l r = Node (1 + max (height l) (height r)) k v l r;
+
+def lookup_ cmp k m = match m with
+      Leaf -> None
+    | Node _ k' v l r -> match cmp k k' with
+          LT -> lookup_ cmp k l
+        | EQ -> Just v
+        | GT -> lookup_ cmp k r
+    ;
+
+def member_ cmp k m = isJust (lookup_ cmp k m);
+
+def _findMin m = match m with
+      Leaf -> None
+    | Node _ k v Leaf _ -> Just (k, v)
+    | Node _ _ _ l _ -> _findMin l
+    ;
+
+def _findMax m = match m with
+      Leaf -> None
+    | Node _ k v _ Leaf -> Just (k, v)
+    | Node _ _ _ _ r -> _findMax r
+    ;
+
+def insert_ cmp k v m = match m with
+      Leaf -> Node 1 k v Leaf Leaf
+    | Node _ k' v' l r -> match cmp k k' with
+          LT -> balance k' v' (insert_ cmp k v l) r
+        | EQ -> node k v l r
+        | GT -> balance k' v' l (insert_ cmp k v r)
+    ;
+
+def balance k v l r = 
+    if height l > height r + 1
+        then match l with
+              Leaf -> Leaf
+            | Node _ lk lv ll lr -> 
+                if height ll >= height lr
+                    then node lk lv ll (node k v lr r)
+                else match lr with
+                    Leaf -> Leaf
+                    | Node _ lrk lrv lrl lrr -> 
+                        node lrk lrv (node lk lv ll lrl) (node k v lrr r)
+    else if height r > height l + 1
+        then match r with
+              Leaf -> Leaf
+            | Node _ rk rv rl rr ->
+                if height rr >= height rl
+                    then node rk rv (node k v l rl) rr
+                else match rl with
+                      Leaf -> Leaf
+                    | Node _ rlk rlv rll rlr -> 
+                        node rlk rlv (node k v l rll) (node rk rv rlr rr)
+    else node k v l r
+    ;
+
+def deleteMin m = match m with
+      Leaf -> Leaf
+    | Node _ _ _ Leaf r -> r
+    | Node _ k v l r -> balance k v l (deleteMin r)
+    ;
+
+def deleteMax m = match m with
+      Leaf -> Leaf
+    | Node _ _ _ l Leaf -> l
+    | Node _ k v l r -> balance k v (deleteMin l) r
+    ;
+
+def deleteRoot l r = match (l, r) with
+      (Leaf, r) -> r
+    | (l, Leaf) -> l
+    | (l, r) -> match _findMin r with
+          None -> l
+        | Just (mk, mv) -> balance mk mv l (deleteMin r)
+    ;
+
+def delete_ cmp k m = match m with
+      Leaf -> Leaf
+    | Node _ k' v' l r -> match cmp k k' with
+          LT -> balance k' v' (delete_ cmp k l) r
+        | EQ -> deleteRoot l r
+        | GT -> balance k' v' l (delete_ cmp k r)
+    ;
+
+def _foldr f z m = match m with
+      Leaf -> z
+    | Node _ k v l r -> _foldr f (f k v (_foldr f z r)) l
+    ;
+
+def fromList_ cmp l =
+    let go_ = lambda cmp m l -> match l with
+          [] -> m
+        | (k, v): rest -> go_ cmp (insert_ cmp k v m) rest
+    in go_ cmp empty l
+    ;
+
+def _map f m = match m with
+      Leaf -> Leaf
+    | Node h k v l r -> Node h k (f v) l r
+    ;
+
+-- union/difference/intersection
+def split_ cmp k m = match m with
+      Leaf -> (Leaf, None, Leaf)
+    | Node _ k' v l r -> match cmp k k' with
+          LT -> (match split_ cmp k l with 
+            (ll, mv, lr) -> (ll, mv, join k' v lr r))
+        | EQ -> (l, Just v, r)
+        | GT -> (match split_ cmp k r with
+            (rl, mv, rr) -> (join k' v l rl, mv, rr))
+    ;
+
+def join k v l r = match (l, r) with 
+      (Leaf, _) -> insertMin k v r
+    | (_, Leaf) -> insertMax k v l
+    | (Node lh lk lv ll lr, Node rh rk rv rl rr) -> 
+        if lh > rh + 1
+            then balance lk lv ll (join k v lr r)
+        else if rh > lh + 1
+            then balance rk rv (join k v l rl) rr
+        else node k v l r
+    ;
+
+def insertMin k v m = match m with
+      Leaf -> node k v Leaf Leaf
+    | Node _ k' v' l r -> balance k' v' (insertMin k v l) r
+    ;
+
+def insertMax k v m = match m with
+      Leaf -> node k v Leaf Leaf
+    | Node _ k' v' l r -> balance k' v' l (insertMax k v r)
+    ;
+
+def merge_ cmp m1 m2 = _foldr (lambda k v m -> insert_ cmp k v m) m1 m2;
+
+def union_ cmp m1 m2 = match m2 with
+      Leaf -> m1
+    | Node _ k v l r -> match split_ cmp k m1 with
+        (l1, mv, r1) -> 
+            let l' = union_ cmp l1 l in
+            let r' = union_ cmp r1 r in
+            match mv with
+                  None -> join k v l' r'
+                | Just v1 -> join k v1 l' r'
+    ;
+
+def intersection_ cmp m1 m2 = match m2 with
+      Leaf -> Leaf
+    | Node _ k v l r -> match split_ cmp k m1 with
+        (l1, mv, r1) ->
+            let l' = intersection_ cmp l1 l in
+            let r' = intersection_ cmp r1 r in
+            match mv with
+                  None -> merge_ cmp l' r'
+                | Just v1 -> join k v1 l' r'
+    ;
+
+def difference_ cmp m1 m2 = match m2 with
+      Leaf -> m1
+    | Node _ k v l r -> match split_ cmp k m1 with
+        (l1, _, r1) -> 
+            let l' = difference_ cmp l1 l in
+            let r' = difference_ cmp r1 r in
+            merge_ cmp l' r'
+    ;
