@@ -1,0 +1,501 @@
+--- a/src/Interp/TypeCheck.hs
++++ b/src/Interp/TypeCheck.hs
+@@ -15,10 +15,9 @@
+ import Data.List (partition)
+ import Data.Map ((!?))
+ import Data.Set (Set)
+-import Data.Graph (stronglyConnComp, SCC)
++import Data.Graph (stronglyConnComp)
+ import Data.Functor ((<&>))
+ import Data.Text (Text, pack)
+-import Data.Maybe (mapMaybe)
+ 
+ import Text.Megaparsec (unPos, SourcePos (sourceLine, sourceColumn))
+ 
+@@ -32,6 +31,17 @@
+         w: _ -> throwError $ Located (wtdSpan w)
+             (AmbiguousImpType (apply (irSub r) (wtdType w)))
+ 
++-- | Type of a bare expression, without discharging its implicit wants.
++--
++--   This is what the REPL's @:t@ needs: @:t someConstrainedFn@ has to print
++--   @Forall a. {MyOrd a} => a -> Int@, not "No implicit value of type MyOrd a
++--   is available".  programChecker cannot be reused for that because it
++--   resolves every Wanted eagerly -- it has to produce a runnable expression.
++typeOfExpr :: Checker m => TEnv -> IEnv -> E' -> m S'
++typeOfExpr env ienv e = do
++    r <- inferExpr env ienv e
++    fst <$> closeBinding env (irType r) (irWanted r) (irExpr r)
++
+ inferExpr :: Checker m => TEnv -> IEnv -> E' -> m InferRes
+ inferExpr env ienv e = case e of
+     ILit _ -> return $ pureInfer e TInt
+@@ -175,6 +185,27 @@
+         sms  = [(n, generalize env' [] (apply ts tp)) | (n, tp) <- zip ns tps]
+     return (ts, M.fromList sms)
+ 
++-- | Type check + desugar one batch of statements.
++--
++--   Three passes, but only when the batch actually contains an @implicit def@:
++--
++--   1. pass1 (ordinary decls, outer frame only): *types only, all errors
++--      dropped*.
++--   2. pass2 (implicit decls, TEnv seeded with pass1's types): this is the fix
++--      for "same batch can't see each other" -- previously this pass ran
++--      against the pre-batch TEnv, so
++--      @implicit def myOrdInt = MyOrd { mycmp = myEq }@ could not find the
++--      @myEq@ defined in the same batch.
++--   3. pass3 (ordinary decls, TEnv seeded with pass2's candidate types): the
++--      final artifacts (schemes / desugared bodies / recovery info) come from
++--      this pass.
++--
++--   Why pass1 and pass3 both exist: the "is this candidate concrete" check
++--   (ImpCandidateHasContext) needs the *real* type; run it against provisional
++--   type variables and every @implicit def x = someOrdinaryFunction@ is
++--   misjudged as "still has a context".  The extra cost is only paid by batches
++--   that write an implicit def.
++--
+ programChecker :: Checker m => TEnv -> IFrame -> Program -> m CProgram
+ programChecker outerT outerI program = do
+     let datas = dataDeclsOf program
+@@ -182,95 +213,153 @@
+         outer = M.union ctorEnv outerT
+         implicitDecls = [(True, d) | StmtImp d <- program]
+         ordinaryDecls = [(False, d) | StmtDef d <- program]
++        impNames = [n | (True, Def n _ _) <- implicitDecls]
+         allDecls = implicitDecls <> ordinaryDecls
+         names = [n | (_, Def n _ _) <- allDecls]
++        ordNames = [n | (False, Def n _ _) <- ordinaryDecls]
+ 
+     checkDataDecls datas
+     case fstDuplicate names of
+         Just n  -> throwError (Located Nothing (DuplicateDef n))
+         Nothing -> return ()
+ 
+-    impBindings <- sccCheckerElab outer [outerI] implicitDecls
+-    let implicitT = M.fromList
+-            [(cName b, cScheme b) | b <- impBindings]
+-        newI = map cName impBindings
+-        outerWithImplicit = M.union implicitT outer
+-
+-    forM_ impBindings $ \b ->
+-        case cScheme b of
+-            sch@(Forall vars preds ty)
+-                | not (S.null vars) || not (null preds) || not (isClosedType ty) ->
+-                    throwError (Located Nothing
+-                        (ImpCandidateHasContext (cName b) sch))
+-                | otherwise -> return ()
+-
+-    ordinaryBindings <- sccCheckerElab
+-        outerWithImplicit
+-        [newI, outerI]
+-        ordinaryDecls
+-
+-    let bindings = impBindings <> ordinaryBindings
+-        newT = M.fromList
+-            [(cName b, cScheme b) | b <- bindings]
+-        env = M.union newT outer
+-
+-    exprResults <- forM
+-        [(i, e) | (i, StmtExpr e) <- zip [0..] program] $ \(i, e) -> do
+-            r <- inferExpr env (newI : [outerI]) e
+-            let ws = map (applyWanted (irSub r)) (irWanted r)
+-            solved <- forM ws $ \w -> do
+-                n <- resolveWanted w
+-                return (wtdHole w, Var n)
+-            e' <- case fillHoles (M.fromList solved) (irExpr r) of
+-                Left h  -> throwError (Located Nothing (EscapedImpHole h))
+-                Right x -> return x
+-            return (i, apply (irSub r) (irType r), e')
++    -- Provisional types for this batch's ordinary defs.  A def that fails
++    -- pass1 falls back to one of these so pass2 can at least resolve the name
++    -- (otherwise the user sees a baffling "unbound variable").
++    provTs <- mapM (const fresh) ordNames
++    let provT = M.fromList [(n, Forall S.empty [] t) | (n, t) <- zip ordNames provTs]
++
++    (impBindings, ordinaryBindings, impT, defRes, failed) <-
++        if null implicitDecls
++        then do
++            -- No implicit def: pass1 and pass3 collapse into one, same
++            -- behaviour as before this change.
++            (_, bs, res, fd) <- sccCheckerElab outer [outerI] ordinaryDecls
++            return ([], bs, M.empty, res, fd)
++        else do
++            -- pass1
++            (_, bs1, _, _) <- sccCheckerElab outer [outerI] ordinaryDecls
++            let ordT = M.union (M.fromList [(cName b, cScheme b) | b <- bs1]) provT
++            -- pass2
++            (_, bs2, res2, _) <-
++                sccCheckerElab (M.union ordT outer) (impNames : [outerI]) implicitDecls
++            -- A candidate must be a closed type with no context
++            forM_ bs2 $ \b -> case cScheme b of
++                sch@(Forall vs ps ty)
++                    | not (S.null vs) || not (null ps) || not (isClosedType ty) ->
++                        throwError (Located Nothing (ImpCandidateHasContext (cName b) sch))
++                    | otherwise -> return ()
++            let impT = M.fromList [(cName b, cScheme b) | b <- bs2]
++            -- pass3
++            (_, bs3, res3, fd3) <-
++                sccCheckerElab (M.union impT outer) (impNames : [outerI]) ordinaryDecls
++            return (bs2, bs3, impT, M.union res2 res3, fd3)
++
++    let allBindings = impBindings <> ordinaryBindings
++        newT = M.union impT
++                   (M.fromList [(cName b, cScheme b) | b <- ordinaryBindings])
++        env  = M.union newT outer
++        scope = impNames : [outerI]
++
++    exprResults <- forM [(i, e) | (i, StmtExpr e) <- zip [0..] program] $ \(i, e) -> do
++        let blocked = [n | n <- S.toList (freeVars e), S.member n failed]
++        case blocked of
++            n : _ -> return (i, Left (Located Nothing (CalleeNotChecked n)))
++            [] -> do
++                r <- tryEnv $ do
++                    rr <- inferExpr env scope e
++                    let ws = map (applyWanted (irSub rr)) (irWanted rr)
++                    solved <- forM ws $ \w -> do
++                        n <- resolveWanted env w
++                        return (wtdHole w, Var n)
++                    e' <- case fillHoles (M.fromList solved) (irExpr rr) of
++                        Left h  -> throwError (Located Nothing (EscapedImpHole h))
++                        Right x -> return x
++                    return (apply (irSub rr) (irType rr), e')
++                return (i, r)
+ 
+-    let bodyByName = M.fromList
+-            [(cName b, cBody b) | b <- bindings]
++    let bodyByName = M.fromList [(cName b, cBody b) | b <- allBindings]
+         elaborateStmt stmt = case stmt of
+-            StmtDef (Def n ps _) ->
+-                StmtDef (Def n [] (bodyByName M.! n))
+-            StmtImp (Def n ps _) ->
+-                StmtDef (Def n [] (bodyByName M.! n))
+-            StmtExpr _ -> error "expressions are replaced by index below"
+-            other -> other
+-        exprByIndex = M.fromList [(i, e) | (i, _, e) <- exprResults]
++            StmtDef d@(Def n _ _) -> StmtDef (rebuild n d)
++            StmtImp d@(Def n _ _) -> StmtImp (rebuild n d)
++            other                 -> other
++        rebuild n d = case M.lookup n bodyByName of
++            -- A def that failed checking has no body; keep it as is.  The
++            -- batch is not evaluated in that case anyway.
++            Nothing -> d
++            Just b  -> Def n [] b
++        exprByIndex = M.fromList [(i, e) | (i, Right (_, e)) <- exprResults]
+         elaborated =
+             [ case stmt of
+-                StmtExpr _ -> StmtExpr (exprByIndex M.! i)
++                StmtExpr e -> StmtExpr (M.findWithDefault e i exprByIndex)
+                 _          -> elaborateStmt stmt
+             | (i, stmt) <- zip [0..] program
+             ]
+-        typeMap = M.fromList $
+-            [ (i, TyDef n sch)
++        typeMap = M.fromList
++            [ (i, M.findWithDefault (TyDefSkipped []) n defRes)
+             | (i, stmt) <- zip [0..] program
+-            , Def n _ _ <- case stmt of
+-                StmtDef d -> [d]
+-                StmtImp d -> [d]
++            , n <- case stmt of
++                StmtDef d -> [declName d]
++                StmtImp d -> [declName d]
+                 _         -> []
+-            , Just sch <- [M.lookup n newT]
+-            ] <>
+-            [(i, TyExpr (Right ty)) | (i, ty, _) <- exprResults]
++            ] <> M.fromList [(i, TyExpr (fmap fst r)) | (i, r) <- exprResults]
+ 
+     return CProgram
+         { cSub     = M.empty
+         , cTEnv    = M.union ctorEnv newT
+         , cTypes   = typeMap
+         , cProgram = elaborated
+-        , cIFrame  = newI
++        , cIFrame  = impNames
+         }
+ 
++declName :: Decl -> Text
++declName (Def n _ _) = n
++
++-- | Per-SCC checking with error recovery.  Returns
++--   @(accumulated substitution, bindings that succeeded, StmtTy per def, failed
++--   set)@.
++--
++--   The @failed@ set is used twice: (1) a later SCC that depends on it is
++--   marked @TyDefSkipped@ wholesale; (2) an expression that mentions it reports
++--   @CalleeNotChecked@.
++sccCheckerElab :: Checker m
++               => TEnv -> IEnv -> [(Bool, Decl)]
++               -> m (TSub, [CBinding], M.Map Text StmtTy, Set Text)
+ sccCheckerElab outer ienv declarations = do
+-    let declMap = M.fromList [(n, (flag, d)) | (flag, d@(Def n _ _)) <- declarations]
+-        programForDeps =
+-            [StmtDef d | (_, d) <- declarations]
+-        groups = stronglyConnComp (deps programForDeps)
+-    foldM (checkGroup declMap) [] groups
++    let programForDeps = [StmtDef d | (_, d) <- declarations]
++        ds0 = deps programForDeps
++        declMap = M.fromList [(n, flag) | (flag, Def n _ _) <- declarations]
++        depsOf = M.fromList [(n, xs) | (_, n, xs) <- ds0]
++        groups = stronglyConnComp ds0
++    (ts, bs, res, fd) <-
++        foldM (checkGroup declMap depsOf) (M.empty, [], M.empty, S.empty) groups
++    return (ts, bs, res, fd)
+   where
+-    checkGroup declMap done scc = do
++    checkGroup declMap depsOf (ts, done, res, failed) scc = do
+         let ds = flatten scc
+             names = [n | Def n _ _ <- ds]
++            brk = [d | n <- names, d <- M.findWithDefault [] n depsOf
++                     , d `notElem` names, S.member d failed]
++            skipWith xs = (ts, done, M.union (M.fromList xs) res,
++                           S.union (S.fromList names) failed)
++        if not (null brk)
++            then return (skipWith [(n, TyDefSkipped brk) | n <- names])
++            else do
++                r <- tryEnv (checkOne declMap done ds)
++                case r of
++                    Right (ts1, bs) ->
++                        return ( compose ts1 ts
++                               , done <> bs
++                               , foldr (\b m -> M.insert (cName b)
++                                            (TyDef (cName b) (cScheme b)) m) res bs
++                               , failed )
++                    Left err -> return $ skipWith $ case names of
++                        []         -> []
++                        (n0: more) -> (n0, TyDefFailed err) :
++                                      [(n, TyDefSkipped (filter (/= n) more)) | n <- more]
++
++    checkOne declMap done ds = do
++        let names = [n | Def n _ _ <- ds]
+             envDone = M.union
+                 (M.fromList [(cName b, cScheme b) | b <- done])
+                 outer
+@@ -292,18 +381,16 @@
+             (zip inferred provisional)
+         checked <- forM inferred $ \(n, r0) -> do
+             let r = applyInfer finalSub r0
+-            (sch, body') <- closeBinding (applyTEnv finalSub envDone) 
++            (sch, body') <- closeBinding (applyTEnv finalSub envDone)
+                 (irType r) (irWanted r) (irExpr r)
+-            let isImp = case M.lookup n declMap of
+-                    Just (flag, _) -> flag
+-                    Nothing        -> False
++            let isImp = M.findWithDefault False n declMap
+             return CBinding
+                 { cName = n
+                 , cScheme = sch
+                 , cBody = body'
+                 , cImp = isImp
+                 }
+-        return (done <> checked)
++        return (finalSub, checked)
+ 
+ fresh :: MonadState Counter m => m T'
+ fresh = get >>= \n -> put (n + 1) >> return (TVar n)
+@@ -526,26 +613,6 @@
+             let ts'' = compose ts2 ts'
+             return (ts'', M.union (applyTEnv ts'' tenv1) (applyTEnv ts'' tenv))
+ 
+-matchType :: Checker m => TEnv -> T' -> (TSub, Maybe T') -> (P', E') -> m (TSub, Maybe T')
+-matchType env t (ts, mtp) (p, b) = do
+-    checkDupPatVar p
+-    let env' = applyTEnv ts env
+-    (ts2, tp, benv) <- patType p
+-    let tsA  = compose ts2 ts
+-        note = case mtp of
+-            Just _ -> withNote swallowedArmsNote
+-            Nothing -> id
+-    ts3 <- note $ unify (apply tsA tp, apply tsA t)
+-    let tsB = compose ts3 tsA
+-    (ts4, tb) <- typeChecker (M.union (applyTEnv tsB benv) env') b
+-    let tsC = compose ts4 tsB
+-    case mtp of
+-        Nothing -> return (tsC, Just (apply tsC tb))
+-        Just t0 -> do 
+-            ts5 <- unify (apply tsC t0, apply tsC tb)
+-            let tsD = compose ts5 tsC
+-            return (tsD, Just (apply tsD tb))
+-
+ checkDupPatVar :: MonadError (Located TypeError) m => P' -> m ()
+ checkDupPatVar p = case fstDuplicate (patVarsList p) of
+     Just x -> throwError $ Located Nothing $ DuplicatePatVar x
+@@ -679,9 +746,14 @@
+     when (isImp && not (null $ sPreds sch)) $
+         throwError $ Located Nothing $ ImpCandidateHasContext n sch
+     let env2  = M.insert n sch env1
+-        ienv2 = if isImp then [ICandidate n sch Nothing]: ienv else ienv
++        -- TODO/16 3.3: `let implicit` pushes a *one-element* frame, so it
++        -- shadows the enclosing scope instead of joining it.  Search stops at
++        -- the first frame with a match and reports ambiguity there rather than
++        -- falling through to an outer frame (TODO/16 1.3).
++        ienv2 = if isImp then [n] : ienv else ienv
+     rb <- inferExpr env2 ienv2 body
+-    (bdw, bdn) <- if isImp then dischargeLocal ienv rb else return (irWanted rb, irExpr rb)
++    (bdw, bdn) <- if isImp then dischargeLocal env2 ienv rb
++                           else return (irWanted rb, irExpr rb)
+     return $ InferRes
+         { irSub    = compose (irSub rb) su
+         , irWanted = bdw
+@@ -694,7 +766,13 @@
+     checkDupPatVar pat
+     (ps, patT, patE) <- patType pat
+     let su0 = compose ps su
+-    u0 <- unify (apply su0 patT, apply su0 scrutTy)
++        -- Only an arm that is not the first one can have been "absorbed" by an
++        -- unparenthesised `match` in the arm above, so the note is attached from
++        -- the second arm on.  (This used to live in the now-deleted matchType.)
++        note = case oldout of
++            Just _  -> withNote swallowedArmsNote
++            Nothing -> id
++    u0 <- note $ unify (apply su0 patT, apply su0 scrutTy)
+     let su1 = compose u0 su0
+         bdE = M.union (applyTEnv su1 patE) (applyTEnv su1 env)
+     rb <- inferExpr bdE ienv body
+@@ -707,11 +785,14 @@
+     return (su3, ws <> irWanted rb, Just out, done <> [(pat, irExpr rb)])
+ 
+ 
+-dischargeLocal :: Checker m => [IFrame] -> InferRes -> m ([Wanted], E')
+-dischargeLocal outer r = do
++-- | Wrap-up for @let implicit@: holes the current scope can satisfy are filled
++--   in place; the rest (whose types are not concrete yet) escape outward and
++--   become hidden parameters in the enclosing closeBinding.
++dischargeLocal :: Checker m => TEnv -> [IFrame] -> InferRes -> m ([Wanted], E')
++dischargeLocal tenv outer r = do
+     let ws = map (applyWanted (irSub r)) (irWanted r)
+         (closed, open) = partition (isClosedType . wtdType) ws
+-    solved <- forM closed $ \w -> resolveWanted w <&> (wtdHole w,) . Var
++    solved <- forM closed $ \w -> resolveWanted tenv w <&> (wtdHole w,) . Var
+     let body = fillKnownHoles (M.fromList solved) (irExpr r)
+         escp = [w { wtdScope = outer } | w <- open]
+     return (escp, body)
+@@ -744,25 +825,33 @@
+ wantedPred :: Wanted -> Pred
+ wantedPred = Implicit . wtdType
+ 
+-resolveWanted :: Checker m => Wanted -> m Text
+-resolveWanted wtd = go (wtdScope wtd)
++-- | Find the implicit candidate whose type is exactly @target@.
++--
++--   Frames hold names only and the types are looked up live in @tenv@, so "who
++--   is in scope" is decided when the frame is built rather than after the
++--   candidate's SCC is checked.
++--
++--   Only candidates with no free type variables and no predicates qualify --
++--   implicit search never *specialises* ordinary type variables, otherwise
++--   @{o :: Ord k}@ would be satisfied by any @Ord Int@.
++resolveWanted :: Checker m => TEnv -> Wanted -> m Text
++resolveWanted tenv wtd = go (wtdScope wtd)
+     where
+         target = wtdType wtd
+-        
++
+         go = \case
+             [] -> throwError $ Located (wtdSpan wtd) (NoImplicit target)
+             frame: outer -> do
+-                let candidates = mapMaybe candidate frame
+-                    matches = [name | (name, ty) <- candidates, ty == target]
++                let matches = [n | n <- frame, Just ty <- [candidate n], ty == target]
+                 case matches of
+-                    []     -> go outer
+-                    [name] -> return name
+-                    names  -> throwError $ Located (wtdSpan wtd)
+-                        (AmbiguousImp target names)
+-
+-        candidate c = case impScheme c of
+-            Forall vars [] ty
+-                | S.null vars && isClosedType ty -> Just (impName c, ty)
++                    []  -> go outer
++                    [n] -> return n
++                    ns  -> throwError $ Located (wtdSpan wtd)
++                        (AmbiguousImp target ns)
++
++        candidate n = case M.lookup n tenv of
++            Just (Forall vars [] ty)
++                | S.null vars && isClosedType ty -> Just ty
+             _ -> Nothing
+ 
+ fillHoles :: HoleSol -> E' -> Either HoleId E'
+@@ -805,28 +894,59 @@
+             (AmbiguousImpType (wtdType w))
+         [] -> return ()
+ 
++    -- Wants that can be settled at the definition site: fill the hole with the
++    -- candidate's name.
++    --
++    -- But an implicit *parameter* (wtdBind is Just) is different: its hole is
++    -- not in the body at all.  The body says `Var "o"`, and `o` sits in the
++    -- TEnv as a predicate-free closed type, so instantiating it in the Var
++    -- branch yields no hole.  Filling holes therefore does nothing for it --
++    -- the `Var "o"` in the body has to be caught by a lambda *named o*, which
++    -- is then applied to the dictionary on the spot.
++    --
+     concreteSolutions <- forM concreteWs $ \w -> do
+-        candidate <- resolveWanted w
+-        return (wtdHole w, Var candidate)
++        candidate <- resolveWanted outer w
++        return (wtdBind w, wtdHole w, candidate)
+ 
+     let grouped = groupWanted outwardWs
+-        hidden =
+-            [ (pred', "$implicit" <> pack (show i), ws)
+-            | (i, (pred', ws)) <- zip [0 :: Int ..] grouped
+-            ]
++        hidden = zipWith mkHidden [0 :: Int ..] grouped
++        mkHidden i (pred', ws) =
++            let bound   = [n | w <- ws, Just n <- [wtdBind w]]
++                primary = case bound of
++                    (n: _) -> n
++                    []     -> "$implicit" <> pack (show i)
++            in (pred', primary, filter (/= primary) bound, ws)
+         hiddenSolutions =
+-            [ (wtdHole w, Var hName)
+-            | (_, hName, ws) <- hidden
++            [ (wtdHole w, Var primary)
++            | (_, primary, _, ws) <- hidden
+             , w <- ws
+             ]
+-        solved = M.fromList (concreteSolutions <> hiddenSolutions)
+-        predicates = [pred' | (pred', _, _) <- hidden]
++        solved = M.fromList ([(h, Var c) | (_, h, c) <- concreteSolutions]
++                                 <> hiddenSolutions)
++        predicates = [pred' | (pred', _, _, _) <- hidden]
++        -- Named ones (= definition-site implicit parameters) are handled
++        -- separately: wrap a lambda and apply it immediately
++        captured = [(n, c) | (Just n, _, c) <- concreteSolutions]
+ 
+     body' <- case fillHoles solved body of
+-        Left h  -> throwError (Located Nothing (EscapedImpHole h))
++        Left h  -> throwError $ case [w | w <- concreteWs, wtdHole w == h] of
++            (w: _) -> Located (wtdSpan w) (EscapedImpHole h)
++            []     -> Located Nothing (EscapedImpHole h)
+         Right e -> return e
+ 
+-    let body'' = foldr (Lambda . (\(_, n, _) -> n)) body' hidden
++    -- Order: first lambda-bind the definition-site parameters and feed them
++    -- their dictionaries on the spot (definition-site capture), then wrap the
++    -- hidden parameters that the *caller* supplies on the outside.  The call
++    -- site in inferExpr's Var branch is `foldl App e (map ImpHole holes)` --
++    -- dictionaries go *first*, so hidden parameters outermost lines up.
++    let bodyB = foldr (\(n, c) b -> App (Lambda n b) (Var c)) body' captured
++        -- If two implicit parameters in one group share a type
++        -- (`def f {a :: MyOrd k} {b :: MyOrd k}`) they need only one
++        -- dictionary; the primary name becomes the lambda and the others are
++        -- let-bound aliases:  \a -> let b = a in body
++        aliasOne (_, primary, aliases, _) b =
++            foldr (\x acc -> Let x (Var primary) acc) b aliases
++        body'' = foldr (Lambda . (\(_, n, _, _) -> n)) (foldr aliasOne bodyB hidden) hidden
+         scheme = Forall genVars predicates ty
+     return (scheme, body'')
+ 
+@@ -861,8 +981,3 @@
+                 r <- go (M.insert n (Forall S.empty [] annotation') current) rest
+                 h <- freshHole
+                 return r { irWanted = Wanted h annotation' ienv Nothing (Just n) : irWanted r }
+-
+-hiddenName :: Show a => a -> [Wanted] -> Text
+-hiddenName i ws = case [n | w <- ws, Just n <- [wtdBind w]] of
+-    n: _ -> n
+-    []   -> "$implicit" <> pack (show i)S

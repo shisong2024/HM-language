@@ -25,16 +25,16 @@ builtinTEnv = M.fromList
     ]
 
 consTy :: S'
-consTy = Forall (S.singleton 0) (TFunc (TVar 0) (TFunc (TList (TVar 0)) (TList (TVar 0))))
+consTy = Forall (S.singleton 0) [] (TFunc (TVar 0) (TFunc (TList (TVar 0)) (TList (TVar 0))))
 
 strAppTy :: S'
-strAppTy = Forall S.empty (TFunc TString (TFunc TString TString))
+strAppTy = Forall S.empty [] (TFunc TString (TFunc TString TString))
 
 unconsTy :: S'
-unconsTy = Forall S.empty (TFunc TString (TCon "Maybe" [TTuple [TInt, TString]]))
+unconsTy = Forall S.empty [] (TFunc TString (TCon "Maybe" [TTuple [TInt, TString]]))
 
 fromCodeTy :: S'
-fromCodeTy = Forall S.empty (TFunc TInt TString)
+fromCodeTy = Forall S.empty [] (TFunc TInt TString)
 
 initSession :: Session
 initSession = Session 
@@ -47,6 +47,7 @@ initSession = Session
     , sSyns     = M.empty
     , sFields   = M.empty
     , sFixities = M.empty
+    , sImp      = []
     }
 
 emptyDEnv :: DEnv

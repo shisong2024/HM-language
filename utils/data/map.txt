@@ -1,29 +1,6 @@
 -- utils/data/map.txt
 
-data Map' k v = Leaf | Node Int k v (Map' k v) (Map' k v);
-data Map k v = Map { compare :: k -> k -> Ordering, dict :: Map' k v };
-
-def lookup k mp = lookup_ mp.compare k mp.dict;
-def (!!) = lookup;
-infix 5 !!;
-
-def member k mp = member_ mp.compare k mp.dict;
-def findMin mp = _findMin mp.dict;
-def findMax mp = _findMax mp.dict;
-
-def insert k v mp = insert_ mp.compare k v mp.dict;
-def delete k mp = delete_ mp.compare k mp.dict;
-
-def map f mp = _map f mp.dict;
-def foldr f z mp = _foldr f z mp.dict;
-def toList = foldr (lambda k v tps -> (k, v): tps) [];
-def keys = foldr (lambda k _ l -> cons k l) [];
-def values = foldr (lambda _ -> cons) [];
-
-def fromListWithCmp cmp l = Map { compare = cmp, dict = fromList_ cmp l };
-def fromListInt = fromListWithCmp cmpInt;
-def fromListString = fromListWithCmp cmpString;
-
+data Map k v = Leaf | Node Int k v (Map k v) (Map k v);
 
 ---
 
@@ -36,15 +13,17 @@ def height m = match m with
 
 def node k v l r = Node (1 + max (height l) (height r)) k v l r;
 
-def lookup_ cmp k m = match m with
+def lookup {o :: Ord a} k m = match m with
       Leaf -> None
-    | Node _ k' v l r -> match cmp k k' with
-          LT -> lookup_ cmp k l
+    | Node _ k' v l r -> match o.cmp k k' with
+          LT -> lookup k l
         | EQ -> Just v
-        | GT -> lookup_ cmp k r
+        | GT -> lookup k r
     ;
 
-def member_ cmp k m = isJust (lookup_ cmp k m);
+def member {o :: Ord a} k m = isJust (lookup o k m);
+
+--- 
 
 def _findMin m = match m with
       Leaf -> None

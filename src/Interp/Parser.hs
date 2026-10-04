@@ -16,6 +16,7 @@ import Data.Functor(($>), void)
 
 import Control.Monad (guard, when, foldM)
 import Data.List (sortOn)
+import Data.Maybe (isJust)
 
 opInfo :: Opr -> Fixity
 opInfo = \case
@@ -42,6 +43,7 @@ reserved =
     , "if", "then", "else", "true", "false"
     , "match", "with", "data", "type"
     , "infixl", "infixr", "infix"
+    , "implicit"
     ]
 
 reservedType :: [Text]
@@ -102,6 +104,14 @@ varName = lexeme $ nameRaw isVarFirst
 
 upperName :: Parser Text
 upperName = lexeme $ nameRaw isUpper
+
+parseParam :: Parser Param
+parseParam = try parseImpParam <|> (ExplicitParam <$> parseVar')
+
+parseImpParam :: Parser Param
+parseImpParam = ImplicitParam
+    <$> (lexeme (char '{') *> parseVar')
+    <*> (lexeme (string "::" <?> "::") *> parseType <* lexeme (char '}'))
 
 parseVar' :: Parser Text
 parseVar' = lexeme $ do
@@ -198,6 +208,11 @@ recUpdE tab = do
 parseLet :: Tabs -> Parser E'
 parseLet tab = withSpan $ do
     _ <- symbol "let"
+    isImp <- isJust <$> optional (try (symbol "implicit"))
+    (if isImp then parseImpLet else parseOrdLet) tab
+
+parseOrdLet :: Tabs -> Parser E'
+parseOrdLet tab = do
     sp0 <- getSourcePos
     off0 <- getOffset
     p <- parsePat tab
@@ -219,6 +234,10 @@ parseLet tab = withSpan $ do
         refutableLetMsg =
             "this pattern may fail to match, so it cannot be used as a `let` binding. "
             <> "Bind a variable (or a tuple of variables), or use `match` instead."
+
+parseImpLet :: Tabs -> Parser E'
+parseImpLet tab = LetImp
+    <$> parseVar' <*> (lexeme (char '=' <?> "=") *> parseExpr tab) <*> (symbol "in" *> parseExpr tab)
 
 parseIf :: Tabs -> Parser E'
 parseIf tab = withSpan $ If
@@ -372,11 +391,14 @@ ctorExpr tab n = do
 parseDef :: Tabs -> Parser Decl
 parseDef tab = do
     f <- symbol "def" *> defName
-    vs <- many parseVar'
+    ps <- many parseParam
     _ <- lexeme (char '=' <?> "=")
     b <- parseExpr tab
     _ <- semicolon
-    return $ Def f vs $ foldr Lambda b vs
+    return $ Def f ps b
+
+parseImpDef :: Tabs -> Parser Statement
+parseImpDef tab = StmtImp <$> (symbol "implicit" *> parseDef tab)
 
 defName :: Parser Text
 defName = parseVar' <|> (lexeme (char '(') *> opName <* lexeme (char ')')) <|> opName
@@ -417,7 +439,8 @@ assocOf = \case
 parseProg :: Tabs -> Parser [(Int, Statement)]
 parseProg tab = sc *> many 
     (   ((,) . unPos . sourceLine <$> getSourcePos)
-    <*> (   StmtDef <$> parseDef tab 
+    <*> (   parseImpDef tab
+        <|> StmtDef <$> parseDef tab 
         <|> StmtData <$> parseData 
         <|> parseTypeDecl 
         <|> parseInfixDecl
@@ -498,7 +521,7 @@ scanFixities tab0 t = do
     where
         ls :: [Text]
         ls = T.lines t
-        
+
         wordsOf :: Text -> [Text]
         wordsOf = filter (/= ";") . T.words . T.strip
 
@@ -663,27 +686,33 @@ recProgram tab0 ss = do
 
 recStmt :: FieldTab -> Statement -> Either Text Statement
 recStmt tab = \case
-    StmtDef (Def n vs b) -> StmtDef . Def n vs <$> desugarE tab b
+    StmtDef d -> StmtDef <$> recDecl tab d
+    StmtImp d -> StmtImp <$> recDecl tab d
     StmtExpr e           -> StmtExpr <$> desugarE tab e
     s                    -> Right s
-
+    where
+        recDecl :: FieldTab -> Decl -> Either Text Decl
+        recDecl t (Def n ps body) = Def n ps <$> desugarE t body
+        
 desugarE :: FieldTab -> E' -> Either Text E'
 desugarE tab = \case
-    ILit i      -> Right (ILit i)
-    BLit b      -> Right (BLit b)
-    SLit s      -> Right (SLit s)
-    Var n       -> Right (Var n)
-    ListLit es  -> ListLit <$> mapM (desugarE tab) es
-    TupleLit es -> TupleLit <$> mapM (desugarE tab) es
-    Let n u v   -> Let n <$> desugarE tab u <*> desugarE tab v
-    If b u v    -> If <$> desugarE tab b <*> desugarE tab u <*> desugarE tab v
-    BOpr o u v  -> BOpr o <$> desugarE tab u <*> desugarE tab v
-    Lambda n b  -> Lambda n <$> desugarE tab b
-    AnnT e t    -> AnnT <$> desugarE tab e <*> pure t
-    At sp e     -> At sp <$> desugarE tab e
-    Match e as  -> Match <$> desugarE tab e
+    ImpHole i    -> Right (ImpHole i)
+    ILit i       -> Right (ILit i)
+    BLit b       -> Right (BLit b)
+    SLit s       -> Right (SLit s)
+    Var n        -> Right (Var n)
+    ListLit es   -> ListLit <$> mapM (desugarE tab) es
+    TupleLit es  -> TupleLit <$> mapM (desugarE tab) es
+    Let n u v    -> Let n <$> desugarE tab u <*> desugarE tab v
+    LetImp n u v -> LetImp n <$> desugarE tab u <*> desugarE tab v
+    If b u v     -> If <$> desugarE tab b <*> desugarE tab u <*> desugarE tab v
+    BOpr o u v   -> BOpr o <$> desugarE tab u <*> desugarE tab v
+    Lambda n b   -> Lambda n <$> desugarE tab b
+    AnnT e t     -> AnnT <$> desugarE tab e <*> pure t
+    At sp e      -> At sp <$> desugarE tab e
+    Match e as   -> Match <$> desugarE tab e
         <*> mapM (\(p, b) -> (,) <$> desugarP tab p <*> desugarE tab b) as
-    App f a     -> do
+    App f a      -> do
         f' <- desugarE tab f
         a' <- desugarE tab a
         case spanOf f' of

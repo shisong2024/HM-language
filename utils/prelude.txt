@@ -4,6 +4,7 @@ data Unit = Unit;
 data Maybe a = None | Just a;
 data Either a b = Left a | Right b;
 data Ordering = LT | EQ | GT;
+data Ord a = Ord { cmp :: a -> a -> Ordering };
 
 
 -- -- functions of numbers
@@ -215,8 +216,8 @@ def either f g e = match e with Left x -> f x | Right y -> g y;
 -- cmp :: a -> a -> Ordering
 -- leave for future
 
--- cmpInt :: Int -> Int -> Ordering
-def cmpInt a b = if a < b then LT else if a > b then GT else EQ;
+-- ordInt :: Ord Int
+implicit def ordInt = Ord { cmp = lambda a b -> if a < b then LT else if a > b then GT else EQ };
 
 -- cmpString :: String -> String -> Ordering
 def cmpString a b = match (uncons a, uncons b) with
@@ -228,6 +229,9 @@ def cmpString a b = match (uncons a, uncons b) with
         else if i > j then GT
         else cmpString ra rb
     ;
+
+-- ordStr :: Ord String
+implicit def ordStr = Ord { cmp = cmpString };
 
 -- -- functions of String
 

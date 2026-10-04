@@ -13,7 +13,7 @@ import Data.Bifunctor (Bifunctor(first))
 
 topsOf :: Program -> Tops
 topsOf prs = Tops
-    { tVals  = S.fromList [n | StmtDef (Def n _ _ ) <- prs, not (isOpName n)]
+    { tVals  = S.fromList [n | stmt <- prs, Def n _ _ <- case stmt of StmtDef d -> [d]; StmtImp d -> [d]; _ -> [], not (isOpName n)]
     , tTypes = S.fromList ([dName d | StmtData d <- prs] ++ [n | StmtType n _ _ <- prs])
     , tCtors = S.fromList [c | StmtData d <- prs, (c, _) <- dCtors d]
     }
@@ -26,7 +26,7 @@ qualifyProgram a prs = map (stmt (topsOf prs)) prs
 
         stmt :: Tops -> Statement -> Statement
         stmt t = \case
-            StmtDef (Def n vs b) -> StmtDef (Def (qual (tVals t) n) vs (expr t S.empty b))
+            StmtDef d -> StmtDef (decl t d)
             StmtExpr e -> StmtExpr (expr t S.empty e)
             StmtData d -> StmtData d
                 { dName  = qual (tTypes t) (dName d)
@@ -35,7 +35,17 @@ qualifyProgram a prs = map (stmt (topsOf prs)) prs
                 }
             StmtType n ps ty -> StmtType (qual (tTypes t) n) ps (typ t ty)
             StmtInfix n fx -> StmtInfix n fx
+            StmtImp d -> StmtImp (decl t d)
+
+        decl :: Tops -> Decl -> Decl
+        decl t (Def n ps body) = Def (qual (tVals t) n) (map (param t) ps) 
+            (expr t (S.fromList (map paramName ps)) body)
         
+        param :: Tops -> Param -> Param
+        param t = \case
+            ExplicitParam n -> ExplicitParam n
+            ImplicitParam n ty -> ImplicitParam n (typ t ty)
+
         expr :: Tops -> S.Set Text -> E' -> E'
         expr t bs = \case
             Var n -> Var (if n `S.member` bs then n else qual (S.union (tVals t) (tCtors t)) n)
@@ -45,6 +55,7 @@ qualifyProgram a prs = map (stmt (topsOf prs)) prs
             ListLit es -> ListLit (map (expr t bs) es)
             TupleLit es -> TupleLit (map (expr t bs) es)
             Let n u v -> Let n (expr t bs u) (expr t (S.insert n bs) v)
+            LetImp n u v -> LetImp n (expr t bs u) (expr t (S.insert n bs) v)
             If b u v -> If (expr t bs b) (expr t bs u) (expr t bs v)
             BOpr o u v -> BOpr o (expr t bs u) (expr t bs v)
             Lambda n b -> Lambda n (expr t (S.insert n bs) b)
@@ -53,6 +64,7 @@ qualifyProgram a prs = map (stmt (topsOf prs)) prs
                 [(pat t p, expr t (S.union bs (S.fromList (patVarsList p))) b) | (p, b) <- as]
             AnnT e ty -> AnnT (expr t bs e) (typ t ty)
             At sp e -> At sp (expr t bs e)
+            ImpHole h -> ImpHole h
         
         pat :: Tops -> P' -> P'
         pat t = \case

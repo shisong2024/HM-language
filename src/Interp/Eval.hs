@@ -71,6 +71,10 @@ eval = \case
                 let recEnv = M.insert t (VClosure x eb recEnv) env in
                 local (const recEnv) (eval e2)
             _ -> eval e1 >>= \v -> local (const (M.insert t v env)) (eval e2)
+    
+    LetImp n rhs body -> do
+        value <- eval rhs
+        local (M.insert n value) (eval body)
 
     If eb e1 e2 -> do
         mb <- eval eb
@@ -98,6 +102,9 @@ eval = \case
     Match e pes -> eval e >>= \v -> matchArms v pes
 
     AnnT e _ -> eval e
+
+    ImpHole h -> throwError (Located Nothing (UnboundVariable
+        ("internal implicit hole " <> T.pack (show h))))
 
 evalProgram :: (MonadState Depth m, MonadReader Env m, MonadError (Located EvalError) m) => Program -> m (Env, M.Map Int (Either (Located EvalError) V'))
 evalProgram prs = ask >>= \env -> do
@@ -177,12 +184,14 @@ freeVars = \case
     TupleLit vs -> S.unions (map freeVars vs)
     Lambda x e -> S.delete x (freeVars e)
     Let t e1 e2 -> freeVars e1 `S.union` S.delete t (freeVars e2)
+    LetImp t e1 e2 -> freeVars e1 `S.union` S.delete t (freeVars e2)
     If b e1 e2 -> S.unions (map freeVars [b, e1, e2])
     BOpr _ e1 e2 -> freeVars e1 `S.union` freeVars e2
     App f a -> freeVars f `S.union` freeVars a
     Match e pes -> S.unions (freeVars e: [freeVars b `S.difference` patVars p | (p, b) <- pes])
     AnnT e _ -> freeVars e
     At _ e -> freeVars e
+    ImpHole _ -> S.empty
 
 deps :: Program -> [(Decl, Text, [Text])]
 deps prs = 
@@ -274,3 +283,20 @@ eqOp v1 v2 w = case eqV (v1, v2) of
 
 dataDeclsOf :: Program -> [DataDecl]
 dataDeclsOf prs = [d | StmtData d <- prs]
+
+paramName :: Param -> Text
+paramName = \case
+    ExplicitParam n -> n
+    ImplicitParam n _ -> n
+
+explicitParams :: [Param] -> [Text]
+explicitParams ps = [n | ExplicitParam n <- ps]
+
+implicitParams :: [Param] -> [(Text, T')]
+implicitParams ps = [(n, t) | ImplicitParam n t <- ps]
+
+declBody :: Decl -> E'
+declBody (Def _ ps body) = foldr (Lambda . paramName) body ps
+
+defsOf :: [Statement] -> [Decl]
+defsOf prs = [d | StmtDef d <- prs] <> [d | StmtImp d <- prs]

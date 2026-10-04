@@ -24,31 +24,41 @@ expandProgram tab0 prs = do
 
 expandStmt :: SynTable -> Statement -> Either Text Statement
 expandStmt tab = \case
-    StmtDef (Def n vs b) -> StmtDef . Def n vs <$> expandE tab b
+    StmtDef d -> StmtDef <$> expandDecl tab d
     StmtExpr e           -> StmtExpr <$> expandE tab e
     StmtData d           -> do
         cs <- mapM (\(c, as) -> (,) c <$> mapM (expandT tab) as) (dCtors d)
         return $ StmtData d { dCtors = cs }
     StmtType n ps t      -> Right (StmtType n ps t)
     StmtInfix n fx       -> Right (StmtInfix n fx)
+    StmtImp d -> StmtImp <$> expandDecl tab d
+
+expandDecl :: SynTable -> Decl -> Either Text Decl
+expandDecl tab (Def n ps body) = Def n <$> mapM expandParam ps <*> expandE tab body
+    where
+        expandParam = \case
+            ExplicitParam x -> Right $ ExplicitParam x
+            ImplicitParam x ty -> ImplicitParam x <$> expandT tab ty
 
 expandE :: SynTable -> E' -> Either Text E'
 expandE tab = \case
-    ILit i      -> Right (ILit i)
-    BLit b      -> Right (BLit b)
-    SLit s      -> Right (SLit s)
-    Var n       -> Right (Var n)
-    ListLit es  -> ListLit <$> mapM (expandE tab) es
-    TupleLit es -> TupleLit <$> mapM (expandE tab) es
-    Let n u v   -> Let n <$> expandE tab u <*> expandE tab v
-    If b u v    -> If <$> expandE tab b <*> expandE tab u <*> expandE tab v
-    BOpr o u v  -> BOpr o <$> expandE tab u <*> expandE tab v
-    Lambda n b  -> Lambda n <$> expandE tab b
-    App u v     -> App <$> expandE tab u <*> expandE tab v
-    Match s as  -> Match <$> expandE tab s
+    ILit i       -> Right (ILit i)
+    BLit b       -> Right (BLit b)
+    SLit s       -> Right (SLit s)
+    Var n        -> Right (Var n)
+    ListLit es   -> ListLit <$> mapM (expandE tab) es
+    TupleLit es  -> TupleLit <$> mapM (expandE tab) es
+    Let n u v    -> Let n <$> expandE tab u <*> expandE tab v
+    LetImp n u v -> LetImp n <$> expandE tab u <*> expandE tab v
+    If b u v     -> If <$> expandE tab b <*> expandE tab u <*> expandE tab v
+    BOpr o u v   -> BOpr o <$> expandE tab u <*> expandE tab v
+    Lambda n b   -> Lambda n <$> expandE tab b
+    App u v      -> App <$> expandE tab u <*> expandE tab v
+    Match s as   -> Match <$> expandE tab s
                          <*> mapM (\(p, b) -> (,) p <$> expandE tab b) as
-    AnnT e ty   -> AnnT <$> expandE tab e <*> expandT tab ty
-    At sp e     -> At sp <$> expandE tab e
+    AnnT e ty    -> AnnT <$> expandE tab e <*> expandT tab ty
+    At sp e      -> At sp <$> expandE tab e
+    ImpHole h    -> Right $ ImpHole h
 
 expandT :: SynTable -> T' -> Either Text T'
 expandT tab = go S.empty

@@ -31,6 +31,7 @@ data E'
     | ListLit [E']
     | TupleLit [E']
     | Let Text E' E'
+    | LetImp Text E' E'
     | If E' E' E'
     | BOpr Opr E' E'
     | Lambda Text E'
@@ -38,6 +39,7 @@ data E'
     | Match E' [(P', E')]
     | AnnT E' T'
     | At Span E'
+    | ImpHole HoleId
     deriving (Show, Eq)
 
 data Opr    = OArith LitOpr | OCmp CmpOpr deriving (Show, Eq)
@@ -110,7 +112,7 @@ data T'
     | TTuple [T']
     | TFunc T' T'
     | TCon Text [T'] 
-    deriving (Show, Eq)
+    deriving (Show, Eq, Ord)
 
 data StmtTy 
     = TyDef Text S'
@@ -119,8 +121,32 @@ data StmtTy
     | TyExpr (Either (Located TypeError) T') 
     deriving (Show, Eq)
 
+data InferRes = InferRes 
+    { irSub    :: TSub
+    , irWanted :: [Wanted]
+    , irType   :: T'
+    , irExpr   :: E'
+    } deriving (Show, Eq)
+
+data CBinding = CBinding
+    { cName   :: Text
+    , cScheme :: S'
+    , cBody   :: E'
+    , cImp    :: Bool
+    } deriving (Show, Eq)
+
+data CProgram = CProgram
+    { cSub     :: TSub
+    , cTEnv    :: TEnv
+    , cTypes   :: Map Int StmtTy
+    , cProgram :: Program
+    , cIFrame  :: IFrame
+    } deriving (Show, Eq)
+
 type TypeVar = Int
 type Counter = Int
+type HoleId  = Int
+type HoleSol = Map HoleId E'
 
 data TypeError
     = UnboundVar Text
@@ -138,6 +164,11 @@ data TypeError
     | CalleeNote Text S' TypeError
     | WithNote Text TypeError
     | CalleeNotChecked Text
+    | NoImplicit T'
+    | AmbiguousImp T' [Text]
+    | AmbiguousImpType T'
+    | ImpCandidateHasContext Text S'
+    | EscapedImpHole HoleId
     deriving (Show, Eq)
 
 type Env  = Map Text V'
@@ -147,11 +178,23 @@ type TSub = Map TypeVar T'
 type SynTable = Map Text ([Text], T')
 type Parser a = Parsec Void Text a
 
-data S' = Forall (Set TypeVar) T' deriving (Show, Eq)
-data Decl = Def Text [Text] E' deriving (Show, Eq)
+data Param
+    = ExplicitParam Text 
+    | ImplicitParam Text T' 
+    deriving (Show, Eq)
+
+newtype Pred = Implicit T' deriving (Show, Eq, Ord)
+data S' = Forall 
+    { sVars  :: Set TypeVar
+    , sPreds :: [Pred]
+    , sType  :: T'
+    } deriving (Show, Eq)
+
+data Decl = Def Text [Param] E' deriving (Show, Eq)
 
 data Statement 
-    = StmtDef Decl 
+    = StmtDef Decl
+    | StmtImp Decl
     | StmtExpr E' 
     | StmtData DataDecl
     | StmtType Text [Text] T'
@@ -170,15 +213,16 @@ data DataDecl = DataDecl
     } deriving (Show, Eq)
 
 data Session = Session
-    { sTEnv    :: TEnv
-    , sEnv     :: Env
-    , sNext    :: Counter
-    , sBatch   :: BatchName
-    , sDEnv    :: DEnv
-    , sAliases :: Map Text FilePath
-    , sSyns    :: SynTable
+    { sTEnv     :: TEnv
+    , sEnv      :: Env
+    , sNext     :: Counter
+    , sBatch    :: BatchName
+    , sDEnv     :: DEnv
+    , sAliases  :: Map Text FilePath
+    , sSyns     :: SynTable
     , sFixities :: FixTab
-    , sFields  :: FieldTab
+    , sFields   :: FieldTab
+    , sImp      :: IFrame
     } deriving (Show, Eq)
 
 data CtorInfo = CtorInfo
@@ -196,7 +240,18 @@ data Tops = Tops
     { tVals  :: Set Text
     , tTypes :: Set Text
     , tCtors :: Set Text
-    }
+    } deriving (Show, Eq)
+
+data Wanted = Wanted
+    { wtdHole  :: HoleId
+    , wtdType  :: T'
+    , wtdScope :: IEnv
+    , wtdSpan  :: Maybe Span
+    , wtdBind  :: Maybe Text
+    } deriving (Show, Eq)
+
+type IFrame  = [Text]
+type IEnv    = [IFrame]
 
 opTable :: [(Text, Opr)]
 opTable = 

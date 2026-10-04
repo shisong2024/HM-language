@@ -8,7 +8,6 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import qualified Data.Map as M
 import qualified Data.Set as S
-import qualified Data.List as L
 
 import Data.Text (Text, pack)
 import Data.List (sortOn, find)
@@ -28,6 +27,7 @@ debugE' = \case
     TupleLit es -> "(" <> T.intercalate ", " (fmap debugE' es) <> ")"
     BOpr op e1 e2 -> "(" <> T.unwords [debugE' e1, prettyBOpr op, debugE' e2] <> ")"
     Let t e1 e2 -> T.unwords ["(Let", t, "=", debugE' e1, "in", debugE' e2] <> ")"
+    LetImp t e1 e2 -> T.unwords ["(Let implicit", t, "=", debugE' e1, "in", debugE' e2] <> ")"
     If eb e1 e2 -> T.unwords ["(If", debugE' eb, "then", debugE' e1, "else", debugE' e2] <> ")"
     Lambda t e -> T.concat ["(\\", t, " -> ", debugE' e, ")"]
     App e1 e2 -> "(App " <> T.unwords [debugE' e1, debugE' e2] <> ")"
@@ -35,6 +35,7 @@ debugE' = \case
         <> T.intercalate " | " [prettyP p <> " -> " <> debugE' b | (p, b) <- arms] <> ")"
     AnnT e _ -> "(" <> debugE' e <> " :: ..."
     At _ e -> debugE' e
+    ImpHole h -> "<implicit-hole:" <> pack (show h) <> ">"
 
 prettyV' :: V' -> Text
 prettyV' = \case
@@ -117,18 +118,35 @@ prettyTypeError = \case
     CalleeNotChecked n ->
         tick n <> " has no type because its definition did not check, so this "
             <> "expression was not checked either."
+    NoImplicit t ->
+        "No implicit value of type " <> prettyT' t <> " is available."
+    AmbiguousImp t names ->
+        "More than one implicit value matches " <> prettyT' t <> ": "
+        <> T.intercalate ", " (map tick names) <> "."
+    AmbiguousImpType t ->
+        "Cannot determine the type required by implicit parameter "
+        <> prettyT' t <> ".\n"
+        <> "  note: implicit search does not choose ordinary type variables."
+    ImpCandidateHasContext n sch ->
+        tick n <> " cannot be an implicit candidate because it still requires "
+        <> prettyS' sch <> "."
+    EscapedImpHole h ->
+        "Internal error: unresolved implicit hole " <> pack (show h) <> "."
 
 prettyS' :: S' -> Text
-prettyS' (Forall tvs t)
-    | null tvs  = prettyT' t
-    | otherwise = 
-        let l = S.size tvs - 1
-            bs = S.toList tvs
-            ap = dedup $ varOrder t
-            bsOrd = filter (`elem` bs) ap <> filter (`notElem` ap) bs
-            frees = dedup (varOrder (renumberT (M.fromList $ zip bsOrd [0..]) t)) L.\\ [0..l-1]
-            ren = M.fromList (zip bsOrd [0..] <> zip frees [l..])
-        in "Forall " <> T.unwords ["a" <> pack (show i) | i <- [0..l]] <> ". " <> printT' (renumberT ren t)
+prettyS' (Forall vars preds ty) =
+    let ordered = dedup (concatMap (\(Implicit t) -> varOrder t) preds <> varOrder ty)
+        bOrd = filter (`S.member` vars) ordered
+            <> filter (`notElem` ordered) (S.toList vars)
+        ren = M.fromList (zip bOrd [0..])
+        varsText = if null bOrd then ""
+            else "Forall " <> T.unwords ["a" <> pack (show i) | i <- [0 .. length bOrd - 1]] <> ". "
+        predsText = case preds of
+            [] -> ""
+            _  -> "{" <> T.intercalate ", "
+                    [printT' (renumberT ren t) | Implicit t <- preds]
+                <> "} => "
+    in varsText <> predsText <> printT' (renumberT ren ty)
 
 
 fieldNames :: DataDecl -> Text -> Text
@@ -191,6 +209,7 @@ printBatch src bn lprs tps vals perr =
     where
         renderStmt :: Show a => a -> Int -> Statement -> Text
         renderStmt ln i st = T.pack (show ln) <> ": " <> case st of
+            StmtImp (Def n _ _) -> implicitDef n i
             StmtDef (Def n _ _) -> case M.lookup i tps of
                 Just (TyDef _ sch) -> "def " <> n <> " : " <> prettyS' sch <> "\n"
                 Just (TyDefFailed terr) -> "Type Error:\n" <> prettyTypeErrorWith src bn terr <> "\n"
@@ -204,13 +223,22 @@ printBatch src bn lprs tps vals perr =
                 (Just (TyExpr (Right tp)), Just (Left eerr)) -> "Type : " <> prettyT' tp <> "\n" <>
                     "Eval Error:\n" <> prettyEvalErrorWith src bn eerr <> "\n"
                 (Just (TyExpr (Right tp)), Just (Right v)) -> "Type : " <> prettyT' tp <> "\n" <> "Value: " <> prettyV' v <> "\n"
+                (Just (TyExpr (Right _)), Nothing) -> "Not evaluared: this batch has a definition that did not check.\n"
                 _ -> ""
             StmtData d -> "data " <> T.unwords (dName d : dParams d) <> "\n"
                 <> T.concat [ "  " <> c <> fieldNames d c <> " : "
-                              <> (\(Forall _ t) -> prettyT' t) sch <> "\n"
+                              <> (\(Forall _ _ t) -> prettyT' t) sch <> "\n"
                             | (c, sch) <- M.toAscList (ctorSchemes d) ]
             StmtType n ps t -> "type " <> T.unwords (n : ps) <> " = " <> prettyT' t <> "\n"
             StmtInfix n fx -> fixityTxt n fx <> "\n"
+
+        implicitDef :: Text -> Int -> Text
+        implicitDef n i = "implicit def " <> n <> case M.lookup i tps of
+            Just (TyDef _ sch) -> " : " <> prettyS' sch <> "\n"
+            Just (TyDefFailed terr) -> " : Type Error:\n" <> prettyTypeErrorWith src bn terr <> "\n"
+            Just (TyDefSkipped []) -> " : Not checked.\n"
+            Just (TyDefSkipped ds) -> " Not checked: " <> T.intercalate ", " (map tick ds) <> "did not type check.\n"
+            _ -> "\n"
 
 renumberT :: M.Map TypeVar TypeVar -> T' -> T'
 renumberT m = go

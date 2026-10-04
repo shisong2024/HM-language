@@ -26,9 +26,9 @@ import System.Environment (getArgs)
 import System.Exit (exitWith, ExitCode (ExitFailure))
 
 import Data.Text (Text)
-import Data.Either (isLeft)
 import Data.Char (isAlphaNum, isUpper)
 import Data.Maybe (fromMaybe)
+import Data.Either (isLeft)
 
 main :: IO ()
 main = do
@@ -76,7 +76,7 @@ execBatch' :: Bool -> Session -> Text -> [(Int, Statement)] -> [(Int, Text)] -> 
 execBatch' loud ss src lprs perr = do
     let prs = map snd lprs
         denv = unionDEnv (buildDEnv (dataDeclsOf prs)) (sDEnv ss)
-        (tsRes, n) = runState (runExceptT (runReaderT (programChecker (sTEnv ss) prs) denv)) (sNext ss)
+        (tsRes, n) = runState (runExceptT (runReaderT (programChecker (sTEnv ss) (sImp ss) prs) denv)) (sNext ss)
         defBad = \case
             TyDefFailed _ -> True
             TyDefSkipped _ -> True
@@ -86,16 +86,19 @@ execBatch' loud ss src lprs perr = do
             TIO.putStrLn (T.pack (show (errLine terr)) <> ":")
             TIO.putStrLn ("Type Error:\n" <> prettyTypeErrorWith (sBatch ss) src terr)
             return (ss { sNext = n }, False)
-        Right (_, nTEnv, tps) -> do
+        Right checked -> do
+            let tps = cTypes checked
             if any defBad (M.elems tps) then do
                 if loud then printBatch (sBatch ss) src lprs tps M.empty perr
                 else mapM_ (\e -> do
                     TIO.putStrLn (T.pack (show (errLine e)) <> ":")
                     TIO.putStrLn ("Type Error:\n" <> prettyTypeErrorWith (sBatch ss) src e)
                     ) [e | TyDefFailed e <- M.elems tps]
-                return (ss { sNext = n }, False)
+                return (ss { sNext = n}, False)
             else do
-                let (evRes, _) = runState (runReaderT (runExceptT $ evalProgram prs) (sEnv ss)) (Depth 0)
+                let elt = cProgram checked
+                    nTEnv = cTEnv checked
+                    (evRes, _) = runState (runReaderT (runExceptT (evalProgram elt)) (sEnv ss)) (Depth 0)
                 case evRes of
                     Left eerr -> do
                         TIO.putStrLn ("Eval Error:\n" <> prettyEvalErrorWith (sBatch ss) src eerr)
@@ -103,33 +106,44 @@ execBatch' loud ss src lprs perr = do
                     Right (env', vals) -> do
                         when loud $ printBatch (sBatch ss) src lprs tps vals perr
                         let newCs = concatMap (map fst . dCtors) (dataDeclsOf prs)
-                            stale = [c | d <- dataDeclsOf prs
-                                       , Just cs <- [M.lookup (dName d) (denvDatas (sDEnv ss))]
-                                       , c <- cs, c `notElem` newCs
-                                    ]
-                            ok =  not (any isLeft (M.elems vals))
-                               && not (any (\case TyExpr (Left _) -> True; _ -> False) (M.elems tps))
-                        return (ss { sTEnv = foldr M.delete (M.union nTEnv (sTEnv ss)) stale
-                                , sEnv  = foldr M.delete env' stale
-                                , sNext = n, sDEnv = denv
-                                , sFields = M.filter (\fi -> fiCtor fi `notElem` stale) (sFields ss) }, ok)
+                            stale = [c | d <- dataDeclsOf prs, Just cs <- [M.lookup (dName d) (denvDatas (sDEnv ss))]
+                                , c <- cs, c `notElem` newCs]
+                            newImp = [nm | (i, st) <- zip [0..] prs, StmtImp (Def nm _ _) <- [st], Just (TyDef _ _) <- [M.lookup i tps]]
+                            ok   = not (any isLeft (M.elems vals))
+                                && not (any (\case TyExpr (Left _) -> True; _ -> False) (M.elems tps))
+                        return (ss
+                            { sTEnv   = foldr M.delete (M.union nTEnv (sTEnv ss)) stale
+                            , sEnv    = foldr M.delete env' stale
+                            , sNext   = n
+                            , sDEnv   = denv
+                            , sFields = M.filter (\fi -> fiCtor fi `notElem` stale) (sFields ss)
+                            , sImp    = newImp <> filter (`notElem` newImp) (sImp ss)
+                            }, ok)
 
 doTypeOf :: Session -> Text -> IO Session
 doTypeOf s e = case runWith (Tabs (sFixities s) (sFields s)) (T.dropWhileEnd (== ';') (T.strip e)) of
     Left perr -> TIO.putStrLn ("Parse Error:\n" <> perr) >> return s
     Right ex -> case expandProgram (sSyns s) [StmtExpr ex] of
       Left msg -> TIO.putStrLn ("Type Error:\n" <> msg) >> return s
-      Right (_, prs) -> do
-        let (tcRes, n) = runState (runExceptT (runReaderT (programChecker (sTEnv s) prs) (sDEnv s))) (sNext s)
-        case tcRes of
-            Left terr -> TIO.putStrLn $ "Type Error:\n" <> prettyTypeErrorWith (sBatch s) e terr
-            Right (_, _, tps) -> forM_ (M.toAscList tps) $ \(_, info) -> case info of
-                TyExpr (Left terr) -> TIO.putStrLn $ "Type Error:\n" <> prettyTypeErrorWith (sBatch s) e terr
-                TyExpr (Right tp)  -> TIO.putStrLn $ "Type : " <> prettyT' tp
-                TyDef na sch        -> TIO.putStrLn $ "def " <> na <> " : " <> prettyS' sch
-                TyDefFailed terr    -> TIO.putStrLn $ "Type Error:\n" <> prettyTypeErrorWith (sBatch s) e terr
-                TyDefSkipped _      -> TIO.putStrLn "Not checked."
-        return s { sNext = n }
+      Right (_, prs) -> case prs of
+        [StmtExpr e'] ->do
+            let (tcRes, n) = runState (runExceptT (runReaderT (typeOfExpr (sTEnv s) [sImp s] e') (sDEnv s))) (sNext s)
+            case tcRes of
+                Left terr -> TIO.putStrLn $ "Type Error:\n" <> prettyTypeErrorWith (sBatch s) e terr
+                Right sch -> TIO.putStrLn $ "Type : " <> prettyS' sch
+            return s { sNext = n }
+        _ -> do
+            let (tcRes, n) = runState (runExceptT (runReaderT (programChecker (sTEnv s) (sImp s) prs) (sDEnv s))) (sNext s)
+            case tcRes of
+                Left terr -> TIO.putStrLn $ "Type Error:\n" <> prettyTypeErrorWith (sBatch s) e terr
+                Right checked ->   
+                    forM_ (M.toAscList (cTypes checked)) $ \(_, info) -> case info of
+                        TyExpr (Left terr) -> TIO.putStrLn $ "Type Error:\n" <> prettyTypeErrorWith (sBatch s) e terr
+                        TyExpr (Right tp)  -> TIO.putStrLn $ "Type : " <> prettyT' tp
+                        TyDef na sch       -> TIO.putStrLn $ "def " <> na <> " : " <> prettyS' sch
+                        TyDefFailed terr   -> TIO.putStrLn $ "Type Error:\n" <> prettyTypeErrorWith (sBatch s) e terr
+                        TyDefSkipped _     -> TIO.putStrLn "Not checked."
+            return s { sNext = n }
 
 loadFile :: Session -> FilePath -> IO Session
 loadFile s path = fst <$> loadWithImports [] False s Nothing path
@@ -172,7 +186,7 @@ withPrelude s = do
             case runProgWith (Tabs (sFixities s') (sFields s')) (blanckImportLines tx) of
                 Left _ -> return s'
                 Right (tb, lprs) -> 
-                    return $ addPreludePrefix [n | (_, StmtDef (Def n _ _)) <- lprs]
+                    return $ addPreludePrefix [n | d <- defsOf (map snd lprs), Def n _ _ <- [d]]
                              (s' { sFixities = tbFix tb, sFields = tbFld tb })
 
 aliasFields :: Maybe Text -> [(Int, Statement)] -> Session -> Session
@@ -284,6 +298,7 @@ unload a s = s
     , sSyns = strip (sSyns s)
     , sFixities = strip (sFixities s)
     , sFields = M.filter (not . gone) (sFields s)
+    , sImp = filter (not . ((a <> ".") `T.isPrefixOf`)) (sImp s)
     }
     where
         d :: DEnv
