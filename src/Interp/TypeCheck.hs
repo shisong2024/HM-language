@@ -20,6 +20,7 @@ import Data.Functor ((<&>))
 import Data.Text (Text, pack)
 
 import Text.Megaparsec (unPos, SourcePos (sourceLine, sourceColumn))
+import Data.Maybe (isJust)
 
 type Checker m = (MonadState Counter m, MonadReader DEnv m, MonadError (Located TypeError) m)
 
@@ -49,7 +50,14 @@ inferExpr env ienv e = case e of
         Just s  -> do
             (preds, ty) <- instantiate s
             holes <- mapM (const freshHole) preds
-            let ws = [Wanted h (predType p) ienv Nothing (predName p) Nothing | (h, p) <- zip holes preds]
+            let ws = [ Wanted 
+                    { wtdHole = h
+                    , wtdType = predType p
+                    , wtdScope = ienv
+                    , wtdSpan = Nothing
+                    , wtdName = predName p
+                    , wtdBind = Nothing
+                    } | (h, p) <- zip holes preds]
                 e'  = foldl App e (map ImpHole holes)
             return $ InferRes M.empty ws ty e'
 
@@ -757,6 +765,11 @@ fillKnownHoles solved e = let go = fillKnownHoles solved in case e of
 isClosedType :: T' -> Bool
 isClosedType = S.null . ftv
 
+deferWanted :: Wanted -> Bool
+deferWanted w = case wtdName w of
+    Just _ -> True
+    Nothing -> not (isClosedType (wtdType w))
+
 wantedPred :: Wanted -> Pred
 wantedPred w = case wtdName w of
     Nothing -> Implicit $ wtdType w
@@ -825,7 +838,7 @@ closeBinding outer recDicts ty wanted0 body = do
             (ftv ty `S.union` S.unions (map (ftv . wtdType) wanted0))
             `S.difference` ftvTEnv outer
 
-        concrete w = isClosedType (wtdType w)
+        concrete = not . deferWanted
         propagates w = ftv (wtdType w) `S.isSubsetOf` genVars
 
         concreteWs = filter concrete wanted0
@@ -871,7 +884,7 @@ closeBinding outer recDicts ty wanted0 body = do
 hiddenNames :: [Wanted] -> [Text]
 hiddenNames wanted0 = zipWith pri [0 :: Int ..] grouped
     where
-        grouped = groupWanted (filter (not . isClosedType . wtdType) wanted0)
+        grouped = groupWanted (filter deferWanted wanted0)
         pri i (_, ws) = case [n | w <- ws, Just n <- [wtdBind w]] of
             n: _ -> n
             []   -> "$implicit" <> pack (show i)
@@ -930,7 +943,15 @@ inferDeclBody env ienv params body = go env params
                 if not (S.member n (freeVars (irExpr r))) then return r 
                 else do
                     h <- freshHole
-                    return r { irWanted = Wanted h annotation' ienv (bodySpan body) (Just n) (Just n) : irWanted r }
+                    return r { irWanted = Wanted 
+                        { wtdHole = h
+                        , wtdType = annotation' 
+                        , wtdScope = ienv 
+                        , wtdSpan = bodySpan body
+                        , wtdBind = Just n
+                        , wtdName = Just n
+                        } : irWanted r
+                    }
 
 hiddenName :: Show a => a -> [Wanted] -> Text
 hiddenName i ws = case [n | w <- ws, Just n <- [wtdBind w]] of
