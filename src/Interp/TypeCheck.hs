@@ -20,7 +20,6 @@ import Data.Functor ((<&>))
 import Data.Text (Text, pack)
 
 import Text.Megaparsec (unPos, SourcePos (sourceLine, sourceColumn))
-import Data.Maybe (isJust)
 
 type Checker m = (MonadState Counter m, MonadReader DEnv m, MonadError (Located TypeError) m)
 
