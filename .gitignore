@@ -15,4 +15,4 @@ _*.txt
 humming-strolling-nest.md
 
 # under test
-utils/data/set.txt
+utils/data/_*.txt

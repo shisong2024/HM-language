@@ -12,18 +12,6 @@ data Ord a = Ord { cmp :: a -> a -> Ordering };
 -- mod :: Int -> Int -> Int
 def mod q m = q - (q / m) * m;
 
--- min :: Int -> Int -> Int
-def min a b = if a < b then a else b;
-
--- max :: Int -> Int -> Int
-def max a b = if a > b then a else b;
-
--- minimum :: [Int] -> Maybe Int
-def minimum l = let _m = lambda res l -> match l with [] -> res | x: xs -> _m (min x res) xs in match l with [] -> None | x: xs -> Just (_m x xs);
-
--- maximum :: [Int] -> Maybe Int
-def maximum l = let _m = lambda res l -> match l with [] -> res | x: xs -> _m (max x res) xs in match l with [] -> None | x: xs -> Just (_m x xs);
-
 -- even :: Int -> Bool
 def even i = mod i 2 == 0;
 
@@ -213,11 +201,8 @@ def either f g e = match e with Left x -> f x | Right y -> g y;
 
 -- -- functions of Ordering
 
--- cmp :: a -> a -> Ordering
--- leave for future
-
 -- ordInt :: Ord Int
-implicit def ordInt = Ord { cmp = lambda a b -> if a < b then LT else if a > b then GT else EQ };
+implicit def ordInt = Ord { cmp = lambda a b -> if a < b then LT else if a > b then GT else EQ } :: Ord Int;
 
 -- cmpString :: String -> String -> Ordering
 def cmpString a b = match (uncons a, uncons b) with
@@ -231,7 +216,20 @@ def cmpString a b = match (uncons a, uncons b) with
     ;
 
 -- ordStr :: Ord String
-implicit def ordStr = Ord { cmp = cmpString };
+implicit def ordStr = Ord { cmp = cmpString } :: Ord String;
+
+-- min :: Ord a => a -> a -> a
+def min {o :: Ord a} x y = match o.cmp x y with LT -> x | _ -> y;
+
+-- max :: a -> a -> a
+def max {o :: Ord a} x y = match o.cmp x y with GT -> x | _ -> y;
+
+-- minimum :: Ord a => [a] -> Maybe a
+def minimum l = let _m = lambda res l -> match l with [] -> res | x: xs -> _m (min x res) xs in match l with [] -> None | x: xs -> Just (_m x xs);
+
+-- maximum :: Ord a => [a] -> Maybe a
+def maximum l = let _m = lambda res l -> match l with [] -> res | x: xs -> _m (max x res) xs in match l with [] -> None | x: xs -> Just (_m x xs);
+
 
 -- -- functions of String
 

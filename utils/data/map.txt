@@ -21,28 +21,28 @@ def lookup {o :: Ord a} k m = match m with
         | GT -> lookup k r
     ;
 
-def member {o :: Ord a} k m = isJust (lookup o k m);
+def member k m = isJust (lookup k m);
 
 --- 
 
-def _findMin m = match m with
+def findMin m = match m with
       Leaf -> None
     | Node _ k v Leaf _ -> Just (k, v)
-    | Node _ _ _ l _ -> _findMin l
+    | Node _ _ _ l _ -> findMin l
     ;
 
-def _findMax m = match m with
+def findMax m = match m with
       Leaf -> None
     | Node _ k v _ Leaf -> Just (k, v)
-    | Node _ _ _ _ r -> _findMax r
+    | Node _ _ _ _ r -> findMax r
     ;
 
-def insert_ cmp k v m = match m with
+def insert {o :: Ord a} k v m = match m with
       Leaf -> Node 1 k v Leaf Leaf
-    | Node _ k' v' l r -> match cmp k k' with
-          LT -> balance k' v' (insert_ cmp k v l) r
+    | Node _ k' v' l r -> match o.cmp k k' with
+          LT -> balance k' v' (insert k v l) r
         | EQ -> node k v l r
-        | GT -> balance k' v' l (insert_ cmp k v r)
+        | GT -> balance k' v' l (insert k v r)
     ;
 
 def balance k v l r = 
@@ -84,44 +84,44 @@ def deleteMax m = match m with
 def deleteRoot l r = match (l, r) with
       (Leaf, r) -> r
     | (l, Leaf) -> l
-    | (l, r) -> match _findMin r with
+    | (l, r) -> match findMin r with
           None -> l
         | Just (mk, mv) -> balance mk mv l (deleteMin r)
     ;
 
-def delete_ cmp k m = match m with
+def delete {o :: Ord a} k m = match m with
       Leaf -> Leaf
-    | Node _ k' v' l r -> match cmp k k' with
-          LT -> balance k' v' (delete_ cmp k l) r
+    | Node _ k' v' l r -> match o.cmp k k' with
+          LT -> balance k' v' (delete k l) r
         | EQ -> deleteRoot l r
-        | GT -> balance k' v' l (delete_ cmp k r)
+        | GT -> balance k' v' l (delete k r)
     ;
 
-def _foldr f z m = match m with
+def foldr f z m = match m with
       Leaf -> z
-    | Node _ k v l r -> _foldr f (f k v (_foldr f z r)) l
+    | Node _ k v l r -> foldr f (f k v (foldr f z r)) l
     ;
 
-def fromList_ cmp l =
-    let go_ = lambda cmp m l -> match l with
+def fromList l =
+    let go = lambda m l -> match l with
           [] -> m
-        | (k, v): rest -> go_ cmp (insert_ cmp k v m) rest
-    in go_ cmp empty l
+        | (k, v): rest -> go (insert k v m) rest
+    in go empty l
     ;
 
-def _map f m = match m with
+def map f m = match m with
       Leaf -> Leaf
     | Node h k v l r -> Node h k (f v) l r
     ;
 
 -- union/difference/intersection
-def split_ cmp k m = match m with
+def split {o :: Ord a} k m = match m with
       Leaf -> (Leaf, None, Leaf)
-    | Node _ k' v l r -> match cmp k k' with
-          LT -> (match split_ cmp k l with 
+    | Node _ k' v l r -> match o.cmp k k' with
+          LT -> (match split k l with 
             (ll, mv, lr) -> (ll, mv, join k' v lr r))
         | EQ -> (l, Just v, r)
-        | GT -> (match split_ cmp k r with
+        | GT -> (match split k r with
             (rl, mv, rr) -> (join k' v l rl, mv, rr))
     ;
 
@@ -146,35 +146,35 @@ def insertMax k v m = match m with
     | Node _ k' v' l r -> balance k' v' l (insertMax k v r)
     ;
 
-def merge_ cmp m1 m2 = _foldr (lambda k v m -> insert_ cmp k v m) m1 m2;
+def merge m1 m2 = foldr insert m1 m2;
 
-def union_ cmp m1 m2 = match m2 with
+def union m1 m2 = match m2 with
       Leaf -> m1
-    | Node _ k v l r -> match split_ cmp k m1 with
+    | Node _ k v l r -> match split k m1 with
         (l1, mv, r1) -> 
-            let l' = union_ cmp l1 l in
-            let r' = union_ cmp r1 r in
+            let l' = union l1 l in
+            let r' = union r1 r in
             match mv with
                   None -> join k v l' r'
                 | Just v1 -> join k v1 l' r'
     ;
 
-def intersection_ cmp m1 m2 = match m2 with
+def intersection m1 m2 = match m2 with
       Leaf -> Leaf
-    | Node _ k v l r -> match split_ cmp k m1 with
+    | Node _ k v l r -> match split k m1 with
         (l1, mv, r1) ->
-            let l' = intersection_ cmp l1 l in
-            let r' = intersection_ cmp r1 r in
+            let l' = intersection l1 l in
+            let r' = intersection r1 r in
             match mv with
-                  None -> merge_ cmp l' r'
+                  None -> merge l' r'
                 | Just v1 -> join k v1 l' r'
     ;
 
-def difference_ cmp m1 m2 = match m2 with
+def difference m1 m2 = match m2 with
       Leaf -> m1
-    | Node _ k v l r -> match split_ cmp k m1 with
+    | Node _ k v l r -> match split k m1 with
         (l1, _, r1) -> 
-            let l' = difference_ cmp l1 l in
-            let r' = difference_ cmp r1 r in
-            merge_ cmp l' r'
+            let l' = difference l1 l in
+            let r' = difference r1 r in
+            merge l' r'
     ;

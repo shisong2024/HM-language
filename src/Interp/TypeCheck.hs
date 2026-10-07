@@ -34,7 +34,7 @@ typeChecker env e = do
 typeOfExpr :: Checker m => TEnv -> IEnv -> E' -> m S'
 typeOfExpr env ienv e = do
     r <- inferExpr env ienv e
-    fst <$> closeBinding env (irType r) (irWanted r) (irExpr r)
+    fst <$> closeBinding env M.empty (irType r) (irWanted r) (irExpr r)
 
 inferExpr :: Checker m => TEnv -> IEnv -> E' -> m InferRes
 inferExpr env ienv e = case e of
@@ -315,9 +315,11 @@ sccCheckerElab outer ienv declarations = do
                 return (compose u su))
             combined
             (zip inferred provisional)
+        let recDicts = M.fromList
+                [(n, hiddenNames (irWanted (applyInfer finalSub r0))) | (n, r0) <- inferred]
         checked <- forM inferred $ \(n, r0) -> do
             let r = applyInfer finalSub r0
-            (sch, body') <- closeBinding (applyTEnv finalSub envDone) 
+            (sch, body') <- closeBinding (applyTEnv finalSub envDone) recDicts
                 (irType r) (irWanted r) (irExpr r)
             let isImp = M.findWithDefault False n declMap
             return CBinding
@@ -685,7 +687,8 @@ inferLet env ienv isImp n rhs body = do
         env1 = applyTEnv su env
         rhsT = apply su (irType rr)
         rhsW = map (applyWanted su) (irWanted rr)
-    (sch, rhsn) <- closeBinding env1 rhsT rhsW (irExpr rr)
+        recDicts = if recs then M.singleton n (hiddenNames rhsW) else M.empty
+    (sch, rhsn) <- closeBinding env1 recDicts rhsT rhsW (irExpr rr)
     when (isImp && not (null $ sPreds sch)) $
         throwError $ Located Nothing $ ImpCandidateHasContext n sch
     let env2  = M.insert n sch env1
@@ -799,8 +802,8 @@ fillHoles solved = go
             AnnT e t -> AnnT <$> go e <*> pure t
             At sp e -> At sp <$> go e
 
-closeBinding :: Checker m => TEnv -> T' -> [Wanted] -> E' -> m (S', E')
-closeBinding outer ty wanted0 body = do
+closeBinding :: Checker m => TEnv -> M.Map Text [Text] -> T' -> [Wanted] -> E' -> m (S', E')
+closeBinding outer recDicts ty wanted0 body = do
     let genVars =
             (ftv ty `S.union` S.unions (map (ftv . wtdType) wanted0))
             `S.difference` ftvTEnv outer
@@ -835,7 +838,8 @@ closeBinding outer ty wanted0 body = do
         predicates = [pred' | (pred', _, _, _) <- hidden]
         captured = [(n, c) | (Just n, _, c) <- concreteSolutions]
 
-    body' <- case fillHoles solved body of
+    let bodyR = substRecCalls recDicts body
+    body' <- case fillHoles solved bodyR of
         Left h  -> throwError $ case [w | w <- concreteWs, wtdHole w == h] of
             w: _ -> Located (wtdSpan w) (EscapedImpHole h)
             [] -> Located Nothing (EscapedImpHole h)
@@ -846,6 +850,36 @@ closeBinding outer ty wanted0 body = do
         body'' = foldr (Lambda . (\(_, n, _, _) -> n)) (foldr aliasOne bodyB hidden) hidden
         scheme = Forall genVars predicates ty
     return (scheme, body'')
+
+hiddenNames :: [Wanted] -> [Text]
+hiddenNames wanted0 = zipWith pri [0 :: Int ..] grouped
+    where
+        grouped = groupWanted (filter (not . isClosedType . wtdType) wanted0)
+        pri i (_, ws) = case [n | w <- ws, Just n <- [wtdBind w]] of
+            n: _ -> n
+            []   -> "$implicit" <> pack (show i)
+
+substRecCalls :: M.Map Text [Text] -> E' -> E'
+substRecCalls m = let go = substRecCalls in \case
+    Var n | Just ps <- n `M.lookup` m, not (null ps) ->
+        foldl App (Var n) (map Var ps)
+    ILit n -> ILit n
+    BLit b -> BLit b
+    SLit s -> SLit s
+    Var n -> Var n
+    ListLit es -> ListLit (map (go m) es)
+    TupleLit es -> TupleLit (map (go m) es)
+    Let x a b -> Let x (go m a) (go (M.delete x m) b)
+    LetImp x a b -> LetImp x (go m a) (go (M.delete x m) b)
+    If c a b -> If (go m c) (go m a) (go m b)
+    BOpr op a b -> BOpr op (go m a) (go m b)
+    Lambda x b -> Lambda x (go (M.delete x m) b)
+    App f x -> App (go m f) (go m x)
+    Match e arms -> Match (go m e)
+        [(p, go (foldr M.delete m (patVarsList p)) b) | (p, b) <- arms]
+    AnnT e t -> AnnT (go m e) t
+    At sp e -> At sp (go m e)
+    ImpHole h -> ImpHole h
 
 groupWanted :: [Wanted] -> [(Pred, [Wanted])]
 groupWanted = foldl insert []
