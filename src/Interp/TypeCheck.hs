@@ -49,7 +49,7 @@ inferExpr env ienv e = case e of
         Just s  -> do
             (preds, ty) <- instantiate s
             holes <- mapM (const freshHole) preds
-            let ws = [Wanted h t' ienv Nothing Nothing | (h, Implicit t') <- zip holes preds]
+            let ws = [Wanted h (predType p) ienv Nothing (predName p) Nothing | (h, p) <- zip holes preds]
                 e'  = foldl App e (map ImpHole holes)
             return $ InferRes M.empty ws ty e'
 
@@ -319,8 +319,9 @@ sccCheckerElab outer ienv declarations = do
                 [(n, hiddenNames (irWanted (applyInfer finalSub r0))) | (n, r0) <- inferred]
         checked <- forM inferred $ \(n, r0) -> do
             let r = applyInfer finalSub r0
-            (sch, body') <- closeBinding (applyTEnv finalSub envDone) recDicts
-                (irType r) (irWanted r) (irExpr r)
+            (sch, body') <- withNote ("in definition of " <> tick n) $ 
+                closeBinding (applyTEnv finalSub envDone) recDicts
+                    (irType r) (irWanted r) (irExpr r)
             let isImp = M.findWithDefault False n declMap
             return CBinding
                 { cName = n
@@ -348,7 +349,9 @@ apply ts = \case
     TCon n arg -> TCon n (fmap (apply ts) arg)
 
 applyPred :: TSub -> Pred -> Pred
-applyPred ts (Implicit t) = Implicit (apply ts t)
+applyPred ts = \case
+    Implicit t -> Implicit (apply ts t)
+    NameImplicit n t -> NameImplicit n (apply ts t)
 
 applyS' :: TSub -> S' -> S'
 applyS' ts (Forall vs ps t) =
@@ -448,7 +451,7 @@ ftv = \case
     TCon _ args -> S.unions (fmap ftv args)
 
 ftvPred :: Pred -> Set TypeVar
-ftvPred (Implicit t) = ftv t
+ftvPred = ftv . predType
 
 ftvPreds :: [Pred] -> Set TypeVar
 ftvPreds = S.unions . map ftvPred
@@ -754,17 +757,20 @@ fillKnownHoles solved e = let go = fillKnownHoles solved in case e of
 isClosedType :: T' -> Bool
 isClosedType = S.null . ftv
 
-preType :: Pred -> T'
-preType (Implicit t) = t
-
 wantedPred :: Wanted -> Pred
-wantedPred = Implicit . wtdType
+wantedPred w = case wtdName w of
+    Nothing -> Implicit $ wtdType w
+    Just n  -> NameImplicit n (wtdType w)
 
 resolveWanted :: Checker m => TEnv -> Wanted -> m Text
-resolveWanted tenv wtd = go (wtdScope wtd)
+resolveWanted tenv wtd = case wtdName wtd of
+    Nothing -> go (wtdScope wtd)
+    Just n  -> byName n (wtdScope wtd)
     where
+        target :: T'
         target = wtdType wtd
         
+        go :: Checker m => [[Text]] -> m Text
         go = \case
             [] -> throwError $ Located (wtdSpan wtd) (NoImplicit target)
             frame: outer -> do
@@ -775,10 +781,21 @@ resolveWanted tenv wtd = go (wtdScope wtd)
                     names  -> throwError $ Located (wtdSpan wtd)
                         (AmbiguousImp target names)
 
+        candidate :: Text -> Maybe T'
         candidate n = case M.lookup n tenv of
             Just (Forall vars [] ty)
                 | S.null vars && isClosedType ty -> Just ty
             _ -> Nothing
+
+        byName :: Checker m => Text -> [[Text]] -> m Text
+        byName n = \case
+            [] -> go (wtdScope wtd)
+            frame: outer
+                | n `elem` frame -> case candidate n of
+                    Just ty | ty == target -> return n
+                    _ -> throwError $ Located (wtdSpan wtd) (NoImplicit target)
+
+                | otherwise -> byName n outer
 
 fillHoles :: HoleSol -> E' -> Either HoleId E'
 fillHoles solved = go
@@ -913,9 +930,17 @@ inferDeclBody env ienv params body = go env params
                 if not (S.member n (freeVars (irExpr r))) then return r 
                 else do
                     h <- freshHole
-                    return r { irWanted = Wanted h annotation' ienv Nothing (Just n) : irWanted r }
+                    return r { irWanted = Wanted h annotation' ienv (bodySpan body) (Just n) (Just n) : irWanted r }
 
 hiddenName :: Show a => a -> [Wanted] -> Text
 hiddenName i ws = case [n | w <- ws, Just n <- [wtdBind w]] of
     n: _ -> n
     []   -> "$implicit" <> pack (show i)
+
+bodySpan :: E' -> Maybe Span
+bodySpan = \case 
+    At sp _ -> Just sp
+    _ -> Nothing
+
+tick :: Text -> Text
+tick n = "`" <> n <> "`"

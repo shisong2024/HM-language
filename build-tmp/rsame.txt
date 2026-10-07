@@ -1,0 +1,4 @@
+data Ord a = Ord { cmp :: a -> a -> Int };
+implicit def oi = Ord { cmp = lambda a b -> 0 } :: Ord Int;
+def use {o :: Ord Int} x = o.cmp x 0;
+use 1;

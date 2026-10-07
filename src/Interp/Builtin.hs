@@ -13,6 +13,7 @@ builtinEnv = M.fromList
     , ("++", VPrim "++" 2 [])
     , ("uncons", VPrim "uncons" 1 [])
     , ("fromCode", VPrim "fromCode" 1 [])
+    , ("$fieldErr", VPrim "$fieldErr" 2 [])
     ]
 
 builtinTEnv :: TEnv
@@ -22,7 +23,11 @@ builtinTEnv = M.fromList
     , ("++", strAppTy)
     , ("uncons", unconsTy)
     , ("fromCode", fromCodeTy)
+    , ("$fieldErr", fieldErrTy)
     ]
+
+fieldErrTy :: S'
+fieldErrTy = Forall (S.fromList [0, 1]) [] (TFunc TString (TFunc (TVar 0) (TVar 1)))
 
 consTy :: S'
 consTy = Forall (S.singleton 0) [] (TFunc (TVar 0) (TFunc (TList (TVar 0)) (TList (TVar 0))))

@@ -1,0 +1,5 @@
+def <+> a b = a - b;
+def <%> a b = a + b;
+infix 2 <+>;
+infix 6 <%>;
+1 <+> 2 <%> 3;

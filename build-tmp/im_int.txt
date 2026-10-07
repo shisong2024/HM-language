@@ -1,0 +1,1 @@
+implicit def myInt = Ord { cmp = lambda a b -> GT } :: Ord Int;

@@ -1,0 +1,5 @@
+def mkOrd f = Ord { cmp = f };
+implicit def ordI = mkOrd (lambda a b -> GT) :: Ord Int;
+def ev {o :: Ord Int} n = if n == 0 then true else od (n - 1);
+def od {o :: Ord Int} n = if n == 0 then false else ev (n - 1);
+ev 4;

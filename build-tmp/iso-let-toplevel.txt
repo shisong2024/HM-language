@@ -1,0 +1,1 @@
+let y = min in y 3 4;

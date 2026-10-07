@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, DeriveGeneric #-}
+{-# LANGUAGE OverloadedStrings, DeriveGeneric, LambdaCase #-}
 {-# LANGUAGE InstanceSigs #-}
 module Interp.Types where
 
@@ -183,12 +183,22 @@ data Param
     | ImplicitParam Text T' 
     deriving (Show, Eq)
 
-newtype Pred = Implicit T' deriving (Show, Eq, Ord)
+data Pred = Implicit T' | NameImplicit Text T' deriving (Show, Eq, Ord)
 data S' = Forall 
     { sVars  :: Set TypeVar
     , sPreds :: [Pred]
     , sType  :: T'
     } deriving (Show, Eq)
+
+predType :: Pred -> T'
+predType= \case
+    Implicit t       -> t
+    NameImplicit _ t -> t
+
+predName :: Pred -> Maybe Text
+predName = \case
+    Implicit       _ -> Nothing
+    NameImplicit n _ -> Just n
 
 data Decl = Def Text [Param] E' deriving (Show, Eq)
 
@@ -248,6 +258,7 @@ data Wanted = Wanted
     , wtdScope :: IEnv
     , wtdSpan  :: Maybe Span
     , wtdBind  :: Maybe Text
+    , wtdName  :: Maybe Text
     } deriving (Show, Eq)
 
 type IFrame  = [Text]

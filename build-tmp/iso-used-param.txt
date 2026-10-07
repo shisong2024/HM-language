@@ -1,0 +1,2 @@
+def f {o :: Ord a} x y = o.cmp x y;
+f 1 2;

@@ -1,0 +1,2 @@
+def outer x = let g = lambda y -> min x y in g x;
+outer 3;

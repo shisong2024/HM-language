@@ -15,8 +15,9 @@ import Data.Text (cons, Text, pack, unpack)
 import Data.Functor(($>), void)
 
 import Control.Monad (guard, when, foldM)
-import Data.List (sortOn)
+import Data.List (sortOn, nub)
 import Data.Maybe (isJust)
+import Data.Either (lefts, rights)
 
 opInfo :: Opr -> Fixity
 opInfo = \case
@@ -276,7 +277,20 @@ parseLambda tab = withSpan $ do
     return $ foldr Lambda b vars
 
 parseApp :: Tabs -> Parser E'
-parseApp tab = withSpan $ foldl App <$> parseAtom tab <*> many (parseAtom tab)
+parseApp tab = withSpan $ do
+    h <- parseAtom tab
+    args <- many (Right <$> parseImpArgs tab <|> Left <$> parseAtom tab)
+    let app   = foldl App h (lefts args)
+        dicts = concat (rights args)
+        names = map fst dicts
+    when (length names /= length (nub names)) $
+        fail "dupicate named dictionary argument"
+    return $ foldr (\(n, e) b -> LetImp n e b) app dicts
+
+parseImpArgs :: Tabs -> Parser [(Text, E')]
+parseImpArgs tab = do
+    _ <- char '@' <?> "@"
+    fldBraces (char '=' <?> "=") (parseExpr tab)
 
 parseTypeAtom :: [(Text, TypeVar)] -> Parser T'
 parseTypeAtom vars = parseTypeParen vars <|> parseTypeList vars <|> parseTypeName vars

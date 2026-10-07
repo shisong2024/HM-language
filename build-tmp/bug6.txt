@@ -1,0 +1,2 @@
+data Color = Red | Blue;
+def useC {o :: Ord Color} x = o.cmp x x;

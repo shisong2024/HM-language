@@ -1,0 +1,2 @@
+data Shade = Dark | Light;
+implicit def ordShade = 3 :: Ord Shade;

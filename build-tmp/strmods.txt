@@ -1,0 +1,2 @@
+def firstChar s = match uncons s with None -> 0 | Just (c, _) -> c;
+def shout s = match uncons s with None -> "" | Just (c, rest) -> fromCode (c - 32) ++ shout rest;

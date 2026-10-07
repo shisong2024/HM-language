@@ -1,0 +1,2 @@
+def f = let y = min in y;
+f 3 4;

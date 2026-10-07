@@ -1,0 +1,2 @@
+import px43_ord.txt as O;
+min 1 2;

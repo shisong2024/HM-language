@@ -1,0 +1,73 @@
+# build-tmp/probe-imp.ps1 -- implicit-parameter probe (ASCII only)
+# Run: $env:PSExecutionPolicyPreference='Bypass'; & build-tmp\probe-imp.ps1 -Exe build-tmp\v1.exe
+#
+# Cases marked "PIN" assert CURRENT behaviour that is believed WRONG (a defect
+# pin). They must keep matching until the defect is fixed deliberately.
+# Cases with r=$true use REPL mode: `:t` is a REPL-only command.
+[CmdletBinding()]
+param([string]$Exe = 'build-tmp\v1.exe')
+$ErrorActionPreference = 'Continue'
+Set-Location (Split-Path -Parent $PSScriptRoot)
+. build-tmp\run.ps1 -Exe $Exe
+
+# a real Ord Int: cmp 1 0 = GT, so `o.cmp 1 0` is GT and `o.cmp 0 1` is LT
+$ORDI = "implicit def ordInt = Ord { cmp = lambda a b -> if a < b then LT else if a > b then GT else EQ } :: Ord Int;\n"
+
+$cases = @(
+    # --- A. unique concrete candidate, auto-filled -------------------------
+    @{ n='A: candidate auto-filled at call site'; w='accept'; k='Value: GT'; s="${ORDI}def use {o :: Ord Int} x = o.cmp x 0;\nuse 1;\n" }
+    @{ n='A: candidate declared after use';       w='accept'; k='Value: GT'; s="def use {o :: Ord Int} x = o.cmp x 0;\n${ORDI}use 1;\n" }
+    @{ n='A: :t hides the dictionary';            w='accept'; k='(Int -> Ordering)'; s="${ORDI}def use {o :: Ord Int} x = o.cmp x 0;\n:t use\n"; r=$true }
+    @{ n='A: prelude ordStr works for String';    w='accept'; k='Value: GT'; s='def use {o :: Ord String} x = o.cmp x "";\nuse "b";\n' }
+
+    # --- B. missing dictionary -------------------------------------------
+    @{ n='B: missing dictionary reports the type'; w='reject'; k='No implicit value of type Ord Foo is available.'; s="data Foo = Foo;\ndef use {o :: Ord Foo} x = o.cmp x x;\nuse Foo;\n" }
+
+    # --- C. same-frame ambiguity -----------------------------------------
+    @{ n='C: two matching candidates are ambiguous'; w='reject'; k='More than one implicit value matches Ord Int'; s="${ORDI}implicit def ordInt2 = Ord { cmp = lambda a b -> EQ } :: Ord Int;\ndef use {o :: Ord Int} x = o.cmp x 0;\nuse 1;\n" }
+    @{ n='C: ambiguity names both candidates';       w='reject'; k='ordInt2'; s="${ORDI}implicit def ordInt2 = Ord { cmp = lambda a b -> EQ } :: Ord Int;\ndef use {o :: Ord Int} x = o.cmp x 0;\nuse 1;\n" }
+
+    # --- D/E. nearest frame wins; unrelated local does not shadow --------
+    # `let implicit ... in ...` is an expression, so it must be parenthesised here
+    # (and its annotation needs parens around the record literal: `X {...} :: T`
+    #  parses the annotation INSIDE the braces).
+    @{ n='D: inner candidate wins over outer'; w='accept'; k='Value: 0'; s="${ORDI}def probe {o :: Ord Int} x = 0;\n(let implicit inner = (Ord { cmp = lambda a b -> EQ } :: Ord Int) in probe 1);\n" }
+    @{ n='E: unrelated local does not shadow outer'; w='accept'; k='Value: GT'; s="${ORDI}def use {o :: Ord Int} x = o.cmp x 0;\n(let implicit other = (Ord { cmp = lambda a b -> EQ } :: Ord String) in use 1);\n" }
+
+    # --- F/G. propagation, and candidates must NOT specialize ------------
+    @{ n='F: unresolved constraint propagates outward'; w='accept'; k='{Ord a0} => (a0 -> Ordering)'; s="def pass {o :: Ord a} x = o.cmp x x;\n:t pass\n"; r=$true }
+    @{ n='PIN G: candidate does not specialize ordinary type'; w='accept'; k='{Ord a0} => (a0 -> Ordering)'; s="${ORDI}def pass {o :: Ord a} x = o.cmp x x;\n:t pass\n"; r=$true }
+
+    # --- the four confirmed facts about defining candidates --------------
+    @{ n='F-7.1 used parameter survives';            w='accept'; k='{Ord a0} => Ord a0';    s='def a {o :: Ord a} = o;\n:t a\n'; r=$true }
+    # PIN: with `o` UNUSED the parameter evaporates and the constraint disappears
+    # entirely -- `def a2 {o :: Ord a} = Ord {...} :: Ord [a]` becomes `Forall a0. Ord [a0]`.
+    @{ n='PIN F-7.1 unused parameter evaporates';     w='accept'; k='Forall a0. Ord [a0]';   s='def a2 {o :: Ord a} = Ord { cmp = lambda x y -> EQ } :: Ord [a];\n:t a2\n'; r=$true }
+    # ...but with `o` USED it is worse, not better: the annotation var collapses onto
+    # the parameter var and the result demands the very dictionary it should provide.
+    @{ n='PIN F-7.3 wrapper instance self-refers';    w='accept'; k='{Ord [a0]} => Ord [a0]'; s='def a2b {o :: Ord a} = Ord { cmp = lambda x y -> o.cmp x y } :: Ord [a];\n:t a2b\n'; r=$true }
+    # Different annotation (head var appears twice, parameter var unused) yields TWO
+    # independent variables -- this is the shape that CANNOT be tied together.
+    @{ n='F-7.4 implicit poly candidate is refused';  w='reject'; k='cannot be an implicit candidate'; s='implicit def ordl {o :: Ord a} = Ord { cmp = lambda x y -> EQ } :: Ord [a];\n' }
+    @{ n='PIN F-6 misleading candidate message';      w='reject'; k='requires Forall';        s='implicit def ordl {o :: Ord a} = Ord { cmp = lambda x y -> EQ } :: Ord [a];\n' }
+
+    # --- H. bare / partial application -----------------------------------
+    @{ n='H: bare reference keeps the constraint'; w='accept'; k='{Ord a0} => (a0 -> Ordering)'; s="def pass {o :: Ord a} x = o.cmp x x;\ndef bare = pass;\n:t bare\n"; r=$true }
+    @{ n='H: partial application type-checks';     w='accept'; k='Value: GT'; s="${ORDI}def pass {o :: Ord Int} x = o.cmp x 0;\ndef half = pass;\nhalf 1;\n" }
+
+    # --- J. duplicate wanted de-duplication ------------------------------
+    @{ n='J: two uses add one constraint'; w='accept'; k='{Ord a0} => (a0 -> (a0 -> Ordering))'; s="def both {o :: Ord a} x y = if o.cmp x y == LT then o.cmp y x else o.cmp x y;\n:t both\n"; r=$true }
+
+    # --- K. SCC / mutual recursion ---------------------------------------
+    @{ n='K: mutual recursion needing a dictionary'; w='accept'; k='Value: true'; s="${ORDI}def ev {o :: Ord Int} n = if n == 0 then true else od (n - 1);\ndef od {o :: Ord Int} n = if n == 0 then false else ev (n - 1);\nev 4;\n" }
+    @{ n='K: SCC type carries the constraint';       w='accept'; k='{Ord a0}'; s="def ev {o :: Ord a} x = o.cmp x x;\ndef od {o :: Ord a} x = ev x;\n:t od\n"; r=$true }
+
+    # --- M. a broken def must not stop later defs from being checked ------
+    @{ n='M: broken def does not stop later defs'; w='reject'; k='use : (Int -> Ordering)'; s="def bad {o :: Ord Foo} x = o.cmp x x;\n${ORDI}def use {o :: Ord Int} x = o.cmp x 0;\n" }
+)
+
+Write-Host ''
+Write-Host 'IMPLICIT PARAMETER PROBE'
+foreach ($c in $cases) { chk $c.n $c.w $c.k $c.s -Repl:($c.r -eq $true) | Out-Null }
+
+exit ([int](-not (Show-Summary)))

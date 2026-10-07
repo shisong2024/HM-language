@@ -135,7 +135,7 @@ prettyTypeError = \case
 
 prettyS' :: S' -> Text
 prettyS' (Forall vars preds ty) =
-    let ordered = dedup (concatMap (\(Implicit t) -> varOrder t) preds <> varOrder ty)
+    let ordered = dedup (concatMap (varOrder . predType) preds <> varOrder ty)
         bOrd = filter (`S.member` vars) ordered
             <> filter (`notElem` ordered) (S.toList vars)
         ren = M.fromList (zip bOrd [0..])
@@ -144,7 +144,7 @@ prettyS' (Forall vars preds ty) =
         predsText = case preds of
             [] -> ""
             _  -> "{" <> T.intercalate ", "
-                    [printT' (renumberT ren t) | Implicit t <- preds]
+                    [printT' (renumberT ren (predType p)) | p <- preds]
                 <> "} => "
     in varsText <> predsText <> printT' (renumberT ren ty)
 
@@ -310,6 +310,3 @@ hex4 n = T.justifyRight 4 '0' (T.pack (digits n))
         go :: Int -> String
         go 0 = []
         go k = "0123456789ABCDEF" !! (k `mod` 16) : go (k `div` 16)
-
-tick :: Text -> Text
-tick n = "`" <> n <> "`"

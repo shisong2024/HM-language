@@ -1,0 +1,3 @@
+import strmods.txt as M;
+M.firstChar "A";
+M.shout "abc";

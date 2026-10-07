@@ -1,0 +1,1 @@
+def dup {o :: Ord Int} {o :: Ord String} x = o.cmp x x;

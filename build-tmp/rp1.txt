@@ -1,0 +1,2 @@
+data Ord a = Ord { cmp :: a -> a -> Ordering };
+data Ordering = LT | EQ | GT;

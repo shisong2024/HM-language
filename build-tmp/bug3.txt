@@ -1,0 +1,2 @@
+def f {o :: Ord a} x = let d = o in x;
+f 3;

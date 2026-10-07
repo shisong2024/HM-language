@@ -1,0 +1,1 @@
+implicit def ordl {o :: Ord a} = Ord { cmp = lambda x y -> EQ } :: Ord [a];

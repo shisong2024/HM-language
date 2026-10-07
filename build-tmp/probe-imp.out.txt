@@ -1,0 +1,92 @@
+﻿exe: E:\_love\interepter\build-tmp\v1.exe
+
+=== 1. sec.9 acceptance list (A-M) ==============================
+
+=== 2. scope frames, nearest match, let-implicit scoping ========
+
+=== 3. propagation / partial application ========================
+
+=== 4. records / ADTs / synonyms / strings ======================
+
+=== 5. session state: import / rollback (multi-batch via file) ==
+
+=== 6. CONFIRMED BUG repros (these are expected to FAIL today) ==
+  FAIL BUG-1-let-binding-rejects-propagating-wanted -- want[accept] needle[Value: 3]
+      | 1: Type Error:
+      | 1 | def f x = let y = min x in y;
+      |   |                   ^
+      | Cannot determine the type required by implicit parameter Ord a0.
+      |   note: implicit search does not choose ordinary type variables.
+      |   in definition of `f`
+      | 2: Type Error:
+      | `f` has no type because its definition did not check, so this expression was not checked either.
+  FAIL BUG-1b-let-lambda-rejects-propagating-wanted -- want[accept] needle[Value: 3]
+      | 1: Type Error:
+      | 1 | def outer x = let g = lambda y -> min x y in g x;
+      |   |                                   ^
+      | Cannot determine the type required by implicit parameter Ord a0.
+      |   note: implicit search does not choose ordinary type variables.
+      |   in definition of `outer`
+      | 2: Type Error:
+      | `outer` has no type because its definition did not check, so this expression was not checked either.
+  FAIL BUG-2-scc-leaves-unbound-hidden-dict -- want[accept] needle[Value: 3]
+      | 1: def f : Forall a0. (a0 -> a0)
+      | 2: def g : Forall a0. {Ord a0} => (a0 -> a0)
+      | 3: Type : Int
+      | Eval Error:
+      | 1 | def f x = g x;
+      |   |           ^
+      | $implicit0 is an unbound variable.
+  FAIL BUG-2b-scc-unsound-public-type -- want[accept] needle[def f : Forall a0. {Ord a0} => (a0 -> a0)]
+      | 1: def f : Forall a0. (a0 -> a0)
+      | 2: def g : Forall a0. {Ord a0} => (a0 -> a0)
+  FAIL BUG-2c-scc-hidden-dict-captured-by-local -- want[accept] needle[Value: EQ]
+      | 1: def f : Forall a0. (a0 -> Ordering)
+      | 2: def g : Forall a0. {Ord a0} => (a0 -> Ordering)
+      | 3: Type : Ordering
+      | Eval Error:
+      | 2 | def g {o :: Ord a} x = if true then o.cmp x x else f x;
+      |   |                                     ^
+      | Pattern match is not exhaustive: no arm matches 0.
+  FAIL BUG-2c2-scc-captured-dict-unsound-type -- want[accept] needle[def f : Forall a0. {Ord a0} => (a0 -> Ordering)]
+      | 1: def f : Forall a0. (a0 -> Ordering)
+      | 2: def g : Forall a0. {Ord a0} => (a0 -> Ordering)
+  FAIL BUG-3-phantom-predicate-uncallable -- want[accept] needle[Value: 3]
+      | 1: def f : Forall a0 a1. {Ord a0} => (a1 -> a1)
+      | 2: Type Error:
+      | 2 | f 3;
+      |   | ^
+      | No implicit value of type Ord a0 is available.
+  FAIL BUG-4-toplevel-open-wanted-wrong-error -- want[reject] needle[Cannot determine the type required by implicit par
+ameter]
+      | 1: Type Error:
+      | 1 | min;
+      |   | ^
+      | No implicit value of type Ord a0 is available.
+  FAIL BUG-5-polymorphic-candidate-message -- want[reject] needle[candidate is polymorphic]
+      | 1:
+      | Type Error:
+      | `ordl` cannot be an implicit candidate because it still requires Forall a0. Ord [a0].
+  FAIL BUG-6-missing-span-at-def-site -- want[accept] needle[| def useC]
+      | 1: data Color
+      |   Blue : Color
+      |   Red : Color
+      | 2: Type Error:
+      | No implicit value of type Ord Color is available.
+  FAIL BUG-7-duplicate-implicit-param-names -- want[reject] needle[duplicate parameter]
+      | 1: def dup : (String -> Ordering)
+
+=== 7. known-finding re-checks (reproduction status) ============
+
+11 FAILED, 45 passed:
+  - BUG-1-let-binding-rejects-propagating-wanted
+  - BUG-1b-let-lambda-rejects-propagating-wanted
+  - BUG-2-scc-leaves-unbound-hidden-dict
+  - BUG-2b-scc-unsound-public-type
+  - BUG-2c-scc-hidden-dict-captured-by-local
+  - BUG-2c2-scc-captured-dict-unsound-type
+  - BUG-3-phantom-predicate-uncallable
+  - BUG-4-toplevel-open-wanted-wrong-error
+  - BUG-5-polymorphic-candidate-message
+  - BUG-6-missing-span-at-def-site
+  - BUG-7-duplicate-implicit-param-names

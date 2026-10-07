@@ -1,0 +1,4 @@
+def use {o :: Ord Int} x = o.cmp x 0;
+:t use
+:t 1 + 1
+:q

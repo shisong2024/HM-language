@@ -1,0 +1,2 @@
+data T = A | B { x :: Int };
+(B { x = 1 }).x;

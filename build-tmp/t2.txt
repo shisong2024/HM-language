@@ -1,0 +1,2 @@
+def f n = if n == 0 then 1 else f n;
+f 1;

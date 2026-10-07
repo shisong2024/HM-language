@@ -1,0 +1,5 @@
+def <+> a b = a - b;
+def <*> a b = a + b;
+infixr 6 <+>;
+infixl 6 <*>;
+10 <+> 3 <*> 1;

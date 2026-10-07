@@ -1,0 +1,3 @@
+import build-tmp/mod_ord.txt as I;
+def use {o :: Ord Int} x = o.cmp x 0;
+use 1;

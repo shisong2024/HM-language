@@ -1,0 +1,4 @@
+data Foo = Foo;
+derive = 1;
+def use {o :: Ord Foo} x = o.cmp x x;
+use Foo;

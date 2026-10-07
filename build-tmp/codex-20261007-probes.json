@@ -1,0 +1,17 @@
+{
+  "scc": {
+    "exit_code": 1,
+    "source": "def f x = g x;\ndef g x = if true then min x x else f x;\nf 3;\n",
+    "output": "1: def f : Forall a0. (a0 -> a0)\n2: def g : Forall a0. {Ord a0} => (a0 -> a0)\n3: Type : Int\nEval Error:\n1 | def f x = g x;\n  |           ^\n$implicit0 is an unbound variable.\n"
+  },
+  "record": {
+    "exit_code": 0,
+    "source": "data T = A | B { x :: Int };\n(B { x = 1 }).x;\n",
+    "output": "1: data T\n  A : T\n  B {x} : (Int -> T)\n2: Type : Int\nValue: 1\n"
+  },
+  "record-missing": {
+    "exit_code": 1,
+    "source": "data T = A | B { x :: Int };\n(A).x;\n",
+    "output": "1: data T\n  A : T\n  B {x} : (Int -> T)\n2: Type : Int\nEval Error:\n2 | (A).x;\n  | ^\n`x` is not a field of A.\n"
+  }
+}

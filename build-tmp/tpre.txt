@@ -1,0 +1,2 @@
+def a2 {o :: Ord a} = Ord { cmp = lambda x y -> EQ } :: Ord [a];
+:t a2

@@ -14,10 +14,10 @@
 module Main where
 
 import Interp.Types
-import Interp.Parser (run, runProg)
+import Interp.Parser (run, runProg, runProgWith)
 import Interp.TypeCheck (typeChecker, programChecker, buildDEnv)
 import Interp.Eval (evalwDepth, evalProgram, dataDeclsOf)
-import Interp.Builtin (initSession, emptyDEnv)
+import Interp.Builtin (initSession)
 import Interp.Pretty
 
 import Data.Text (Text)
@@ -25,6 +25,7 @@ import Data.Either (isLeft, isRight)
 import qualified Data.Map as M
 import qualified Data.Text as T
 import qualified System.IO as SIO
+import System.IO.Unsafe (unsafePerformIO)
 import Control.Monad.Reader (runReaderT)
 import Control.Monad.Except (runExceptT)
 import Control.Monad.State (runState, evalState)
@@ -86,6 +87,9 @@ data ProgRes = ProgRes
     , prEnv  :: Env
     , prNext :: Counter
     , prDEnv :: DEnv      -- ^ data 声明累积出来的构造子/类型环境，跨批保留
+    , prImp  :: IFrame    -- ^ 隐式参数候选栈（implicit def），跨批保留
+    , prFix  :: FixTab    -- ^ 运算符 fixity 表，跨批保留
+    , prFld  :: FieldTab  -- ^ 记录字段表，跨批保留（丢了它上一批的 data 字段就废了）
     , prTys  :: M.Map Int StmtTy
     , prVals :: M.Map Int (Either (Located EvalError) V')
     }
@@ -104,12 +108,16 @@ instance Show ProgRes where
         <> ", prEnv = <" <> show (M.size (prEnv s)) <> " closures>"
         <> ", prNext = " <> show (prNext s)
         <> ", prDEnv = <" <> show (M.size (denvCtors (prDEnv s))) <> " ctors>"
+        <> ", prImp = <" <> show (length (prImp s)) <> " implicits>"
+        <> ", prFix = <" <> show (M.size (prFix s)) <> " fixities>"
+        <> ", prFld = <" <> show (M.size (prFld s)) <> " fields>"
         <> ", prTys = " <> show (prTys s)
         <> ", prVals = <" <> show (M.size (prVals s)) <> " values> }"
 
 -- | 空会话 = 只有内置函数的起点，和 app/Main.hs 用 initSession 起的会话一致。
 emptyProg :: ProgRes
-emptyProg = ProgRes (sTEnv initSession) (sEnv initSession) (sNext initSession) (sDEnv initSession) M.empty M.empty
+emptyProg = ProgRes (sTEnv initSession) (sEnv initSession) (sNext initSession) (sDEnv initSession)
+                   (sImp initSession) (sFixities initSession) (sFields initSession) M.empty M.empty
 
 -- | 两批 data 声明合并 —— app/Main.hs 里叫 unionDEnv，这边只需要同样的语义：
 --   新声明赢。buildDEnv 也在 Main 里被调过一次，但 programChecker 内部还会
@@ -122,27 +130,36 @@ unionDEnv a b = DEnv (M.union (denvCtors a) (denvCtors b)) (M.union (denvDatas a
 --   语句下标是 0 起的**序号**，不是源码行号 —— 和 programChecker / evalProgram
 --   的索引一致。app/Main.hs 里 printBatch 要打 N: 前缀时得先换算成行号。
 progRun :: ProgRes -> Text -> Either Text ProgRes
-progRun s src = case runProg src of
+progRun s src = case runProgWith (Tabs (prFix s) (prFld s)) src of
     Left perr -> Left ("Parse error: " <> perr)
-    Right lprs ->
+    Right (tb, lprs) ->
         let prs = map snd lprs
             -- 本批的 data 声明 ＋ 之前各批留下的（REPL 逐行提交时靠这个把
             -- data Maybe 传给下一行的构造子模式），和 app/Main.hs 的 execBatch 同构。
             denv = unionDEnv (buildDEnv (dataDeclsOf prs)) (prDEnv s)
-            (tcRes, n') = runState (runExceptT (runReaderT (programChecker (prTEnv s) prs) denv)) (prNext s)
+            (tcRes, n') = runState (runExceptT (runReaderT (programChecker (prTEnv s) (prImp s) prs) denv)) (prNext s)
         in case tcRes of
             -- ⚠️ 注意实参顺序：renderLocated 的实现是 (batchName, src)，
             -- 而 prettyTypeErrorWith 的签名却写成 (src, batchName) —— 两者都是 Text，
             -- 编译器分不出来。这里必须按【实现】的顺序传：batchName 在前。
             -- Spec 里的 span 名是 runProg 用的 ""，所以插入符照常渲染。
             Left terr -> Left ("Type error: " <> prettyTypeErrorWith "" src terr)
-            Right (_, tenv', tys) -> case defFailure src tys of
+            Right checked -> case defFailure src (cTypes checked) of
                 -- 一个 def 没通过（或因为依赖失败而没检查），这一批就不算成功。
                 -- 和 app/Main.hs 的 execBatch 同构：只报错，不求值。
                 Just msg -> Left ("Type error: " <> msg)
                 Nothing ->
-                    let (evRes, _) = runState
-                            (runReaderT (runExceptT (evalProgram prs)) (prEnv s)) (Depth 0)
+                    let tenv' = cTEnv checked
+                        tys   = cTypes checked
+                        -- ⚠️ 求值必须用 **elaborate 过的** cProgram，不是原始 prs：
+                        --    implicit parameters 那轮之后，类型检查器会把字典实参
+                        --    注入到 AST 里（Var 的 scheme 带 Pred 时前面补 ImpHole 并
+                        --    在 closeBinding 里替换成隐藏参数/候选）。拿原始 prs 求值会
+                        --    在需要字典的地方报 unbound variable。
+                        --    和 app/Main.hs 的 execBatch'（用 cProgram checked）一致。
+                        elt = cProgram checked
+                        (evRes, _) = runState
+                            (runReaderT (runExceptT (evalProgram elt)) (prEnv s)) (Depth 0)
                     in case evRes of
                         Left eerr -> Left ("Eval error: " <> prettyEvalErrorWith "" src eerr)
                         Right (env', vals) -> Right ProgRes
@@ -150,6 +167,9 @@ progRun s src = case runProg src of
                             , prEnv  = env'
                             , prNext = n'
                             , prDEnv = denv
+                            , prImp  = cIFrame checked
+                            , prFix  = tbFix tb
+                            , prFld  = tbFld tb
                             , prTys  = tys
                             , prVals = vals
                             }
@@ -211,10 +231,47 @@ okProg src = case progRun emptyProg src of
         expectationFailure ("不该出错：" <> T.unpack e)
         return emptyProg
 
+-- | 把 utils/prelude.txt 跑进一个会话。
+--
+--   2026-09-30 排查轮加：隐式参数那一组需要 prelude 里的 `data Ord` / `Ordering`
+--   与 `implicit def ordInt` 真的在会话里。读失败（比如从别的目录跑测试）
+--   就当作断言失败，不要静默跳过 —— 静默跳过会让整组断言变成空转。
+okPrelude :: IO ProgRes
+okPrelude = case progRun emptyProg preludeText of
+    Right s -> return s
+    Left e  -> do
+        expectationFailure ("prelude 不该出错：" <> T.unpack e)
+        return emptyProg
+
+-- | 在同一进程里把 prelude **读一次**，供纯函数助手同步使用。
+--
+--   unsafePerformIO 在这里是安全的：只读一个不会变的文件，没有时序依赖，
+--   也没有可观察的副作用。用它是因为 `progRun` 系列都是纯函数，而这一组
+--   断言需要 prelude 的类型/候选在会话里。
+preludeText :: Text
+preludeText = T.pack (unsafePerformIO (SIO.readFile "utils/prelude.txt"))
+{-# NOINLINE preludeText #-}
+
+-- | 「带 prelude 的 progRun」：先吃 prelude，再跑这一段。
+progRunP :: ProgRes -> Text -> Either Text ProgRes
+progRunP s src = case progRun s preludeText of
+    Left e   -> Left ("prelude: " <> e)
+    Right s' -> progRun s' src
+
+-- | 「带 prelude 的 okProg」。
+okProgP :: Text -> IO ProgRes
+okProgP src = case progRunP emptyProg src of
+    Right s -> return s
+    Left e  -> do
+        expectationFailure ("不该出错：" <> T.unpack e)
+        return emptyProg
+
 -- | 第 i 条语句的类型文本：def 打泛化后的 scheme，表达式打实例化的 T'。
 stmtType :: Int -> ProgRes -> Text
 stmtType i s = case M.lookup i (prTys s) of
     Just (TyDef _ sch)      -> prettyS' sch
+    Just (TyDefFailed e)    -> "Type error: " <> tcMsg e
+    Just (TyDefSkipped ns)  -> "Skipped: " <> T.intercalate ", " ns
     Just (TyExpr (Right t)) -> prettyT' t
     Just (TyExpr (Left e))  -> "Type error: " <> tcMsg e
     Nothing                 -> "<无类型>"
@@ -1115,3 +1172,198 @@ spec = do
     it "括号包裹不改变语义" $
         property $ forAll (choose (-1000, 1000) :: Gen Integer) $ \a ->
             runSrc (T.pack (show a)) === runSrc ("(" <> T.pack (show a) <> ")")
+
+  -------------------------------------------------------------------------
+  -- 隐式参数（implicit parameters）：2026-09-30 排查轮新增。
+  --
+  -- 这一组补的是「173 例里没有任何一条覆盖新特性」的回归缺口：在这之前，
+  -- 隐式参数只有金标和 test/rev/probe-*.sh 在罩，而那些 .sh 在本机跑不了
+  -- （bash/WSL 被策略挡住）。断言的措辞、预期与实际输出都对着
+  -- build-tmp\probe-imp.ps1（22 条，全绿）核过。
+  --
+  -- ⚠️ 标了「当前行为（缺陷）」的几条 **固化的是坏行为**：它们变红说明缺陷被修好了，
+  --    那是好消息 —— 更新断言并把它从这一组搬走，别当成回归。
+  -------------------------------------------------------------------------
+  describe "隐式参数" $ do
+
+    -- 一份可用的 Ord Int 字典。注意 cmp 1 0 = GT（1 > 0）。
+    let ordInt = "implicit def ordInt = Ord { cmp = lambda a b -> if a < b then LT else if a > b then GT else EQ } :: Ord Int;"
+
+    -- prelude 提供 Ord / Ordering / ordInt / ordStr，所以这一组要用 okProgP
+    it "唯一的具体候选会被自动填入调用点" $ do
+        s <- okProgP (ordInt <> "\ndef use {o :: Ord Int} x = o.cmp x 0;\nuse 1;")
+        stmtVal 2 s `shouldBe` "GT"
+
+    it "候选写在后面也能解析（整批一起检查，与声明顺序无关）" $ do
+        s <- okProgP ("def use {o :: Ord Int} x = o.cmp x 0;\n" <> ordInt <> "\nuse 1;")
+        stmtVal 2 s `shouldBe` "GT"
+
+    it "字典不泄漏到用户可见的类型里" $ do
+        s <- okProgP (ordInt <> "\ndef use {o :: Ord Int} x = o.cmp x 0;")
+        stmtType 1 s `shouldBe` "(Int -> Ordering)"
+
+    it "prelude 的 ordInt 真的能当候选被选中" $ do
+        s0 <- okPrelude
+        case progRun s0 "def use {o :: Ord Int} x = o.cmp x 0;\nuse 1;" of
+            Left e  -> expectationFailure ("不该出错：" <> T.unpack e)
+            Right s -> stmtVal 1 s `shouldBe` "GT"
+
+    it "缺字典时报出需要的类型" $ do
+        case progRunP emptyProg "data Foo = Foo;\ndef use {o :: Ord Foo} x = o.cmp x x;\nuse Foo;" of
+            Left e   -> e `shouldSatisfy` T.isInfixOf "No implicit value of type Ord Foo is available."
+            Right _  -> expectationFailure "缺字典竟然通过了"
+
+    -- 当前行为（缺陷）：缺字典的消息**没有位置**，也没有「in definition of」注记。
+    -- 修好之后把它改成断言带 caret / 带注记。
+    it "当前行为（缺陷）：缺字典的报错没有位置信息" $ do
+        case progRunP emptyProg "data Foo = Foo;\ndef use {o :: Ord Foo} x = o.cmp x x;" of
+            Left e -> do
+                e `shouldSatisfy` T.isInfixOf "No implicit value of type Ord Foo"
+                -- 反证：同一个错误里**不该**出现「in definition of」（对照 UnknownType 那条有）
+                e `shouldSatisfy` (not . T.isInfixOf "in definition of")
+            Right _ -> expectationFailure "坏 def 竟然通过了"
+
+    it "同一层两个匹配候选报歧义，且两个名字都打出来" $ do
+        let src = ordInt <> "\nimplicit def ordInt2 = Ord { cmp = lambda a b -> EQ } :: Ord Int;"
+                  <> "\ndef use {o :: Ord Int} x = o.cmp x 0;\nuse 1;"
+        case progRunP emptyProg src of
+            Left e -> do
+                e `shouldSatisfy` T.isInfixOf "More than one implicit value matches Ord Int"
+                e `shouldSatisfy` T.isInfixOf "ordInt2"
+            Right _ -> expectationFailure "歧义竟然通过了"
+
+    it "用了参数才留下约束：def a {o :: Ord a} = o" $ do
+        s <- okProgP "def a {o :: Ord a} = o;"
+        stmtType 0 s `shouldBe` "Forall a0. {Ord a0} => Ord a0"
+
+    -- 当前行为（缺陷）：参数没被用上就**静默蒸发**，注解带进来的变量成了唯一的量化变量。
+    it "当前行为（缺陷）：没用到隐式参数时它静默蒸发" $ do
+        s <- okProgP "def a2 {o :: Ord a} = Ord { cmp = lambda x y -> EQ } :: Ord [a];"
+        stmtType 0 s `shouldBe` "Forall a0. Ord [a0]"
+
+    -- 当前行为（缺陷）：用上参数反而更糟 —— 注解的变量折到参数变量上，
+    -- 结果要求它自己要提供的那本字典（自引用）。
+    it "当前行为（缺陷）：包装式实例自引用 {Ord [a]} => Ord [a]" $ do
+        s <- okProgP "def a2b {o :: Ord a} = Ord { cmp = lambda x y -> o.cmp x y } :: Ord [a];"
+        stmtType 0 s `shouldBe` "Forall a0. {Ord [a0]} => Ord [a0]"
+
+    it "带上下文的候选在声明处就被拒" $ do
+        -- 自带 data 声明：这样 data Ord 与候选在**同一个批**里，
+        -- 记录字面量的字段表在解析这一批时就已建立。
+        -- 注意这里**不要**先单独 runProg 那个候选：它没有同批的 data Ord，
+        -- 会在解析期就报 "not a record constructor"。这一组测的是类型检查期的拒绝。
+        let pre = "data Ord a = Ord { cmp :: a -> a -> Ordering };\ndata Ordering = LT | EQ | GT;\n"
+            cand = "implicit def ordl {o :: Ord a} = Ord { cmp = lambda x y -> EQ } :: Ord [a];"
+        case progRun emptyProg (pre <> cand) of
+            Left e  -> e `shouldSatisfy` T.isInfixOf "cannot be an implicit candidate"
+            Right _ -> expectationFailure "多态候选竟然被接受了"
+
+    -- 当前行为（缺陷）：上面那条的文案引用的 scheme 里根本没有 `=>`。
+    it "当前行为（缺陷）：候选被拒的文案引用了不存在的上下文" $ do
+        let pre = "data Ord a = Ord { cmp :: a -> a -> Ordering };\ndata Ordering = LT | EQ | GT;\n"
+        case progRun emptyProg (pre <> "implicit def ordl {o :: Ord a} = Ord { cmp = lambda x y -> EQ } :: Ord [a];") of
+            Left e  -> e `shouldSatisfy` T.isInfixOf "requires Forall"
+            Right _ -> expectationFailure "多态候选竟然被接受了"
+
+    it "互递归：两个 def 共享同一份隐式参数约束" $ do
+        s <- okProgP "def ev {o :: Ord a} x = o.cmp x x;\ndef od {o :: Ord a} x = ev x;"
+        stmtType 1 s `shouldSatisfy` T.isInfixOf "{Ord a0}"
+
+    it "一个坏 def 不会阻止同批后面的 def 被检查" $ do
+        case progRunP emptyProg "def bad {o :: Ord Foo} x = o.cmp x x;\n" of
+            Left e  -> e `shouldSatisfy` T.isInfixOf "Unknown type: Foo"
+            Right _ -> expectationFailure "坏 def 竟然通过了"
+
+  -------------------------------------------------------------------------
+  -- 自定义操作符（infix）：2026-09-30 排查轮新增。
+  -- 与 build-tmp\probe-op.ps1 的 A/B 两组同源。
+  -------------------------------------------------------------------------
+  describe "自定义操作符" $ do
+
+    it "def 符号名 + infixr 声明" $ do
+        s <- okProg "def <+> a b = a * 100 + b;\ninfixr 5 <+>;\n1 <+> 2;"
+        stmtVal 2 s `shouldBe` "102"
+
+    it "只 def 不声明：默认 infixl 9" $ do
+        s <- okProg "def <+> a b = a * 100 + b;\n1 <+> 2;"
+        stmtVal 1 s `shouldBe` "102"
+
+    it "括号写法 def (<+>) 等价" $ do
+        s <- okProg "def (<+>) a b = a * 100 + b;\ninfixl 6 <+>;\n3 <+> 4;"
+        stmtVal 2 s `shouldBe` "304"
+
+    it "声明能在 def 前面（顺序无关）" $ do
+        s <- okProg "infixl 6 <+>;\ndef <+> a b = a * 100 + b;\n1 <+> 2;"
+        stmtVal 2 s `shouldBe` "102"
+
+    it "★ 声明真的在动优先级：infixl 9 紧过 +" $ do
+        s <- okProg "def <+> a b = a * 10 + b;\ninfixl 9 <+>;\n1 + 2 <+> 3;"
+        stmtVal 2 s `shouldBe` "24"
+
+    it "★ 声明真的在动优先级：infixl 1 松过 +" $ do
+        s <- okProg "def <+> a b = a * 10 + b;\ninfixl 1 <+>;\n1 + 2 <+> 3;"
+        stmtVal 2 s `shouldBe` "33"
+
+    it "infixr 是右结合" $ do
+        s <- okProg "def <+> a b = a - b;\ninfixr 6 <+>;\n10 <+> 3 <+> 1;"
+        stmtVal 2 s `shouldBe` "8"
+
+    it "infix 链式被拒（不是悄悄左结合）" $ do
+        case progRun emptyProg "def <+> a b = a - b;\ninfix 6 <+>;\n1 <+> 2 <+> 3;" of
+            Left e  -> e `shouldSatisfy` T.isInfixOf "non-associative"
+            Right _ -> expectationFailure "非结合链竟然通过了"
+
+    it "一元负号不吃用户操作符：-1 <+> 2" $ do
+        s <- okProg "def <+> a b = a * 100 + b;\ninfixl 6 <+>;\n-1 <+> 2;"
+        stmtVal 2 s `shouldBe` "-98"
+
+    it "改内建操作符的 fixity 被拒" $ do
+        case runProg "infixl 6 +;" of
+            Left e  -> e `shouldSatisfy` T.isInfixOf "built-in operator"
+            Right _ -> expectationFailure "改内建 fixity 竟然通过了"
+
+    it "字符集：. | : $ # 都不许进操作符名" $ do
+        mapM_ (\c -> case runProg ("infixl 6 " <> c <> ";") of
+                        Left e  -> e `shouldSatisfy` T.isInfixOf "is not an operator name"
+                        Right _ -> expectationFailure ("操作符名竟然接受了 " <> T.unpack c))
+              [".", "|", ":", "$", "#"]
+
+    -- 当前行为（缺陷）：`def (+)` / `def (<)` 被接受，但记号仍走内建 —— 声明成了死代码。
+    -- 而 `def <+>` 这条路是设计支持的。见 build-tmp\排查报告.md 的 F-8。
+    it "当前行为（缺陷）：def (+) 被接受，但 + 记号仍走内建" $ do
+        s <- okProg "def (+) a b = 999;\n1 + 2;"
+        stmtVal 1 s `shouldBe` "3"
+
+    it "当前行为（缺陷）：def (<) 被接受，且记号被它抢走" $ do
+        s <- okProg "def (<) a b = true;\n1 < 2;"
+        stmtVal 1 s `shouldBe` "true"
+
+    -----------------------------------------------------------------------
+    -- fixity 预扫描是按「行首第一个词」做的（2026-09-30 排查轮，BUG 1）
+    --
+    -- scanFixities/symDef/decl/declOf/bare（Parser.hs:517-563）只认
+    -- 「行首是 infixl/infixr/infix」或「行首是 def <符号名>」，
+    -- 而解析出来的 StmtInfix **从来不回填 FixTab**（runProgWith 只把预扫描的
+    -- 表传出去）。于是扫描器没看见的声明是**纯空操作，却照样回显成生效**。
+    -- 下面四条固化当前（错误）行为；修好后会变红 —— 那是好消息。
+    -----------------------------------------------------------------------
+
+    it "对照：声明独占一行时 fixity 生效" $ do
+        s <- okProg "def <+> a b = a * 10 + b;\ninfixl 1 <+>;\n1 + 2 <+> 3;"
+        stmtVal 2 s `shouldBe` "33"
+
+    it "当前行为（缺陷）：同一行写在 def 后面的 infix 声明被静默忽略" $ do
+        -- 语句下标：0 = def <+>、1 = infixl 声明、2 = 表达式（同一行也算多条）
+        s <- okProg "def <+> a b = a * 10 + b; infixl 1 <+>;\n1 + 2 <+> 3;"
+        stmtVal 2 s `shouldBe` "24"   -- 用了默认优先级 9；正确值是 33
+
+    it "当前行为（缺陷）：非法优先级 12 被接受（声明被忽略 ⇒ 没校验）" $ do
+        s <- okProg "def <+> a b = a + b; infixl 12 <+>;\n1 <+> 2;"
+        stmtVal 2 s `shouldBe` "3"    -- 应当拒绝："the precedence must be a single digit 0-9"
+
+    it "当前行为（缺陷）：合法的单行写法被误拒" $ do
+        runProgWith (Tabs M.empty M.empty) "infixl 1 <+>; def <+> a b = a * 10 + b;\n1 + 2 <+> 3;"
+            `shouldSatisfy` (\r -> case r of
+                Left e  -> "expected" `T.isInfixOf` e
+                Right _ -> False)
+

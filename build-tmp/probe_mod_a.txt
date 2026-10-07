@@ -1,0 +1,4 @@
+data Color = Red | Blue;
+def mkOrd f = Ord { cmp = f };
+implicit def ordColor = mkOrd (lambda a b -> EQ) :: Ord Color;
+def pick a b = min a b;

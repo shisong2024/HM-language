@@ -1,0 +1,2 @@
+implicit def myStr = Ord { cmp = lambda a b -> GT } :: Ord String;
+def broken = 1 :: String;
