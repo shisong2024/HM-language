@@ -55,7 +55,8 @@ qualifyProgram a prs = map (stmt (topsOf prs)) prs
             ListLit es -> ListLit (map (expr t bs) es)
             TupleLit es -> TupleLit (map (expr t bs) es)
             Let n u v -> Let n (expr t bs u) (expr t (S.insert n bs) v)
-            LetImp n u v -> LetImp n (expr t bs u) (expr t (S.insert n bs) v)
+            DictCall h as ds -> DictCall (expr t bs h) (map (expr t bs) as)
+                [d { daExpr = expr t bs (daExpr d) } | d <- ds]
             If b u v -> If (expr t bs b) (expr t bs u) (expr t bs v)
             BOpr o u v -> BOpr o (expr t bs u) (expr t bs v)
             Lambda n b -> Lambda n (expr t (S.insert n bs) b)

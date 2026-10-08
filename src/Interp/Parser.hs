@@ -16,7 +16,6 @@ import Data.Functor(($>), void)
 
 import Control.Monad (guard, when, foldM)
 import Data.List (sortOn, nub)
-import Data.Maybe (isJust)
 import Data.Either (lefts, rights)
 
 opInfo :: Opr -> Fixity
@@ -209,11 +208,6 @@ recUpdE tab = do
 parseLet :: Tabs -> Parser E'
 parseLet tab = withSpan $ do
     _ <- symbol "let"
-    isImp <- isJust <$> optional (try (symbol "implicit"))
-    (if isImp then parseImpLet else parseOrdLet) tab
-
-parseOrdLet :: Tabs -> Parser E'
-parseOrdLet tab = do
     sp0 <- getSourcePos
     off0 <- getOffset
     p <- parsePat tab
@@ -235,10 +229,6 @@ parseOrdLet tab = do
         refutableLetMsg =
             "this pattern may fail to match, so it cannot be used as a `let` binding. "
             <> "Bind a variable (or a tuple of variables), or use `match` instead."
-
-parseImpLet :: Tabs -> Parser E'
-parseImpLet tab = LetImp
-    <$> parseVar' <*> (lexeme (char '=' <?> "=") *> parseExpr tab) <*> (symbol "in" *> parseExpr tab)
 
 parseIf :: Tabs -> Parser E'
 parseIf tab = withSpan $ If
@@ -279,18 +269,26 @@ parseLambda tab = withSpan $ do
 parseApp :: Tabs -> Parser E'
 parseApp tab = withSpan $ do
     h <- parseAtom tab
-    args <- many (Right <$> parseImpArgs tab <|> Left <$> parseAtom tab)
-    let app   = foldl App h (lefts args)
+    args <- many (Right <$> parseDictArgs tab <|> Left <$> parseAtom tab)
+    let ordin = lefts args
         dicts = concat (rights args)
-        names = map fst dicts
+        names = map daName dicts
     when (length names /= length (nub names)) $
-        fail "dupicate named dictionary argument"
-    return $ foldr (\(n, e) b -> LetImp n e b) app dicts
+        fail "duplicate named dictionary argument"
+    return $  if null dicts then foldl App h ordin else DictCall h ordin dicts
 
-parseImpArgs :: Tabs -> Parser [(Text, E')]
-parseImpArgs tab = do
-    _ <- char '@' <?> "@"
-    fldBraces (char '=' <?> "=") (parseExpr tab)
+parseDictArgs :: Tabs -> Parser [DictArg]
+parseDictArgs tab = do
+    _ <- lexeme (char '@') *> lexeme (char '{')
+    fields <- sepBy1 field (lexeme (char ','))
+    _ <- lexeme (char '}')
+    return fields
+    where
+        field = do
+            start <- getSourcePos
+            n <- parseVar' <* lexeme (char '=' <?> "=")
+            e <- parseExpr tab
+            DictArg n e . Span start <$> getSourcePos
 
 parseTypeAtom :: [(Text, TypeVar)] -> Parser T'
 parseTypeAtom vars = parseTypeParen vars <|> parseTypeList vars <|> parseTypeName vars
@@ -710,23 +708,24 @@ recStmt tab = \case
         
 desugarE :: FieldTab -> E' -> Either Text E'
 desugarE tab = \case
-    ImpHole i    -> Right (ImpHole i)
-    ILit i       -> Right (ILit i)
-    BLit b       -> Right (BLit b)
-    SLit s       -> Right (SLit s)
-    Var n        -> Right (Var n)
-    ListLit es   -> ListLit <$> mapM (desugarE tab) es
-    TupleLit es  -> TupleLit <$> mapM (desugarE tab) es
-    Let n u v    -> Let n <$> desugarE tab u <*> desugarE tab v
-    LetImp n u v -> LetImp n <$> desugarE tab u <*> desugarE tab v
-    If b u v     -> If <$> desugarE tab b <*> desugarE tab u <*> desugarE tab v
-    BOpr o u v   -> BOpr o <$> desugarE tab u <*> desugarE tab v
-    Lambda n b   -> Lambda n <$> desugarE tab b
-    AnnT e t     -> AnnT <$> desugarE tab e <*> pure t
-    At sp e      -> At sp <$> desugarE tab e
-    Match e as   -> Match <$> desugarE tab e
+    ImpHole i       -> Right (ImpHole i)
+    ILit i          -> Right (ILit i)
+    BLit b          -> Right (BLit b)
+    SLit s          -> Right (SLit s)
+    Var n           -> Right (Var n)
+    ListLit es      -> ListLit <$> mapM (desugarE tab) es
+    TupleLit es     -> TupleLit <$> mapM (desugarE tab) es
+    Let n u v       -> Let n <$> desugarE tab u <*> desugarE tab v
+    DictCall h a ds -> DictCall <$> desugarE tab h <*> mapM (desugarE tab) a
+        <*> mapM (\d -> desugarE tab (daExpr d) >>= \e -> return d { daExpr = e }) ds
+    If b u v        -> If <$> desugarE tab b <*> desugarE tab u <*> desugarE tab v
+    BOpr o u v      -> BOpr o <$> desugarE tab u <*> desugarE tab v
+    Lambda n b      -> Lambda n <$> desugarE tab b
+    AnnT e t        -> AnnT <$> desugarE tab e <*> pure t
+    At sp e         -> At sp <$> desugarE tab e
+    Match e as      -> Match <$> desugarE tab e
         <*> mapM (\(p, b) -> (,) <$> desugarP tab p <*> desugarE tab b) as
-    App f a      -> do
+    App f a         -> do
         f' <- desugarE tab f
         a' <- desugarE tab a
         case spanOf f' of

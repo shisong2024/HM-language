@@ -72,9 +72,7 @@ eval = \case
                 local (const recEnv) (eval e2)
             _ -> eval e1 >>= \v -> local (const (M.insert t v env)) (eval e2)
     
-    LetImp n rhs body -> do
-        value <- eval rhs
-        local (M.insert n value) (eval body)
+    DictCall {} -> throwError $ Located Nothing UnelaboratedDictCall
 
     If eb e1 e2 -> do
         mb <- eval eb
@@ -184,7 +182,7 @@ freeVars = \case
     TupleLit vs -> S.unions (map freeVars vs)
     Lambda x e -> S.delete x (freeVars e)
     Let t e1 e2 -> freeVars e1 `S.union` S.delete t (freeVars e2)
-    LetImp t e1 e2 -> freeVars e1 `S.union` S.delete t (freeVars e2)
+    DictCall h as ds -> S.unions (map freeVars (h: as <> map daExpr ds))
     If b e1 e2 -> S.unions (map freeVars [b, e1, e2])
     BOpr _ e1 e2 -> freeVars e1 `S.union` freeVars e2
     App f a -> freeVars f `S.union` freeVars a

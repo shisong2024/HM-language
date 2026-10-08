@@ -31,12 +31,12 @@ data E'
     | ListLit [E']
     | TupleLit [E']
     | Let Text E' E'
-    | LetImp Text E' E'
     | If E' E' E'
     | BOpr Opr E' E'
     | Lambda Text E'
     | App E' E'
     | Match E' [(P', E')]
+    | DictCall E' [E'] [DictArg]
     | AnnT E' T'
     | At Span E'
     | ImpHole HoleId
@@ -49,6 +49,18 @@ data Assoc  = AssocL | AssocR | AssocN deriving (Show, Eq)
 data Span   = Span SourcePos SourcePos deriving (Show, Eq)
 
 type Lev = Int
+
+data DictArg = DictArg
+    { daName :: Text
+    , daExpr :: E'
+    , daSpan :: Span
+    } deriving (Show, Eq)
+
+data DictSlot = DictSlot
+    { dsName :: Maybe Text
+    , dsType :: T'
+    , dsHole :: HoleId
+    } deriving (Show, Eq)
 
 data Fixity = Fixity { fixLev :: Lev, fixAssoc :: Assoc } deriving (Show, Eq)
 type FixTab = Map Text Fixity
@@ -100,6 +112,7 @@ data EvalError
     | NotACodepoint Integer
     | PrimArgMismatch Text [V']
     | NoSuchField Text V'
+    | UnelaboratedDictCall
     deriving (Show, Eq)
 
 newtype Depth = Depth Int deriving (Show, Eq, Ord, Generic)
@@ -169,6 +182,12 @@ data TypeError
     | AmbiguousImpType T'
     | ImpCandidateHasContext Text S'
     | EscapedImpHole HoleId
+    | UnknownDictArg Text [Text]
+    | DuplicateDictArg Text
+    | AmbiguousDictArg Text
+    | DictArgMismatch Text T' T' TypeError
+    | DictInterfaceUnavailable
+    | DictConstrainDidNotConverge
     deriving (Show, Eq)
 
 type Env  = Map Text V'

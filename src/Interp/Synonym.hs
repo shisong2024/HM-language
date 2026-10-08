@@ -42,23 +42,24 @@ expandDecl tab (Def n ps body) = Def n <$> mapM expandParam ps <*> expandE tab b
 
 expandE :: SynTable -> E' -> Either Text E'
 expandE tab = \case
-    ILit i       -> Right (ILit i)
-    BLit b       -> Right (BLit b)
-    SLit s       -> Right (SLit s)
-    Var n        -> Right (Var n)
-    ListLit es   -> ListLit <$> mapM (expandE tab) es
-    TupleLit es  -> TupleLit <$> mapM (expandE tab) es
-    Let n u v    -> Let n <$> expandE tab u <*> expandE tab v
-    LetImp n u v -> LetImp n <$> expandE tab u <*> expandE tab v
-    If b u v     -> If <$> expandE tab b <*> expandE tab u <*> expandE tab v
-    BOpr o u v   -> BOpr o <$> expandE tab u <*> expandE tab v
-    Lambda n b   -> Lambda n <$> expandE tab b
-    App u v      -> App <$> expandE tab u <*> expandE tab v
-    Match s as   -> Match <$> expandE tab s
+    ILit i           -> Right (ILit i)
+    BLit b           -> Right (BLit b)
+    SLit s           -> Right (SLit s)
+    Var n            -> Right (Var n)
+    ListLit es       -> ListLit <$> mapM (expandE tab) es
+    TupleLit es      -> TupleLit <$> mapM (expandE tab) es
+    Let n u v        -> Let n <$> expandE tab u <*> expandE tab v
+    DictCall h as ds -> DictCall <$> expandE tab h <*> mapM (expandE tab) as
+        <*> mapM (\d -> expandE tab (daExpr d) >>= \e -> return d { daExpr = e }) ds
+    If b u v         -> If <$> expandE tab b <*> expandE tab u <*> expandE tab v
+    BOpr o u v       -> BOpr o <$> expandE tab u <*> expandE tab v
+    Lambda n b       -> Lambda n <$> expandE tab b
+    App u v          -> App <$> expandE tab u <*> expandE tab v
+    Match s as       -> Match <$> expandE tab s
                          <*> mapM (\(p, b) -> (,) p <$> expandE tab b) as
-    AnnT e ty    -> AnnT <$> expandE tab e <*> expandT tab ty
-    At sp e      -> At sp <$> expandE tab e
-    ImpHole h    -> Right $ ImpHole h
+    AnnT e ty        -> AnnT <$> expandE tab e <*> expandT tab ty
+    At sp e          -> At sp <$> expandE tab e
+    ImpHole h        -> Right $ ImpHole h
 
 expandT :: SynTable -> T' -> Either Text T'
 expandT tab = go S.empty

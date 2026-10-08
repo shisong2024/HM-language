@@ -7,12 +7,12 @@ import Interp.Types
 import qualified Data.Map as M
 import qualified Data.Set as S
 
-import Control.Monad (foldM, forM, when, forM_)
+import Control.Monad (foldM, forM, forM_)
 import Control.Monad.Error.Class (MonadError (throwError, catchError))
 import Control.Monad.State (MonadState, get, put)
 import Control.Monad.Reader (MonadReader (ask))
 
-import Data.List (partition)
+import Data.List (nub)
 import Data.Map ((!?))
 import Data.Set (Set)
 import Data.Graph (stronglyConnComp)
@@ -34,7 +34,7 @@ typeChecker env e = do
 typeOfExpr :: Checker m => TEnv -> IEnv -> E' -> m S'
 typeOfExpr env ienv e = do
     r <- inferExpr env ienv e
-    fst <$> closeBinding env M.empty (irType r) (irWanted r) (irExpr r)
+    fst <$> closeBinding env (irType r) (irWanted r) (irExpr r)
 
 inferExpr :: Checker m => TEnv -> IEnv -> E' -> m InferRes
 inferExpr env ienv e = case e of
@@ -110,8 +110,9 @@ inferExpr env ienv e = case e of
                 return $ InferRes su (map (applyWanted su) (irWanted ra <> irWanted rb))
                     out (BOpr op (irExpr ra) (irExpr rb))
 
-    Let n rhs body -> inferLet env ienv False n rhs body
-    LetImp n rhs body -> inferLet env ienv True n rhs body            
+    Let n rhs body -> inferLet env ienv n rhs body
+    
+    DictCall h as ds -> inferDictCall env ienv h as ds         
 
     If c yes no -> do
         rc <- inferExpr env ienv c
@@ -304,39 +305,9 @@ sccCheckerElab outer ienv declarations = do
                     (n0: more) -> (n0, TyDefFailed err): [(n, TyDefSkipped (filter (/= n) more)) | n <- more]
         
     checkOne declMap done ds = do
-        let names = [n | Def n _ _ <- ds]
-            envDone = M.union (M.fromList [(cName b, cScheme b) | b <- done])outer
-        provisional <- mapM (const fresh) ds
-        let recursiveEnv = M.union
-                (M.fromList
-                    [(n, Forall S.empty [] t) | (n, t) <- zip names provisional])
-                envDone
-        inferred <- forM ds $ \(Def n ps body) -> do
-            r <- withNote ("in definition of `" <> n <> "`")
-                (inferDeclBody recursiveEnv ienv ps body)
-            return (n, r)
-        let combined = foldr (compose . irSub . snd) M.empty inferred
-        finalSub <- foldM
-            (\su ((_, r), tv) -> do
-                u <- unify (apply su tv, apply su (irType r))
-                return (compose u su))
-            combined
-            (zip inferred provisional)
-        let recDicts = M.fromList
-                [(n, hiddenNames (irWanted (applyInfer finalSub r0))) | (n, r0) <- inferred]
-        checked <- forM inferred $ \(n, r0) -> do
-            let r = applyInfer finalSub r0
-            (sch, body') <- withNote ("in definition of " <> tick n) $ 
-                closeBinding (applyTEnv finalSub envDone) recDicts
-                    (irType r) (irWanted r) (irExpr r)
-            let isImp = M.findWithDefault False n declMap
-            return CBinding
-                { cName = n
-                , cScheme = sch
-                , cBody = body'
-                , cImp = isImp
-                }
-        return (finalSub, checked)
+        let envDone = M.union (M.fromList [(cName b, cScheme b) | b <- done]) outer
+        (sub, bindings) <- inferBindingGroup envDone ienv ds
+        return (sub, [CBinding n sch b (M.findWithDefault False n declMap) | (n, sch, b) <- bindings])
 
 fresh :: MonadState Counter m => m T'
 fresh = get >>= \n -> put (n + 1) >> return (TVar n)
@@ -686,30 +657,23 @@ swallowedArmsNote =
     <> "`match` has absorbed this `|` arm\n"
     <> "-- put parentheses around it to keep the arms where you meant them."
 
-inferLet :: Checker m => TEnv -> IEnv -> Bool -> Text -> E' -> E' -> m InferRes
-inferLet env ienv isImp n rhs body = do
-    a <- fresh
-    let recs = case stripAt rhs of Lambda _ _ -> True; _ -> False
-        preE = if recs then M.insert n (Forall S.empty [] a) env else env
-    rr <- inferExpr preE ienv rhs
-    u <- unify (apply (irSub rr) a, irType rr)
-    let su   = compose u (irSub rr)
-        env1 = applyTEnv su env
-        rhsT = apply su (irType rr)
-        rhsW = map (applyWanted su) (irWanted rr)
-        recDicts = if recs then M.singleton n (hiddenNames rhsW) else M.empty
-    (sch, rhsn) <- closeBinding env1 recDicts rhsT rhsW (irExpr rr)
-    when (isImp && not (null $ sPreds sch)) $
-        throwError $ Located Nothing $ ImpCandidateHasContext n sch
-    let env2  = M.insert n sch env1
-        ienv2 = if isImp then [n]: ienv else ienv
-    rb <- inferExpr env2 ienv2 body
-    (bdw, bdn) <- if isImp then dischargeLocal env2 ienv rb else return (irWanted rb, irExpr rb)
-    return $ InferRes
+inferLet :: Checker m => TEnv -> IEnv -> Text -> E' -> E' -> m InferRes
+inferLet env ienv n rhs body = do
+    (su, sch, rhsIR) <- case stripAt rhs of
+        Lambda {} -> do
+            (sub, bds) <- inferBindingGroupWithNotes False env ienv [Def n [] rhs]
+            case bds of
+                [(_, ty, e)] -> return (sub, ty, e)
+                _ -> throwError $ Located Nothing DictConstrainDidNotConverge
+        _ -> do
+            rr <- inferExpr env ienv rhs
+            let env1 = applyTEnv (irSub rr) env
+            (ty, e) <- closeBinding env1 (irType rr) (irWanted rr) (irExpr rr)
+            return (irSub rr, ty, e)
+    rb <- inferExpr (M.insert n sch (applyTEnv su env)) ienv body
+    return $ rb
         { irSub    = compose (irSub rb) su
-        , irWanted = bdw
-        , irType   = irType rb
-        , irExpr   = (if isImp then LetImp else Let) n rhsn bdn
+        , irExpr = Let n rhsIR (irExpr rb)
         }
 
 inferArm :: Checker m => TEnv -> IEnv -> T' -> (TSub, [Wanted], Maybe T', [(P', E')]) -> (P', E') -> m (TSub, [Wanted], Maybe T', [(P', E')])
@@ -732,18 +696,172 @@ inferArm env ienv scrutTy (su, ws, oldout, done) (pat, body) = do
             return (compose u su2, apply u (irType rb))
     return (su3, ws <> irWanted rb, Just out, done <> [(pat, irExpr rb)])
 
+inferDictCall :: Checker m => TEnv -> [IFrame] -> E' -> [E'] -> [DictArg] -> m InferRes
+inferDictCall env ienv head0 ordinary dicts = do
+    let (headE, prefix) = callSpine head0
+    name <- maybe (throwError $ Located Nothing DictInterfaceUnavailable) return (dictHeadName headE)
+    let hints = M.lookup ("$dictHint@" <> name) env
+        hEnv  = case (M.lookup name env, hints) of
+            (Just (Forall vs ps t), Just (Forall _ hs _)) -> 
+                let extra = [p | p <- hs, predName p `notElem` map predName ps]
+                in M.insert name (Forall vs (ps <> extra) t) env
+            _ -> env
+    case (M.lookup name hEnv, hints) of
+        (Just (Forall _ [] (TVar _)), Nothing) -> throwError $ Located Nothing DictInterfaceUnavailable
+        _ -> return ()
+    case fstDuplicate (map daName dicts) of
+        Just n  -> throwError $ Located (dictSpan n) (DuplicateDictArg n)
+        Nothing -> return ()
+    rf <- inferExpr hEnv ienv headE
+    let slots = [DictSlot (wtdName w) (wtdType w) (wtdHole w) | w <- irWanted rf]
+        avail = [n | DictSlot (Just n) _ _ <- slots]
+    chosen <- forM dicts $ \d -> case [s | s <- slots, dsName s == Just (daName d)] of
+        [] -> throwError $ Located (Just (daSpan d)) $ UnknownDictArg (daName d) avail
+        [s] -> return (d, s)
+        _ -> throwError $ Located (Just (daSpan d)) $ AmbiguousDictArg (daName d)
+    headT <- freshInternal "call"
+    let headIR = foldl App (Var headT) [ImpHole (dsHole s) | s <- slots]
+    appRes <- foldM inferArg (rf { irExpr = headIR }) (prefix <> ordinary)
+    (su, rhsWs, sols, bds) <- foldM inferDict (irSub appRes, [], M.empty, []) chosen
+    let exHoles = S.fromList (map (dsHole . snd) chosen)
+        remaining = filter (not . (`S.member` exHoles) . wtdHole) (irWanted appRes)
+        body = replaceSolvedHoles sols (irExpr appRes)
+        lowered = Let headT headE (foldr (\(n, e) b -> Let n e b) body bds)
+    return $ InferRes
+        { irSub    = su
+        , irWanted = map (applyWanted su) (remaining <> rhsWs)
+        , irType   = apply su (irType appRes)
+        , irExpr   = lowered
+        }
+    where
+        dictSpan n = case [daSpan d | d <- dicts, daName d == n] of
+            sp: _ -> Just sp
+            _ -> Nothing
 
-dischargeLocal :: Checker m => TEnv -> IEnv -> InferRes -> m ([Wanted], E')
-dischargeLocal tenv outer r = do
-    let ws = map (applyWanted (irSub r)) (irWanted r)
-        (closed, open) = partition (isClosedType . wtdType) ws
-    solved <- forM closed $ \w -> resolveWanted tenv w <&> (wtdHole w,) . Var
-    let body = fillKnownHoles (M.fromList solved) (irExpr r)
-        escp = [w { wtdScope = outer } | w <- open]
-    return (escp, body)
+        inferArg acc arg = do
+            ra <- inferExpr (applyTEnv (irSub acc) env) ienv arg
+            out <- fresh
+            let su0 = compose (irSub ra) (irSub acc)
+            u <- unify (apply su0 (irType acc), TFunc (apply su0 (irType ra)) out)
+                `catchError` calleeNote (applyTEnv su0 env) head0
+            let su = compose u su0
+            return $ InferRes
+                { irSub    = su
+                , irWanted = map (applyWanted su) (irWanted acc <> irWanted ra)
+                , irType   = apply su out
+                , irExpr   = App (irExpr acc) (irExpr ra)
+                }
+        
+        inferDict (su, ws, solved, bs) (d, slot) = do
+            rd <- inferExpr (applyTEnv su env) ienv (daExpr d)
+            let su0 = compose (irSub rd) su
+                actual = apply su0 (irType rd)
+                expected = apply su0 (dsType slot)
+            u <- unify (actual, expected) `catchError` \(Located _ reason) -> 
+                throwError $ Located (Just (daSpan d)) (DictArgMismatch (daName d) actual expected reason)
+            tmp <- freshInternal "dict"
+            return (compose u su0, ws <> irWanted rd, 
+                M.insert (dsHole slot) (Var tmp) solved, bs <> [(tmp, irExpr rd)])
 
-fillKnownHoles :: HoleSol -> E' -> E'
-fillKnownHoles solved e = let go = fillKnownHoles solved in case e of
+inferBindingGroup :: Checker m => TEnv -> [IFrame] -> [Decl] -> m (TSub, [(Text, S', E')])
+inferBindingGroup = inferBindingGroupWithNotes True
+
+inferBindingGroupWithNotes :: Checker m => Bool -> TEnv -> [IFrame] -> [Decl] -> m (TSub, [(Text, S', E')])
+inferBindingGroupWithNotes annoate outer ienv ds = do
+    prepared <- forM ds $ \(Def n ps b) -> prepareParams ps >>= \ps' -> return (Def n ps' b)
+    types <- mapM (const fresh) ds
+    let names = map declName ds
+        seeds = M.fromList 
+            [(n, Forall S.empty [NameImplicit p t | ImplicitParam p t <- ps, S.member p (freeVars b)] ty) 
+            | (Def n ps b, ty) <- zip prepared types]
+    hints <- forM (zip names types) $ \(n, t) -> do
+        let labels = nub [l | Def _ ps b <- prepared, (tar, l) <- dictCallHints (S.fromList (map paramName ps)) b, tar == n]
+        ts <- mapM (const fresh) labels
+        return ("$dictHint@" <> n, Forall S.empty (zipWith NameImplicit labels ts) t)
+    settle 64 M.empty seeds prepared types (M.fromList hints)
+    where
+        note n action = if annoate then withNote ("in definition of " <> tick n) action else action
+
+        settle fuel sub schs ppd types hs
+            | fuel <= (0 :: Int) = throwError $ Located Nothing DictConstrainDidNotConverge
+            | otherwise = do
+                let renv = M.unions [applyTEnv sub schs, applyTEnv sub outer, applyTEnv sub hs]
+                (su, rev) <- foldM (inferOne renv) (sub, []) (zip ppd types)
+                let inferred = reverse rev
+                    next = M.fromList [(n, Forall S.empty
+                        (map fst (groupWanted (filter deferWanted (irWanted (applyInfer su r)))))
+                        (apply su ty)) | ((n, r), ty) <- zip inferred types]
+                if next /= applyTEnv su schs then settle (fuel - 1) su next ppd types hs
+                else do
+                    let strictEnv = M.union (applyTEnv su next) (applyTEnv su outer)
+                    (finalSu, finalRev) <- foldM (inferOne strictEnv) (su, []) (zip ppd types)
+                    checked <- forM (reverse finalRev) $ \(n, r0) -> do
+                        let r = applyInfer finalSu r0
+                        (sch, body) <- note n $ closeBinding (applyTEnv finalSu outer) (irType r) (irWanted r) (irExpr r)
+                        return (n, sch, body)
+                    return (finalSu, checked)
+    
+        inferOne renv (sub, done) (Def n ps b, ty) = do
+            let ps' = map (\case ImplicitParam x t -> ImplicitParam x (apply sub t); p -> p) ps
+            r <- note n $ inferDeclBodyPrepared (applyTEnv sub renv) ienv ps' b
+            let su0 = compose (irSub r) sub
+            u <- unify (apply su0 ty, apply su0 (irType r))
+            return (compose u su0, (n, r): done)
+
+prepareParams :: Checker m => [Param] -> m [Param]
+prepareParams = mapM $ \case
+    ImplicitParam n ann -> do
+        denv <- ask
+        checkTypeCons denv ann
+        let vs = S.toList (ftv ann)
+        fs <- mapM (const fresh) vs
+        return (ImplicitParam n (apply (M.fromList (zip vs fs)) ann))
+    ExplicitParam n -> return $ ExplicitParam n
+
+freshInternal :: MonadState Counter m => Text -> m Text
+freshInternal p = freshHole <&> (("$" <> p <> "@") <>) . pack . show
+
+dictHeadName :: E' -> Maybe Text
+dictHeadName = \case
+    Var n -> Just n
+    At _ e -> dictHeadName e
+    AnnT e _ -> dictHeadName e
+    _ -> Nothing
+
+dictCallHints :: Set Text -> E' -> [(Text, Text)]
+dictCallHints bd = go
+    where
+        go = \case
+            DictCall h as ds -> 
+                let (headE, _) = callSpine h
+                    own = case stripAt headE of
+                        Var n | not (S.member n bd) -> [(n, daName d) | d <- ds]
+                        _ -> []
+                in own <> concatMap go (h: as <> map daExpr ds)
+            Let n rhs body -> 
+                let recBd = case stripAt rhs of
+                        Lambda _ _ -> S.insert n bd
+                        _ -> bd
+                in dictCallHints recBd rhs <> dictCallHints (S.insert n bd) body
+            Lambda n body -> dictCallHints (S.insert n bd) body
+            Match x arms -> go x <> concat 
+                [dictCallHints (S.union bd (S.fromList (patVarsList pat))) body | (pat, body) <- arms]
+            ListLit es -> concatMap go es
+            TupleLit es -> concatMap go es
+            If c a b -> concatMap go [c, a, b]
+            BOpr _ a b -> go a <> go b
+            App f a -> go f <> go a
+            AnnT x _ -> go x
+            At _ x -> go x
+            _ -> []
+
+callSpine :: E' -> (E', [E'])
+callSpine e = case stripAt e of
+    App f a -> let (h, as) = callSpine f in (h, as <> [a])
+    _ -> (e, [])
+
+replaceSolvedHoles :: HoleSol -> E' -> E'
+replaceSolvedHoles solved e = let go = replaceSolvedHoles solved in case e of
     ImpHole h -> M.findWithDefault e h solved
     ILit _ -> e
     BLit _ -> e
@@ -752,7 +870,7 @@ fillKnownHoles solved e = let go = fillKnownHoles solved in case e of
     ListLit es -> ListLit (map go es)
     TupleLit es -> TupleLit (map go es)
     Let n a b -> Let n (go a) (go b)
-    LetImp n a b -> LetImp n (go a) (go b)
+    DictCall h as ds -> DictCall (go h) (map go as) [d { daExpr = go (daExpr d) } | d <- ds]
     If c a b -> If (go c) (go a) (go b)
     BOpr op a b -> BOpr op (go a) (go b)
     Lambda n a -> Lambda n (go a)
@@ -821,7 +939,8 @@ fillHoles solved = go
             ListLit es -> ListLit <$> mapM go es
             TupleLit es -> TupleLit <$> mapM go es
             Let n a b -> Let n <$> go a <*> go b
-            LetImp n a b -> LetImp n <$> go a <*> go b
+            DictCall h as ds -> DictCall <$> go h <*> mapM go as
+                <*> mapM (\d -> go (daExpr d) >>= \e -> return d {daExpr = e}) ds
             If c a b -> If <$> go c <*> go a <*> go b
             BOpr op a b -> BOpr op <$> go a <*> go b
             Lambda n b -> Lambda n <$> go b
@@ -831,8 +950,8 @@ fillHoles solved = go
             AnnT e t -> AnnT <$> go e <*> pure t
             At sp e -> At sp <$> go e
 
-closeBinding :: Checker m => TEnv -> M.Map Text [Text] -> T' -> [Wanted] -> E' -> m (S', E')
-closeBinding outer recDicts ty wanted0 body = do
+closeBinding :: Checker m => TEnv -> T' -> [Wanted] -> E' -> m (S', E')
+closeBinding outer ty wanted0 body = do
     let genVars =
             (ftv ty `S.union` S.unions (map (ftv . wtdType) wanted0))
             `S.difference` ftvTEnv outer
@@ -867,8 +986,7 @@ closeBinding outer recDicts ty wanted0 body = do
         predicates = [pred' | (pred', _, _, _) <- hidden]
         captured = [(n, c) | (Just n, _, c) <- concreteSolutions]
 
-    let bodyR = substRecCalls recDicts body
-    body' <- case fillHoles solved bodyR of
+    body' <- case fillHoles solved body of
         Left h  -> throwError $ case [w | w <- concreteWs, wtdHole w == h] of
             w: _ -> Located (wtdSpan w) (EscapedImpHole h)
             [] -> Located Nothing (EscapedImpHole h)
@@ -880,36 +998,6 @@ closeBinding outer recDicts ty wanted0 body = do
         scheme = Forall genVars predicates ty
     return (scheme, body'')
 
-hiddenNames :: [Wanted] -> [Text]
-hiddenNames wanted0 = zipWith pri [0 :: Int ..] grouped
-    where
-        grouped = groupWanted (filter deferWanted wanted0)
-        pri i (_, ws) = case [n | w <- ws, Just n <- [wtdBind w]] of
-            n: _ -> n
-            []   -> "$implicit" <> pack (show i)
-
-substRecCalls :: M.Map Text [Text] -> E' -> E'
-substRecCalls m = let go = substRecCalls in \case
-    Var n | Just ps <- n `M.lookup` m, not (null ps) ->
-        foldl App (Var n) (map Var ps)
-    ILit n -> ILit n
-    BLit b -> BLit b
-    SLit s -> SLit s
-    Var n -> Var n
-    ListLit es -> ListLit (map (go m) es)
-    TupleLit es -> TupleLit (map (go m) es)
-    Let x a b -> Let x (go m a) (go (M.delete x m) b)
-    LetImp x a b -> LetImp x (go m a) (go (M.delete x m) b)
-    If c a b -> If (go m c) (go m a) (go m b)
-    BOpr op a b -> BOpr op (go m a) (go m b)
-    Lambda x b -> Lambda x (go (M.delete x m) b)
-    App f x -> App (go m f) (go m x)
-    Match e arms -> Match (go m e)
-        [(p, go (foldr M.delete m (patVarsList p)) b) | (p, b) <- arms]
-    AnnT e t -> AnnT (go m e) t
-    At sp e -> At sp (go m e)
-    ImpHole h -> ImpHole h
-
 groupWanted :: [Wanted] -> [(Pred, [Wanted])]
 groupWanted = foldl insert []
     where
@@ -919,8 +1007,8 @@ groupWanted = foldl insert []
                 (before, []) -> before <> [(p, [w])]
                 (before, (q, ws): after) -> before <> ((q, ws <> [w]): after)
 
-inferDeclBody :: Checker m => TEnv -> IEnv -> [Param] -> E' -> m InferRes
-inferDeclBody env ienv params body = go env params
+inferDeclBodyPrepared :: Checker m => TEnv -> IEnv -> [Param] -> E' -> m InferRes
+inferDeclBodyPrepared env ienv params body = go env params
     where
         go current = \case
             [] -> inferExpr current ienv body
@@ -935,27 +1023,19 @@ inferDeclBody env ienv params body = go env params
             (ImplicitParam n annotation : rest) -> do
                 denv <- ask
                 checkTypeCons denv annotation
-                let vars = S.toList (ftv annotation)
-                freshTypes <- mapM (const fresh) vars
-                let annotation' = apply (M.fromList (zip vars freshTypes)) annotation
-                r <- go (M.insert n (Forall S.empty [] annotation') current) rest
+                r <- go (M.insert n (Forall S.empty [] annotation) current) rest
                 if not (S.member n (freeVars (irExpr r))) then return r 
                 else do
                     h <- freshHole
                     return r { irWanted = Wanted 
                         { wtdHole = h
-                        , wtdType = annotation' 
+                        , wtdType = annotation
                         , wtdScope = ienv 
                         , wtdSpan = bodySpan body
                         , wtdBind = Just n
                         , wtdName = Just n
                         } : irWanted r
                     }
-
-hiddenName :: Show a => a -> [Wanted] -> Text
-hiddenName i ws = case [n | w <- ws, Just n <- [wtdBind w]] of
-    n: _ -> n
-    []   -> "$implicit" <> pack (show i)
 
 bodySpan :: E' -> Maybe Span
 bodySpan = \case 

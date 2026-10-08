@@ -27,7 +27,8 @@ debugE' = \case
     TupleLit es -> "(" <> T.intercalate ", " (fmap debugE' es) <> ")"
     BOpr op e1 e2 -> "(" <> T.unwords [debugE' e1, prettyBOpr op, debugE' e2] <> ")"
     Let t e1 e2 -> T.unwords ["(Let", t, "=", debugE' e1, "in", debugE' e2] <> ")"
-    LetImp t e1 e2 -> T.unwords ["(Let implicit", t, "=", debugE' e1, "in", debugE' e2] <> ")"
+    DictCall h as ds -> "(DictCall " <> debugE' h <> " " <> T.unwords (map debugE' as) <>
+        "@{" <> T.intercalate ", " [daName d <> "=" <> debugE' (daExpr d) | d <- ds] <> "})"
     If eb e1 e2 -> T.unwords ["(If", debugE' eb, "then", debugE' e1, "else", debugE' e2] <> ")"
     Lambda t e -> T.concat ["(\\", t, " -> ", debugE' e, ")"]
     App e1 e2 -> "(App " <> T.unwords [debugE' e1, debugE' e2] <> ")"
@@ -70,6 +71,7 @@ prettyEvalError = \case
     PrimArgMismatch p args ->
         "`" <> p <> "` does not accept " <> T.intercalate ", " (fmap prettyV' args) <> "."
     NoSuchField f v -> "`" <> f <> "` is not a field of " <> prettyV' v <> "."
+    UnelaboratedDictCall -> "Internal Error: dictionary call reached the evaluator."
 
 printT' :: T' -> Text
 printT' = go False
@@ -132,6 +134,15 @@ prettyTypeError = \case
         <> prettyS' sch <> "."
     EscapedImpHole h ->
         "Internal error: unresolved implicit hole " <> pack (show h) <> "."
+    UnknownDictArg n avail -> "Unknown dictionary argument " <> tick n <> ". Available arguments: "
+        <> T.intercalate ", " (map tick avail) <> "."
+    DuplicateDictArg n -> "Duplicate dictionary argument " <> tick n <> "."
+    AmbiguousDictArg n -> "Dictionary argument " <> tick n <> " has multiple interface slots."
+    DictArgMismatch n act e res -> 
+        "Dictionary argument " <> tick n <> " has type " <> prettyT' act 
+        <> ", but expected " <> prettyT' e <> ".\n" <> prettyTypeError res
+    DictInterfaceUnavailable -> "This call head has no named dictionary interface; bind a function with a known scheme first."
+    DictConstrainDidNotConverge -> "Recursive dictionary constraints did not converge within 64 rounds."
 
 prettyS' :: S' -> Text
 prettyS' (Forall vars preds ty) =
@@ -144,10 +155,14 @@ prettyS' (Forall vars preds ty) =
         predsText = case preds of
             [] -> ""
             _  -> "{" <> T.intercalate ", "
-                    [printT' (renumberT ren (predType p)) | p <- preds]
+                    [
+                    case p of 
+                        Implicit t -> printT' (renumberT ren t)
+                        NameImplicit n t -> n <> " :: " <> printT' (renumberT ren t)
+                    | p <- preds
+                    ]
                 <> "} => "
     in varsText <> predsText <> printT' (renumberT ren ty)
-
 
 fieldNames :: DataDecl -> Text -> Text
 fieldNames d c = case sortOn (snd . snd)
