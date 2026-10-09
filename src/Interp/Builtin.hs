@@ -5,6 +5,7 @@ import Interp.Types
 
 import qualified Data.Map as M
 import qualified Data.Set as S
+import qualified Data.Sequence as Seq
 
 builtinEnv :: Env 
 builtinEnv = M.fromList
@@ -14,6 +15,8 @@ builtinEnv = M.fromList
     , ("uncons", VPrim "uncons" 1 [])
     , ("fromCode", VPrim "fromCode" 1 [])
     , ("intCompare", VPrim "intCompare" 2 [])
+    , ("putStr", VPrim "putStr" 1 [])
+    , ("putStrLn", VPrim "putStrLn" 1 [])
     , ("$fieldErr", VPrim "$fieldErr" 2 [])
     ]
 
@@ -25,8 +28,13 @@ builtinTEnv = M.fromList
     , ("uncons", unconsTy)
     , ("fromCode", fromCodeTy)
     , ("intCompare", intCompareTy)
+    , ("putStr", outputTy)
+    , ("putStrLn", outputTy)
     , ("$fieldErr", fieldErrTy)
     ]
+
+outputTy :: S'
+outputTy = Forall S.empty [] (TFunc TString (TCon "Unit" []))
 
 fieldErrTy :: S'
 fieldErrTy = Forall (S.fromList [0, 1]) [] (TFunc TString (TFunc (TVar 0) (TVar 1)))
@@ -48,7 +56,8 @@ intCompareTy = Forall S.empty [] (TFunc TInt (TFunc TInt TInt))
 
 initSession :: Session
 initSession = Session 
-    { sEnv      = builtinEnv
+    { sTrace    = Seq.empty
+    , sEnv      = builtinEnv
     , sTEnv     = builtinTEnv
     , sNext     = 0
     , sBatch    = ""

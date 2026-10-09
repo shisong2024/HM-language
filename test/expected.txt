@@ -126,8 +126,8 @@ Value: 3
 56: def plus_k : (Int -> Int)
 57: Type : Int
 Value: 6
-58: def max2 : (Int -> (Int -> Int))
-59: def max3 : (Int -> (Int -> (Int -> Int)))
+58: def max2 : Forall a0. {o :: Ord a0} => (a0 -> (a0 -> a0))
+59: def max3 : Forall a0. {o :: Ord a0} => (a0 -> (a0 -> (a0 -> a0)))
 60: Type : Int
 Value: 4
 61: def count : (Int -> Int)
@@ -136,7 +136,7 @@ Value: 0
 63: def fact : (Int -> Int)
 64: Type : Int
 Value: 2432902008176640000
-65: def fib : (Int -> Int)
+65: def fib : {o :: Ord Int} => (Int -> Int)
 66: Type : Int
 Value: 610
 67: Type : Int

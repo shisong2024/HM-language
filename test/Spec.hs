@@ -14,14 +14,16 @@
 module Main where
 
 import Interp.Types
-import Interp.Parser (run, runProg, runProgWith)
+import Interp.Parser (run, runProg, runProgWith, maskComments)
 import Interp.TypeCheck (typeChecker, programChecker, buildDEnv)
-import Interp.Eval (evalwDepth, evalProgram, dataDeclsOf)
+import Interp.Eval (evalwDepth, evalCheckedProgram, dataDeclsOf)
 import Interp.Builtin (initSession)
 import Interp.Pretty
 
 import Data.Text (Text)
 import Data.Either (isLeft, isRight)
+import Data.Foldable (toList)
+import qualified Data.Sequence as Seq
 import qualified Data.Map as M
 import qualified Data.Text as T
 import qualified System.IO as SIO
@@ -60,13 +62,39 @@ runSrc src = case run src of
 -- 那是测试环境比真实环境（app/Main.hs 也是从 initSession 起）少东西，
 -- 不是被测代码的问题。
 -- 单表达式走不到 data 声明，所以 DEnv 一律取空的那个 —— 和 initSession 的 sDEnv 一致。
+runSrcP :: Text -> Outcome
+runSrcP src = case run src of
+    Left e -> ParseErr e
+    Right _ -> case preludeState >>= (\s -> progRun s (src <> ";")) of
+        Left e -> TypeErr e
+        Right s -> case (M.lookup 0 (prTys s), M.lookup 0 (prVals s)) of
+            (Just (TyExpr (Right ty)), Just (Right value)) -> Ok (prettyT' ty) (prettyV' value)
+            (Just (TyExpr (Left e)), _) -> TypeErr (tcMsg e)
+            (_, Just (Left e)) -> EvalErr (evMsg e)
+            _ -> TypeErr "missing expression result"
+
+preludeState :: Either Text ProgRes
+preludeState = progRun emptyProg preludeText
+{-# NOINLINE preludeState #-}
+
+okStepsP :: [Text] -> IO [ProgRes]
+okStepsP sources = case preludeState >>= (\s -> go s sources) of
+    Right states -> return states
+    Left e -> expectationFailure (T.unpack e) >> return []
+  where
+    go _ [] = Right []
+    go s (x:xs) = do
+        next <- progRun s x
+        rest <- go next xs
+        return (next:rest)
+
 tcRun :: E' -> Either (Located TypeError) T'
 tcRun ast = fmap snd (fst (runState (runExceptT (runReaderT (typeChecker (sTEnv initSession) ast) (sDEnv initSession))) (sNext initSession)))
 
 -- 走 evalwDepth 而不是裸 eval：加深度守卫时 eval 的签名会多出一个
 -- MonadState Depth，裸 eval 那行就编不过了 —— 而 evalwDepth 两种签名下都在。
 evRun :: E' -> Either (Located EvalError) V'
-evRun ast = evalState (runExceptT (runReaderT (evalwDepth ast) (sEnv initSession))) (Depth 0)
+evRun ast = evalState (runExceptT (runReaderT (evalwDepth ast) (sEnv initSession))) emptyRuntime
 
 -- | 丢掉位置，只留消息本身 —— 断言文案时用这个。
 tcMsg :: Located TypeError -> Text
@@ -157,9 +185,8 @@ progRun s src = case runProgWith (Tabs (prFix s) (prFld s)) src of
                         --    在 closeBinding 里替换成隐藏参数/候选）。拿原始 prs 求值会
                         --    在需要字典的地方报 unbound variable。
                         --    和 app/Main.hs 的 execBatch'（用 cProgram checked）一致。
-                        elt = cProgram checked
                         (evRes, _) = runState
-                            (runReaderT (runExceptT (evalProgram elt)) (prEnv s)) (Depth 0)
+                            (runReaderT (runExceptT (evalCheckedProgram checked)) (prEnv s)) emptyRuntime
                     in case evRes of
                         Left eerr -> Left ("Eval error: " <> prettyEvalErrorWith "" src eerr)
                         Right (env', vals) -> Right ProgRes
@@ -167,7 +194,7 @@ progRun s src = case runProgWith (Tabs (prFix s) (prFld s)) src of
                             , prEnv  = env'
                             , prNext = n'
                             , prDEnv = denv
-                            , prImp  = cIFrame checked
+                            , prImp  = cIFrame checked <> filter (`notElem` cIFrame checked) (prImp s)
                             , prFix  = tbFix tb
                             , prFld  = tbFld tb
                             , prTys  = tys
@@ -266,6 +293,13 @@ okProgP src = case progRunP emptyProg src of
         expectationFailure ("不该出错：" <> T.unpack e)
         return emptyProg
 
+dictTypeErrorP :: Int -> Text -> IO (Located TypeError)
+dictTypeErrorP i src = do
+    st <- okProgP src
+    case M.lookup i (prTys st) of
+        Just (TyExpr (Left e)) -> return e
+        _ -> expectationFailure "expected a call type error" >> fail "missing call error"
+
 -- | 第 i 条语句的类型文本：def 打泛化后的 scheme，表达式打实例化的 T'。
 stmtType :: Int -> ProgRes -> Text
 stmtType i s = case M.lookup i (prTys s) of
@@ -335,6 +369,34 @@ rendersCaret needle src = case run src of
 
 ---------------------------------------------------------------------------
 
+loggedEval :: Text -> Either Text (Either Text [(Int, Either Text Text)], Runtime)
+loggedEval source = do
+    session <- preludeState
+    (_, linesAndStatements) <- runProgWith (Tabs (prFix session) (prFld session)) source
+    let program = map snd linesAndStatements
+        denv = unionDEnv (buildDEnv (dataDeclsOf program)) (prDEnv session)
+        (typed, _) = runState (runExceptT (runReaderT
+            (programChecker (prTEnv session) (prImp session) program) denv)) (prNext session)
+    checked <- either (Left . prettyTypeErrorWith "" source) Right typed
+    case defFailure source (cTypes checked) of
+        Just message -> Left message
+        Nothing -> do
+            let (result, runtime) = runState (runReaderT (runExceptT
+                    (evalCheckedProgram checked)) (prEnv session)) emptyRuntime
+                rendered = case result of
+                    Left e -> Left (prettyEvalErrorWith "" source e)
+                    Right (_, values) -> Right
+                        [(i, either (Left . prettyEvalErrorWith "" source) (Right . prettyV') v)
+                        | (i, v) <- M.toAscList values]
+            return (rendered, runtime)
+
+expectOutput :: Text -> [OutputEvent] -> Expectation
+expectOutput source events = case loggedEval source of
+    Left message -> expectationFailure (T.unpack message)
+    Right (_, runtime) -> do
+        toList (rtLog runtime) `shouldBe` events
+        rtDepth runtime `shouldBe` Depth 0
+
 main :: IO ()
 main = do
     -- 让中文断言消息在 Windows 控制台也能正常输出
@@ -403,37 +465,37 @@ spec = do
   -------------------------------------------------------------------------
   describe "比较运算符" $ do
 
-    it "1 < 2"   $ runSrc "1 < 2"   `shouldBe` Ok "Bool" "true"
-    it "1 <= 2"  $ runSrc "1 <= 2"  `shouldBe` Ok "Bool" "true"
-    it "2 < 2"   $ runSrc "2 < 2"   `shouldBe` Ok "Bool" "false"
-    it "2 <= 2"  $ runSrc "2 <= 2"  `shouldBe` Ok "Bool" "true"
-    it "1 > 2"   $ runSrc "1 > 2"   `shouldBe` Ok "Bool" "false"
-    it "2 > 1"   $ runSrc "2 > 1"   `shouldBe` Ok "Bool" "true"
-    it "1 >= 2"  $ runSrc "1 >= 2"  `shouldBe` Ok "Bool" "false"
-    it "2 >= 2"  $ runSrc "2 >= 2"  `shouldBe` Ok "Bool" "true"
-    it "1 == 2"  $ runSrc "1 == 2"  `shouldBe` Ok "Bool" "false"
-    it "1 != 2"  $ runSrc "1 != 2"  `shouldBe` Ok "Bool" "true"
+    it "1 < 2"   $ runSrcP "1 < 2"   `shouldBe` Ok "Bool" "true"
+    it "1 <= 2"  $ runSrcP "1 <= 2"  `shouldBe` Ok "Bool" "true"
+    it "2 < 2"   $ runSrcP "2 < 2"   `shouldBe` Ok "Bool" "false"
+    it "2 <= 2"  $ runSrcP "2 <= 2"  `shouldBe` Ok "Bool" "true"
+    it "1 > 2"   $ runSrcP "1 > 2"   `shouldBe` Ok "Bool" "false"
+    it "2 > 1"   $ runSrcP "2 > 1"   `shouldBe` Ok "Bool" "true"
+    it "1 >= 2"  $ runSrcP "1 >= 2"  `shouldBe` Ok "Bool" "false"
+    it "2 >= 2"  $ runSrcP "2 >= 2"  `shouldBe` Ok "Bool" "true"
+    it "1 == 2"  $ runSrcP "1 == 2"  `shouldBe` Ok "Bool" "false"
+    it "1 != 2"  $ runSrcP "1 != 2"  `shouldBe` Ok "Bool" "true"
     it "比较的结果是 Bool，可以参与运算（经 if）" $
-        runSrc "if 1 < 2 then 10 else 20" `shouldBe` Ok "Int" "10"
+        runSrcP "if 1 < 2 then 10 else 20" `shouldBe` Ok "Int" "10"
 
     -- 比较运算符的优先级低于 +-，所以右边整体是一个算术表达式。
     -- （这两条以前是「已知缺陷」，现已修正。）
     it "比较比 +- 松：1 < 2 + 3 解析成 1 < (2 + 3)" $
-        runSrc "1 < 2 + 3" `shouldBe` Ok "Bool" "true"
+        runSrcP "1 < 2 + 3" `shouldBe` Ok "Bool" "true"
 
     it "比较比 +- 松：0 == 1 - 1 解析成 0 == (1 - 1)" $
-        runSrc "0 == 1 - 1" `shouldBe` Ok "Bool" "true"
+        runSrcP "0 == 1 - 1" `shouldBe` Ok "Bool" "true"
 
     it "但 a + b < c 本来就对，所以旧缺陷很难察觉" $
-        runSrc "1 + 1 == 2" `shouldBe` Ok "Bool" "true"
+        runSrcP "1 + 1 == 2" `shouldBe` Ok "Bool" "true"
 
     -- 2026-09-25：== / != 从「两侧无条件钉死 TInt」改成结构化比较，
     -- 下面两条于是从「已知缺陷」（断言类型错）翻面成正向断言。
     it "== 是多态的：Bool 之间也能比" $
-        runSrc "true == false" `shouldBe` Ok "Bool" "false"
+        runSrcP "true == false" `shouldBe` Ok "Bool" "false"
 
     it "== 是多态的：比较结果也能再比" $
-        runSrc "(1 < 2) == true" `shouldBe` Ok "Bool" "true"
+        runSrcP "(1 < 2) == true" `shouldBe` Ok "Bool" "true"
 
   -------------------------------------------------------------------------
   describe "Bool 与 if" $ do
@@ -845,12 +907,10 @@ spec = do
   -------------------------------------------------------------------------
   describe "程序模式：def / SCC / 会话状态" $ do
 
-    it "runProg 会跳过行首空白和空行（run 不会）" $ do
+    it "两个解析入口均跳过行首空白" $ do
         ss <- okSteps ["\n\n   1 + 2;\n"]
         stmtVal 0 (at 0 ss) `shouldBe` "3"
-        runSrc "   1 + 2" `shouldSatisfy` \o -> case o of
-            ParseErr _ -> True
-            _          -> False
+        runSrc "   1 + 2" `shouldBe` Ok "Int" "3"
 
     it "0 参 def：def x = 1 先定义，下一行的表达式取到它" $ do
         ss <- okSteps ["def x = 1;", "x;"]
@@ -908,7 +968,7 @@ spec = do
         stmtVal 0 (at 2 ss) `shouldBe` "2"
 
     it "回归：用户报的 max2/max3 —— 两个 def 分两行，第三行调用" $ do
-        ss <- okSteps
+        ss <- okStepsP
             [ "def max2 a b = if a < b then b else a;"
             , "def max3 a b c = if max2 a b == a then if max2 a c == a then a else c else if max2 b c == b then b else c;"
             , "max3 1 4 3;" ]
@@ -1093,7 +1153,7 @@ spec = do
         stmtVal 1 s `shouldBe` "3628800"
 
     it "斐波那契" $ do
-        s <- okProg (T.unlines
+        s <- okProgP (T.unlines
             [ "def fib n = if n < 2 then n else fib (n - 1) + fib (n - 2);"
             , "fib 15;" ])
         stmtVal 1 s `shouldBe` "610"
@@ -1166,7 +1226,7 @@ spec = do
     it "小于号与 Prelude 一致" $
         property $ forAll (choose (-1000, 1000) :: Gen Integer) $ \a ->
         forAll (choose (-1000, 1000) :: Gen Integer) $ \b ->
-            runSrc (T.pack (show a) <> " < " <> T.pack (show b))
+            runSrcP (T.pack (show a) <> " < " <> T.pack (show b))
                 === Ok "Bool" (if a < b then "true" else "false")
 
     it "括号包裹不改变语义" $
@@ -1187,7 +1247,7 @@ spec = do
   describe "隐式参数" $ do
 
     -- 一份可用的 Ord Int 字典。注意 cmp 1 0 = GT（1 > 0）。
-    let ordInt = "implicit def ordInt = Ord { cmp = lambda a b -> if a < b then LT else if a > b then GT else EQ } :: Ord Int;"
+    let ordInt = "implicit def ordInt = Ord { cmp = lambda a b -> _ordFromInt (intCompare a b) } :: Ord Int;"
 
     -- prelude 提供 Ord / Ordering / ordInt / ordStr，所以这一组要用 okProgP
     it "唯一的具体候选会被自动填入调用点" $ do
@@ -1198,9 +1258,9 @@ spec = do
         s <- okProgP ("def use {o :: Ord Int} x = o.cmp x 0;\n" <> ordInt <> "\nuse 1;")
         stmtVal 2 s `shouldBe` "GT"
 
-    it "字典不泄漏到用户可见的类型里" $ do
+    it "具体字典以命名约束保留在调用接口" $ do
         s <- okProgP (ordInt <> "\ndef use {o :: Ord Int} x = o.cmp x 0;")
-        stmtType 1 s `shouldBe` "(Int -> Ordering)"
+        stmtType 1 s `shouldBe` "{o :: Ord Int} => (Int -> Ordering)"
 
     it "prelude 的 ordInt 真的能当候选被选中" $ do
         s0 <- okPrelude
@@ -1208,33 +1268,25 @@ spec = do
             Left e  -> expectationFailure ("不该出错：" <> T.unpack e)
             Right s -> stmtVal 1 s `shouldBe` "GT"
 
-    it "缺字典时报出需要的类型" $ do
-        case progRunP emptyProg "data Foo = Foo;\ndef use {o :: Ord Foo} x = o.cmp x x;\nuse Foo;" of
-            Left e   -> e `shouldSatisfy` T.isInfixOf "No implicit value of type Ord Foo is available."
-            Right _  -> expectationFailure "缺字典竟然通过了"
-
-    -- 当前行为（缺陷）：缺字典的消息**没有位置**，也没有「in definition of」注记。
-    -- 修好之后把它改成断言带 caret / 带注记。
-    it "当前行为（缺陷）：缺字典的报错没有位置信息" $ do
-        case progRunP emptyProg "data Foo = Foo;\ndef use {o :: Ord Foo} x = o.cmp x x;" of
-            Left e -> do
-                e `shouldSatisfy` T.isInfixOf "No implicit value of type Ord Foo"
-                -- 反证：同一个错误里**不该**出现「in definition of」（对照 UnknownType 那条有）
-                e `shouldSatisfy` (not . T.isInfixOf "in definition of")
-            Right _ -> expectationFailure "坏 def 竟然通过了"
-
-    it "同一层两个匹配候选报歧义，且两个名字都打出来" $ do
-        let src = ordInt <> "\nimplicit def ordInt2 = Ord { cmp = lambda a b -> EQ } :: Ord Int;"
+    it "缺字典在调用处报出需要的类型" $ do
+        e <- dictTypeErrorP 2 "data Foo = Foo;\ndef use {o :: Ord Foo} x = o.cmp x x;\nuse Foo;"
+        tcMsg e `shouldSatisfy` T.isInfixOf "No implicit value of type Ord Foo is available."
+    it "缺字典调用错误带位置" $ do
+        let src = "data Foo = Foo;\ndef use {o :: Ord Foo} x = o.cmp x x;\nuse Foo;"
+        e <- dictTypeErrorP 2 src
+        let msg = prettyTypeErrorWith "" src e
+        msg `shouldSatisfy` T.isInfixOf "3 | use Foo;"
+        msg `shouldSatisfy` T.isInfixOf "^"
+    it "默认候选歧义在调用处报错" $ do
+        let src = ordInt <> "\nimplicit def ordInt2 = Ord {cmp=lambda a b->EQ} :: Ord Int;"
                   <> "\ndef use {o :: Ord Int} x = o.cmp x 0;\nuse 1;"
-        case progRunP emptyProg src of
-            Left e -> do
-                e `shouldSatisfy` T.isInfixOf "More than one implicit value matches Ord Int"
-                e `shouldSatisfy` T.isInfixOf "ordInt2"
-            Right _ -> expectationFailure "歧义竟然通过了"
+        e <- dictTypeErrorP 3 src
+        tcMsg e `shouldSatisfy` T.isInfixOf "More than one implicit value matches Ord Int"
+        tcMsg e `shouldSatisfy` T.isInfixOf "ordInt2"
 
     it "用了参数才留下约束：def a {o :: Ord a} = o" $ do
         s <- okProgP "def a {o :: Ord a} = o;"
-        stmtType 0 s `shouldBe` "Forall a0. {Ord a0} => Ord a0"
+        stmtType 0 s `shouldBe` "Forall a0. {o :: Ord a0} => Ord a0"
 
     -- 当前行为（缺陷）：参数没被用上就**静默蒸发**，注解带进来的变量成了唯一的量化变量。
     it "当前行为（缺陷）：没用到隐式参数时它静默蒸发" $ do
@@ -1245,7 +1297,7 @@ spec = do
     -- 结果要求它自己要提供的那本字典（自引用）。
     it "当前行为（缺陷）：包装式实例自引用 {Ord [a]} => Ord [a]" $ do
         s <- okProgP "def a2b {o :: Ord a} = Ord { cmp = lambda x y -> o.cmp x y } :: Ord [a];"
-        stmtType 0 s `shouldBe` "Forall a0. {Ord [a0]} => Ord [a0]"
+        stmtType 0 s `shouldBe` "Forall a0. {o :: Ord [a0]} => Ord [a0]"
 
     it "带上下文的候选在声明处就被拒" $ do
         -- 自带 data 声明：这样 data Ord 与候选在**同一个批**里，
@@ -1267,7 +1319,7 @@ spec = do
 
     it "互递归：两个 def 共享同一份隐式参数约束" $ do
         s <- okProgP "def ev {o :: Ord a} x = o.cmp x x;\ndef od {o :: Ord a} x = ev x;"
-        stmtType 1 s `shouldSatisfy` T.isInfixOf "{Ord a0}"
+        stmtType 1 s `shouldSatisfy` T.isInfixOf "{o :: Ord a0}"
 
     it "一个坏 def 不会阻止同批后面的 def 被检查" $ do
         case progRunP emptyProg "def bad {o :: Ord Foo} x = o.cmp x x;\n" of
@@ -1319,7 +1371,7 @@ spec = do
 
     it "改内建操作符的 fixity 被拒" $ do
         case runProg "infixl 6 +;" of
-            Left e  -> e `shouldSatisfy` T.isInfixOf "built-in operator"
+            Left e  -> e `shouldSatisfy` T.isInfixOf "operator"
             Right _ -> expectationFailure "改内建 fixity 竟然通过了"
 
     it "字符集：. | : $ # 都不许进操作符名" $ do
@@ -1334,7 +1386,7 @@ spec = do
         s <- okProg "def (+) a b = 999;\n1 + 2;"
         stmtVal 1 s `shouldBe` "3"
 
-    it "当前行为（缺陷）：def (<) 被接受，且记号被它抢走" $ do
+    it "def (<) 可以替换库比较函数" $ do
         s <- okProg "def (<) a b = true;\n1 < 2;"
         stmtVal 1 s `shouldBe` "true"
 
@@ -1352,18 +1404,341 @@ spec = do
         s <- okProg "def <+> a b = a * 10 + b;\ninfixl 1 <+>;\n1 + 2 <+> 3;"
         stmtVal 2 s `shouldBe` "33"
 
-    it "当前行为（缺陷）：同一行写在 def 后面的 infix 声明被静默忽略" $ do
+    it "同一行写在 def 后面的 infix 声明生效" $ do
         -- 语句下标：0 = def <+>、1 = infixl 声明、2 = 表达式（同一行也算多条）
         s <- okProg "def <+> a b = a * 10 + b; infixl 1 <+>;\n1 + 2 <+> 3;"
-        stmtVal 2 s `shouldBe` "24"   -- 用了默认优先级 9；正确值是 33
+        stmtVal 2 s `shouldBe` "33"
 
-    it "当前行为（缺陷）：非法优先级 12 被接受（声明被忽略 ⇒ 没校验）" $ do
-        s <- okProg "def <+> a b = a + b; infixl 12 <+>;\n1 <+> 2;"
-        stmtVal 2 s `shouldBe` "3"    -- 应当拒绝："the precedence must be a single digit 0-9"
-
-    it "当前行为（缺陷）：合法的单行写法被误拒" $ do
-        runProgWith (Tabs M.empty M.empty) "infixl 1 <+>; def <+> a b = a * 10 + b;\n1 + 2 <+> 3;"
+    it "同一行非法优先级 12 被拒" $ do
+        runProg "def <+> a b = a + b; infixl 12 <+>;\n1 <+> 2;"
             `shouldSatisfy` (\r -> case r of
-                Left e  -> "expected" `T.isInfixOf` e
+                Left e -> "single digit" `T.isInfixOf` e
                 Right _ -> False)
 
+    it "合法单行声明可以解析" $ do
+        runProgWith (Tabs M.empty M.empty) "infixl 1 <+>; def <+> a b = a * 10 + b;\n1 + 2 <+> 3;"
+            `shouldSatisfy` isRight
+
+
+  describe "DictCall 精确字典传参与递归接口" $ do
+    it "default" $ do
+        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nu 1 2;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["(LT, LT)"]
+    it "only-o1" $ do
+        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nu @{o1=rev} 1 2;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["(GT, LT)"]
+    it "only-o2" $ do
+        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nu @{o2=rev} 1 2;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["(LT, GT)"]
+    it "both-reversed" $ do
+        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nu @{o2=ordInt} @{o1=rev} 1 2;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["(GT, LT)"]
+    it "argument-position" $ do
+        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nu 1 @{o1=rev} 2;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["(GT, LT)"]
+    it "lexical-isolation" $ do
+        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nlet o1=1 in u @{o1=rev} o1 2;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["(GT, LT)"]
+    it "ordinary-argument-isolation" $ do
+        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\ndef value {o1::Ord Int} x = if o1.cmp x x == EQ then 1 else 2;\nu @{o1=rev} (value 1) 2;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["(GT, LT)"]
+    it "rhs-isolation" $ do
+        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\ndef make {o1::Ord Int} = Ord {cmp=lambda x y->o1.cmp x y};\nu @{o1=rev,o2=make} 1 2;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["(GT, LT)"]
+    it "wrapper" $ do
+        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\ndef wrap x y=u @{o1=rev} x y;\nwrap 1 2;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["(GT, LT)"]
+    it "alias" $ do
+        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nlet alias=u in alias @{o1=rev} 1 2;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["(GT, LT)"]
+    it "partial" $ do
+        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nlet half=u @{o1=rev} 1 in half 2;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["(GT, LT)"]
+    it "parenthesized-partial" $ do
+        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\n(u 1) @{o1=rev} 2;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["(GT, LT)"]
+    it "no-ordinary-args" $ do
+        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nlet half=u @{o1=rev} in half 1 2;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["(GT, LT)"]
+    it "unknown-label" $ do
+        case progRunP emptyProg "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nu @{wrong=rev} 1 2;" of
+            Left msg -> do
+                msg `shouldSatisfy` T.isInfixOf "Unknown dictionary argument `wrong`"
+                msg `shouldSatisfy` T.isInfixOf "o1"
+                msg `shouldSatisfy` T.isInfixOf "o2"
+                msg `shouldSatisfy` T.isInfixOf "^"
+            Right st -> do
+                let errors = [prettyTypeErrorWith "" "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nu @{wrong=rev} 1 2;" e | TyExpr (Left e) <- M.elems (prTys st)]
+                errors `shouldSatisfy` (not . null)
+                T.unlines errors `shouldSatisfy` T.isInfixOf "Unknown dictionary argument `wrong`"
+                T.unlines errors `shouldSatisfy` T.isInfixOf "o1"
+                T.unlines errors `shouldSatisfy` T.isInfixOf "o2"
+                T.unlines errors `shouldSatisfy` T.isInfixOf "^"
+    it "duplicate-label" $ do
+        case progRunP emptyProg "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nu @{o1=rev} @{o1=ordInt} 1 2;" of
+            Left msg -> do
+                msg `shouldSatisfy` T.isInfixOf "duplicate named dictionary argument"
+            Right st -> do
+                let errors = [prettyTypeErrorWith "" "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nu @{o1=rev} @{o1=ordInt} 1 2;" e | TyExpr (Left e) <- M.elems (prTys st)]
+                errors `shouldSatisfy` (not . null)
+                T.unlines errors `shouldSatisfy` T.isInfixOf "duplicate named dictionary argument"
+    it "wrong-type" $ do
+        case progRunP emptyProg "data Foo = Foo;\nimplicit def ordF1 = Ord {cmp = lambda x y -> EQ} :: Ord Foo;\ndef ordF2 = Ord {cmp = lambda x y -> GT} :: Ord Foo;\ndef use {oi :: Ord a} {of :: Ord Foo} x y = (oi.cmp x y, of.cmp Foo Foo);\nuse @{oi=ordF2} 1 2;" of
+            Left msg -> do
+                msg `shouldSatisfy` T.isInfixOf "Dictionary argument `oi` has type Ord Foo, but expected Ord Int."
+                msg `shouldSatisfy` T.isInfixOf "^"
+            Right st -> do
+                let errors = [prettyTypeErrorWith "" "data Foo = Foo;\nimplicit def ordF1 = Ord {cmp = lambda x y -> EQ} :: Ord Foo;\ndef ordF2 = Ord {cmp = lambda x y -> GT} :: Ord Foo;\ndef use {oi :: Ord a} {of :: Ord Foo} x y = (oi.cmp x y, of.cmp Foo Foo);\nuse @{oi=ordF2} 1 2;" e | TyExpr (Left e) <- M.elems (prTys st)]
+                errors `shouldSatisfy` (not . null)
+                T.unlines errors `shouldSatisfy` T.isInfixOf "Dictionary argument `oi` has type Ord Foo, but expected Ord Int."
+                T.unlines errors `shouldSatisfy` T.isInfixOf "^"
+    it "missing-global" $ do
+        st <- okProgP "data Foo=Foo;\ndef f {o::Ord Foo} x=o.cmp x x;\nf @{o=Ord {cmp=lambda x y->EQ} :: Ord Foo} Foo;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["EQ"]
+    it "legacy-rejected" $ do
+        case progRunP emptyProg "let implicit x=ordInt in min 1 2;" of
+            Left msg -> do
+                msg `shouldSatisfy` T.isInfixOf "reserved symbol:"
+            Right st -> do
+                let errors = [prettyTypeErrorWith "" "let implicit x=ordInt in min 1 2;" e | TyExpr (Left e) <- M.elems (prTys st)]
+                errors `shouldSatisfy` (not . null)
+                T.unlines errors `shouldSatisfy` T.isInfixOf "reserved symbol:"
+    it "scc-single-direction" $ do
+        st <- okProgP "def f x=g x;\ndef g x=if true then min x x else f x;\nf 3;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["3"]
+    it "recursive-default" $ do
+        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\ndef f {o::Ord Int} n=if n==0 then o.cmp 1 2 else f (n-1);\nf 3;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["LT"]
+    it "recursive-explicit" $ do
+        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\ndef f {o::Ord Int} n=if n==0 then o.cmp 1 2 else f @{o=rev} (n-1);\nf 3;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["GT"]
+    it "recursive-inferred" $ do
+        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\ndef f n=if n==0 then min 1 2 else f @{o=rev} (n-1);\nf 3;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["2"]
+    it "recursive-let-explicit" $ do
+        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nlet go=lambda n->if n==0 then min 1 2 else go @{o=rev} (n-1) in go 3;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["2"]
+    it "recursive-unknown" $ do
+        case progRunP emptyProg "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\ndef f n=if n==0 then 0 else f @{wrong=rev} (n-1);\nf 3;" of
+            Left msg -> do
+                msg `shouldSatisfy` T.isInfixOf "Unknown dictionary argument `wrong`"
+            Right st -> do
+                let errors = [prettyTypeErrorWith "" "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\ndef f n=if n==0 then 0 else f @{wrong=rev} (n-1);\nf 3;" e | TyExpr (Left e) <- M.elems (prTys st)]
+                errors `shouldSatisfy` (not . null)
+                T.unlines errors `shouldSatisfy` T.isInfixOf "Unknown dictionary argument `wrong`"
+    it "mutual-explicit" $ do
+        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\ndef f {o::Ord Int} n=if n==0 then o.cmp 1 2 else g @{o=rev} (n-1);\ndef g {o::Ord Int} n=if n==0 then o.cmp 1 2 else f (n-1);\nf 3;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["GT"]
+    it "unshared-types" $ do
+        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\ndef uu {o1::Ord a} {o2::Ord a} x y=(o1.cmp x x,o2.cmp y y);\nuu @{o1=rev} 1 \"1\";\nuu @{o1=rev} 1 1;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["(GT, EQ)", "(GT, EQ)"]
+    it "highorder-rejected" $ do
+        case progRunP emptyProg "def apply f x=f @{o=ordInt} x;" of
+            Left msg -> do
+                msg `shouldSatisfy` T.isInfixOf "no named dictionary interface"
+            Right st -> do
+                let errors = [prettyTypeErrorWith "" "def apply f x=f @{o=ordInt} x;" e | TyExpr (Left e) <- M.elems (prTys st)]
+                errors `shouldSatisfy` (not . null)
+                T.unlines errors `shouldSatisfy` T.isInfixOf "no named dictionary interface"
+    it "foo-four" $ do
+        st <- okProgP "data Foo = Foo;\nimplicit def ordF1 = Ord {cmp = lambda x y -> EQ} :: Ord Foo;\ndef ordF2 = Ord {cmp = lambda x y -> GT} :: Ord Foo;\ndef use {oi :: Ord a} {of :: Ord Foo} x y = (oi.cmp x y, of.cmp Foo Foo);\nuse 1 2;\nuse @{of=ordF2} 1 2;\nuse @{oi=Ord {cmp=lambda x y->EQ}::Ord Int} 1 2;\nuse @{oi=Ord {cmp=lambda x y->EQ}::Ord Int} @{of=ordF2} 1 2;"
+        let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
+        actual `shouldBe` ["(LT, EQ)", "(LT, GT)", "(EQ, EQ)", "(EQ, GT)"]
+
+  describe "R0 收尾与 R2 操作符" $ do
+    it "r0-trailing" $ do
+        st <- okProgP "1 + 2; -- result\n3;"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["3", "3"]
+    it "r0-string" $ do
+        st <- okProgP "\"a -- b\"; -- outside"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["\"a -- b\""]
+    it "r0-apostrophe" $ do
+        st <- okProgP "def x' = 4; -- variable\nx';"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["4"]
+    it "r0-minus" $ do
+        st <- okProgP "1 - -1; -- result"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["2"]
+    it "r0-semicolon-string" $ do
+        st <- okProgP "\"a;--b\"; -- result\n2;"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["\"a;--b\"", "2"]
+    it "r0-offset" $ do
+        case progRunP emptyProg "-- first\n1; -- good\nunknown;" of
+            Left msg -> do
+                msg `shouldSatisfy` T.isInfixOf "3 | unknown;"
+                msg `shouldSatisfy` T.isInfixOf "^"
+            Right st -> do
+                let errs = [prettyTypeErrorWith "" "-- first\n1; -- good\nunknown;" e | TyExpr (Left e) <- M.elems (prTys st)]
+                errs `shouldSatisfy` (not . null)
+                T.unlines errs `shouldSatisfy` T.isInfixOf "3 | unknown;"
+                T.unlines errs `shouldSatisfy` T.isInfixOf "^"
+    it "r0-fix-error" $ do
+        case progRunP emptyProg "infixl 12 <+>;" of
+            Left msg -> do
+                msg `shouldSatisfy` T.isInfixOf "single digit"
+            Right st -> do
+                let errs = [prettyTypeErrorWith "" "infixl 12 <+>;" e | TyExpr (Left e) <- M.elems (prTys st)]
+                errs `shouldSatisfy` (not . null)
+                T.unlines errs `shouldSatisfy` T.isInfixOf "single digit"
+    it "r0-record-error" $ do
+        case progRunP emptyProg "data A = A {v :: Int};\ndata B = B {v :: Int};" of
+            Left msg -> do
+                msg `shouldSatisfy` T.isInfixOf "already a field"
+            Right st -> do
+                let errs = [prettyTypeErrorWith "" "data A = A {v :: Int};\ndata B = B {v :: Int};" e | TyExpr (Left e) <- M.elems (prTys st)]
+                errs `shouldSatisfy` (not . null)
+                T.unlines errs `shouldSatisfy` T.isInfixOf "already a field"
+    it "r0-same-line" $ do
+        st <- okProgP "def (<+>)a b=a*10+b; infixl 1 <+>;\n1+2 <+>3;"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["33"]
+    it "r2-reference" $ do
+        st <- okProgP "(<) 1 2;"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["true"]
+    it "r2-right" $ do
+        st <- okProgP "(< 3) 2; (< 3) 4;"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["true", "false"]
+    it "r2-left" $ do
+        st <- okProgP "(3 <) 4; (3 <) 2;"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["true", "false"]
+    it "r2-map" $ do
+        st <- okProgP "map (< 3) [1,3,5];"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["[true, false, false]"]
+    it "r2-strings" $ do
+        st <- okProgP "\"a\" < \"b\"; (> \"a\") \"b\";"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["true", "true"]
+    it "r2-ordering" $ do
+        st <- okProgP "LT < EQ; EQ <= EQ; GT > EQ; GT >= GT;"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["true", "true", "true", "true"]
+    it "r2-arithmetic-ref" $ do
+        st <- okProgP "(+) 2 3; (* 2) 4; (8 /) 2; (== 3) 3;"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["5", "8", "4", "true"]
+    it "r2-minus-power" $ do
+        st <- okProgP "-2 ^ 2; (-2); (10 -) 3; flip (-) 2 7;"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["-4", "-2", "7", "5"]
+    it "r2-precedence" $ do
+        st <- okProgP "1+2 < 4; 1<2+3;"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["true", "true"]
+    it "r2-chained" $ do
+        case progRunP emptyProg "1 < 2 < 3;" of
+            Left msg -> do
+                msg `shouldSatisfy` T.isInfixOf "non-associative"
+            Right st -> do
+                let errs = [prettyTypeErrorWith "" "1 < 2 < 3;" e | TyExpr (Left e) <- M.elems (prTys st)]
+                errs `shouldSatisfy` (not . null)
+                T.unlines errs `shouldSatisfy` T.isInfixOf "non-associative"
+    it "r2-override" $ do
+        st <- okProgP "def rev=Ord {cmp=lambda a b->GT}::Ord Int; (<) @{o=rev} 1 2; (<) 1 2;"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["false", "true"]
+    it "r2-user-no-space" $ do
+        st <- okProgP "def (<)a b=false; 1<2; (<) 1 2;"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["false", "false"]
+    it "r2-custom-sections" $ do
+        st <- okProgP "def (<+>)a b=a*10+b; infixl 6 <+>; (<+>) 2 3; (2 <+>)3; (<+> 3)2;"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["23", "23", "23"]
+    it "r2-list-no-candidate" $ do
+        case progRunP emptyProg "[1] < [2];" of
+            Left msg -> do
+                msg `shouldSatisfy` T.isInfixOf "No implicit"
+            Right st -> do
+                let errs = [prettyTypeErrorWith "" "[1] < [2];" e | TyExpr (Left e) <- M.elems (prTys st)]
+                errs `shouldSatisfy` (not . null)
+                T.unlines errs `shouldSatisfy` T.isInfixOf "No implicit"
+    it "r2-sort" $ do
+        st <- okProgP "sort [3,1,2]; sort [\"c\",\"a\",\"b\"];"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["[1, 2, 3]", "[\"a\", \"b\", \"c\"]"]
+    it "comment masking preserves exact CRLF and offsets" $ do
+        let source = "def x' = 1; -- note\r\nx';"
+        maskComments source `shouldBe` "def x' = 1;        \r\nx';"
+        T.length (maskComments source) `shouldBe` T.length source
+    it "escaped quotes do not start comments" $
+        maskComments "\"a\\\" -- b\"; -- tail" `shouldBe` "\"a\\\" -- b\";        "
+    it "single expression comments use the same scanner" $
+        runSrc "1 + 2 -- comment" `shouldBe` Ok "Int" "3"
+    it "operator reference retains its named dictionary scheme" $ do
+        st <- okProgP "def less = (<);"
+        stmtType 0 st `shouldBe` "Forall a0. {o :: Ord a0} => (a0 -> (a0 -> Bool))"
+    it "fixity rejects multi-digit zero" $
+        runProg "infixl 00 <+>;" `shouldSatisfy` (\r -> case r of
+            Left e -> "single digit" `T.isInfixOf` e
+            Right _ -> False)
+
+  describe "R3 pure output log" $ do
+    it "putStr returns the existing Unit constructor" $ do
+        st <- okProgP "putStr \"hello\";"
+        stmtType 0 st `shouldBe` "Unit"
+        stmtVal 0 st `shouldBe` "Unit"
+    it "putStr keeps its bytes without adding newline" $
+        expectOutput "putStr \"hello\";" [WriteText "hello"]
+    it "putStrLn stores the newline request separately" $
+        expectOutput "putStrLn \"hello\";" [WriteLine "hello"]
+    it "empty output and embedded newline remain observable events" $
+        expectOutput "putStr \"\"; putStrLn \"a\\nb\";" [WriteText "", WriteLine "a\nb"]
+    it "expression events preserve evaluation order" $
+        expectOutput "putStr \"a\"; putStrLn \"b\"; putStr \"c\";"
+            [WriteText "a", WriteLine "b", WriteText "c"]
+    it "lambda depth restoration does not drop output" $
+        expectOutput "def say text=putStrLn text; say \"inside\";" [WriteLine "inside"]
+    it "ordinary let shares one evaluated output request" $
+        expectOutput "let x=putStr \"once\" in (x,x);" [WriteText "once"]
+    it "an unused branch produces no request" $
+        expectOutput "if true then Unit else putStrLn \"no\";" []
+    it "left to right tuple evaluation preserves requests" $
+        expectOutput "(putStr \"left\",putStrLn \"right\");" [WriteText "left", WriteLine "right"]
+    it "map can invoke the new ordinary function" $
+        expectOutput "map putStrLn [\"a\",\"b\"];" [WriteLine "a", WriteLine "b"]
+    it "recursive output preserves every request" $
+        expectOutput "def count n=if n==0 then Unit else let _=putStrLn (showInt n) in count (n-1); count 3;"
+            [WriteLine "3", WriteLine "2", WriteLine "1"]
+    it "a non-function definition initializes output once" $
+        expectOutput "def x=putStrLn \"init\"; x; x;" [WriteLine "init"]
+    it "a deferred closure does not execute merely by definition" $
+        expectOutput "def say text=putStrLn text; say;" []
+    it "prefix output survives a caught expression failure" $
+        expectOutput "let u=putStrLn \"prefix\" in 1/0; putStrLn \"after\";"
+            [WriteLine "prefix", WriteLine "after"]
+    it "prefix output survives fatal definition initialization failure" $ do
+        let source="def bad=let u=putStrLn \"prefix\" in 1/0;"
+        case loggedEval source of
+            Right (Left message, runtime) -> do
+                message `shouldSatisfy` T.isInfixOf "Divided by zero"
+                toList (rtLog runtime) `shouldBe` [WriteLine "prefix"]
+                rtDepth runtime `shouldBe` Depth 0
+            _ -> expectationFailure "expected a fatal initializer failure"
+    it "ill-typed nested output never executes raw source" $
+        expectOutput "putStr (putStrLn \"never\"); putStrLn \"yes\";" [WriteLine "yes"]
+    it "ill-typed output argument does not produce a request" $
+        expectOutput "putStr 1;" []
+    it "each evaluation starts with a fresh output log" $ do
+        expectOutput "putStrLn \"first\";" [WriteLine "first"]
+        expectOutput "1+1;" []
+    it "Unicode and escapes remain decoded text in the event" $
+        expectOutput "putStrLn \"你好\\t世界\";" [WriteLine "你好\t世界"]
+    it "many requests preserve sequence length and order" $ do
+        let source=T.concat (replicate 400 "putStr \"x\";")
+        expectOutput source (replicate 400 (WriteText "x"))
+    it "missing Unit cannot enqueue an invalid output request" $ do
+        let (result,runtime)=runState (runReaderT (runExceptT
+                (evalwDepth (App (Var "putStr") (SLit "no")))) (sEnv initSession)) emptyRuntime
+        result `shouldSatisfy` isLeft
+        rtLog runtime `shouldBe` Seq.empty
+        rtDepth runtime `shouldBe` Depth 0

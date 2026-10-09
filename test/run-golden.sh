@@ -247,6 +247,14 @@ repl_check "REPL 用户报的 max2/max3 三行会话" \
     'def max2 a b = if a < b then b else a;\ndef max3 a b c = if max2 a b == a then if max2 a c == a then a else c else if max2 b c == b then b else c;\nmax3 1 4 3;\n' \
     'Value: 4'
 
+# R3 pure output requests must be replayed by the file driver exactly once.
+if diff -u test/print-r3.expected.txt <(actual test/print-r3.txt); then
+    echo "R3 output golden passed"
+else
+    echo "R3 output golden failed"
+    fail=1
+fi
+
 echo
 if [ "$fail" -eq 0 ]; then
     echo "基线全绿。"

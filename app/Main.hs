@@ -14,6 +14,7 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import qualified Data.Set as S
 import qualified Data.Map as M
+import qualified Data.Sequence as Seq
 
 import Control.Monad (forM_, unless, when, foldM)
 import Control.Monad.Reader (runReaderT)
@@ -51,6 +52,7 @@ loop s = do
         ":q"    -> TIO.putStrLn "Bye."
         ":help" -> help >> loop s
         ":implicits" -> showImplicits s >> loop s
+        ":trace" -> showTrace s >> loop s
         src
             | Just e <- T.stripPrefix ":t " src -> loop =<< doTypeOf s e
             | Just p <- T.stripPrefix ":load " src -> loop =<< loadFile s (T.unpack (T.strip p))
@@ -97,13 +99,14 @@ execBatch' loud ss src lprs perr = do
                     ) [e | TyDefFailed e <- M.elems tps]
                 return (ss { sNext = n}, False)
             else do
-                let elt = cProgram checked
-                    nTEnv = cTEnv checked
-                    (evRes, _) = runState (runReaderT (runExceptT (evalProgram elt)) (sEnv ss)) (Depth 0)
+                let nTEnv = cTEnv checked
+                    (evRes, runtime) = runState (runReaderT (runExceptT (evalCheckedProgram checked)) (sEnv ss)) emptyRuntime
+                    logged = ss {sTrace = rtLog runtime, sNext = n}
+                replayOutput (rtLog runtime)
                 case evRes of
                     Left eerr -> do
                         TIO.putStrLn ("Eval Error:\n" <> prettyEvalErrorWith (sBatch ss) src eerr)
-                        return (ss { sNext = n }, False)
+                        return (logged, False)
                     Right (env', vals) -> do
                         when loud $ printBatch (sBatch ss) src lprs tps vals perr
                         let newCs = concatMap (map fst . dCtors) (dataDeclsOf prs)
@@ -112,7 +115,7 @@ execBatch' loud ss src lprs perr = do
                             newImp = [nm | (i, st) <- zip [0..] prs, StmtImp (Def nm _ _) <- [st], Just (TyDef _ _) <- [M.lookup i tps]]
                             ok   = not (any isLeft (M.elems vals))
                                 && not (any (\case TyExpr (Left _) -> True; _ -> False) (M.elems tps))
-                        return (ss
+                        return (logged
                             { sTEnv   = foldr M.delete (M.union nTEnv (sTEnv ss)) stale
                             , sEnv    = foldr M.delete env' stale
                             , sNext   = n
@@ -159,6 +162,21 @@ readFileSafe p = do
     r <- try (TIO.readFile p) :: IO (Either IOException Text)
     return $ either (Left . T.pack . show) Right r
 
+replayOutput :: Seq.Seq OutputEvent -> IO ()
+replayOutput events = do
+    forM_ events $ \case
+        WriteText text -> TIO.putStr text
+        WriteLine text -> TIO.putStrLn text
+    hFlush stdout
+
+showTrace :: Session -> IO ()
+showTrace s = do
+    TIO.putStrLn "Output trace (last evaluated batch):"
+    if Seq.null (sTrace s) then TIO.putStrLn "  (empty)"
+    else forM_ (sTrace s) $ \event -> TIO.putStrLn $ "  " <> case event of
+        WriteText text -> "putStr " <> prettyV' (VStr text)
+        WriteLine text -> "putStrLn " <> prettyV' (VStr text)
+
 showImplicits :: Session -> IO ()
 showImplicits s = do
     TIO.putStrLn "Implicit candidates (session frame):"
@@ -174,6 +192,7 @@ help = mapM_ TIO.putStrLn
     , "  :t <expr>     only do type check"
     , "  :load <file>  load file"
     , "  :implicits    show implicit candidates"
+    , "  :trace        show the last evaluated batch output requests"
     , "  :q            exit"
     ]
 

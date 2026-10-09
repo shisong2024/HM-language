@@ -7,6 +7,8 @@ import qualified Data.Text as T
 import Data.Text (Text)
 import Data.Void (Void)
 import Data.Set (Set)
+import Data.Sequence (Seq)
+import qualified Data.Sequence as Seq
 
 import GHC.Generics (Generic)
 import Text.Megaparsec (Parsec, SourcePos)
@@ -116,6 +118,18 @@ data EvalError
     deriving (Show, Eq)
 
 newtype Depth = Depth Int deriving (Show, Eq, Ord, Generic)
+
+-- The evaluator records requests; only the driver performs output IO.
+data OutputEvent = WriteText Text | WriteLine Text deriving (Show, Eq)
+
+data Runtime = Runtime
+    { rtDepth :: Depth
+    , rtLog :: Seq OutputEvent
+    } deriving (Show, Eq)
+
+emptyRuntime :: Runtime
+emptyRuntime = Runtime (Depth 0) Seq.empty
+
 data Located e = Located (Maybe Span) e deriving (Show, Eq)
 
 data T' 
@@ -242,7 +256,8 @@ data DataDecl = DataDecl
     } deriving (Show, Eq)
 
 data Session = Session
-    { sTEnv     :: TEnv
+    { sTrace    :: Seq OutputEvent
+    , sTEnv     :: TEnv
     , sEnv      :: Env
     , sNext     :: Counter
     , sBatch    :: BatchName

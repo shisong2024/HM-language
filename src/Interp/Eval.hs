@@ -5,30 +5,33 @@ import Interp.Types
 
 import qualified Data.Set as S
 import qualified Data.Map as M
+import qualified Data.Sequence as Seq
+import qualified Data.Text as T
 
 import Control.Monad (when, foldM, forM)
 import Control.Monad.Reader (MonadReader, ask, local, asks)
 import Control.Monad.Error.Class (MonadError (throwError, catchError))
-import Control.Monad.State (MonadState (get, put), modify)
+import Control.Monad.State (MonadState, modify, gets)
 
 import Data.Map ((!?))
 import Data.Graph (stronglyConnComp, SCC (AcyclicSCC, CyclicSCC))
 import Data.Char (chr, ord)
-import qualified Data.Text as T
 import Data.Text (Text)
 import Data.Set (Set)
 import Data.Maybe (isJust)
 
-evalwDepth :: (MonadState Depth m, MonadReader Env m, MonadError (Located EvalError) m) => E' -> m V'
+evalwDepth :: (MonadState Runtime m, MonadReader Env m, MonadError (Located EvalError) m) => E' -> m V'
 evalwDepth expr = do
-    d <- get
+    d <- gets rtDepth
     when (d > maxDepth) $
         throwError $ Located Nothing (RecursionLimited d)
-    modify $ \(Depth n) -> Depth (n + 1)
-    res <- eval expr `catchError` \e -> put d >> throwError e
-    put d >> return res
+    let restoreDepth = modify (\rt -> rt {rtDepth = d})
+    modify $ \rt -> rt {rtDepth = d + 1}
+    res <- eval expr `catchError` \e -> restoreDepth >> throwError e
+    restoreDepth
+    return res
 
-eval :: (MonadState Depth m, MonadReader Env m, MonadError (Located EvalError) m) => E' -> m V'
+eval :: (MonadState Runtime m, MonadReader Env m, MonadError (Located EvalError) m) => E' -> m V'
 eval = \case
     ILit i -> return $ VInt i
 
@@ -104,14 +107,24 @@ eval = \case
     ImpHole h -> throwError (Located Nothing (UnboundVariable
         ("internal implicit hole " <> T.pack (show h))))
 
-evalProgram :: (MonadState Depth m, MonadReader Env m, MonadError (Located EvalError) m) => Program -> m (Env, M.Map Int (Either (Located EvalError) V'))
-evalProgram prs = ask >>= \env -> do
+evalProgram :: (MonadState Runtime m, MonadReader Env m, MonadError (Located EvalError) m) => Program -> m (Env, M.Map Int (Either (Located EvalError) V'))
+evalProgram = evalProgramSkipping S.empty
+
+-- Failed expression types must never execute raw, unelaborated expressions.
+-- Preserve statement indices so the driver's diagnostics still align.
+evalCheckedProgram :: (MonadState Runtime m, MonadReader Env m, MonadError (Located EvalError) m) => CProgram -> m (Env, M.Map Int (Either (Located EvalError) V'))
+evalCheckedProgram checked = evalProgramSkipping skipped (cProgram checked)
+  where
+    skipped = S.fromList [i | (i, TyExpr (Left _)) <- M.toList (cTypes checked)]
+
+evalProgramSkipping :: (MonadState Runtime m, MonadReader Env m, MonadError (Located EvalError) m) => Set Int -> Program -> m (Env, M.Map Int (Either (Located EvalError) V'))
+evalProgramSkipping skipped prs = ask >>= \env -> do
     let env0 = M.union (ctorValues (dataDeclsOf prs)) env
     env1 <- foldM step env0 (stronglyConnComp (deps prs))
-    vals <- forM [(i, e) | (i, StmtExpr e) <- zip [0..] prs] $ \(i, e) -> (i, ) <$> tryEnv (local (const env1) (evalwDepth e))
+    vals <- forM [(i, e) | (i, StmtExpr e) <- zip [0..] prs, not (S.member i skipped)] $ \(i, e) -> (i, ) <$> tryEnv (local (const env1) (evalwDepth e))
     return (env1, M.fromList vals)
     where
-        step :: (MonadState Depth m, MonadReader Env m, MonadError (Located EvalError) m) => Env -> SCC Decl -> m Env
+        step :: (MonadState Runtime m, MonadReader Env m, MonadError (Located EvalError) m) => Env -> SCC Decl -> m Env
         step env scc = case scc of
             AcyclicSCC (Def n [] b) | not (isLambda b) -> do
                 v <- local (const env) (evalwDepth b)
@@ -236,7 +249,9 @@ matchP = \case
     
     _ -> Nothing
 
-applyPrim :: (MonadReader Env m, MonadError (Located EvalError) m) => Text -> [V'] -> m V'
+applyPrim :: (MonadState Runtime m, MonadReader Env m, MonadError (Located EvalError) m) => Text -> [V'] -> m V'
+applyPrim "putStr" [VStr text] = recordOutput (WriteText text)
+applyPrim "putStrLn" [VStr text] = recordOutput (WriteLine text)
 applyPrim "#cons" [h, t] = case t of
     VList xs -> return $ VList (h: xs)
     _ -> throwError $ Located Nothing $ ConsNeedsList t
@@ -258,7 +273,16 @@ applyPrim "intCompare" [VInt a, VInt b] = return $ VInt $ case compare a b of
 applyPrim "$fieldErr" [VStr f, v] = throwError $ Located Nothing $ NoSuchField f v
 applyPrim n args = throwError $ Located Nothing $ PrimArgMismatch n args
 
-matchArms :: (MonadError (Located EvalError) m, MonadReader Env m,  MonadState Depth m) => V' -> [(P', E')] -> m V'
+recordOutput :: (MonadState Runtime m, MonadReader Env m, MonadError (Located EvalError) m) => OutputEvent -> m V'
+recordOutput event = do
+    env <- ask
+    unit <- case env !? "Unit" of
+        Just value@(VCtor "Unit" 0 []) -> return value
+        _ -> throwError $ Located Nothing $ UnboundVariable "Unit"
+    modify $ \rt -> rt {rtLog = rtLog rt Seq.|> event}
+    return unit
+
+matchArms :: (MonadError (Located EvalError) m, MonadReader Env m,  MonadState Runtime m) => V' -> [(P', E')] -> m V'
 matchArms v = \case
     [] -> throwError $ Located Nothing $ NonExhaustiveMatch v
     (p, b): rest -> case matchP (p, v) of
