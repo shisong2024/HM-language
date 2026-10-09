@@ -8,7 +8,7 @@ import Interp.Types
 import Interp.TypeCheck
 import Interp.Builtin
 import Interp.Qualify
-import Interp.Synonym (expandProgram)
+import Interp.Synonym
 
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
@@ -50,6 +50,7 @@ loop s = do
         ""      -> loop s
         ":q"    -> TIO.putStrLn "Bye."
         ":help" -> help >> loop s
+        ":implicits" -> showImplicits s >> loop s
         src
             | Just e <- T.stripPrefix ":t " src -> loop =<< doTypeOf s e
             | Just p <- T.stripPrefix ":load " src -> loop =<< loadFile s (T.unpack (T.strip p))
@@ -158,12 +159,21 @@ readFileSafe p = do
     r <- try (TIO.readFile p) :: IO (Either IOException Text)
     return $ either (Left . T.pack . show) Right r
 
+showImplicits :: Session -> IO ()
+showImplicits s = do
+    TIO.putStrLn "Implicit candidates (session frame):"
+    if null (sImp s) then TIO.putStrLn "  (empty)"
+    else forM_ (sImp s) $ \n -> case M.lookup n (sTEnv s) of
+        Just sch -> TIO.putStrLn $ "  " <> n <> " : " <> prettyS' sch
+        Nothing  -> TIO.putStrLn ("  " <> n <> " : <missing type>")
+
 help :: IO ()
 help = mapM_ TIO.putStrLn
     [ "Commands:"
     , "  :help         show this help"
     , "  :t <expr>     only do type check"
     , "  :load <file>  load file"
+    , "  :implicits    show implicit candidates"
     , "  :q            exit"
     ]
 
@@ -210,12 +220,12 @@ addPreludePrefix ns s = s { sTEnv = add (sTEnv s), sEnv = add (sEnv s) }
         add m = M.union (M.mapKeys ("Prelude." <>) (M.restrictKeys m (S.fromList ns))) m
 
 importLines :: Text -> [Text]
-importLines t = [T.strip l | l <- T.lines t, Just _ <- [T.stripPrefix "import " (T.stripStart l)]]
+importLines t = [T.strip l | l <- T.lines (maskComments t), Just _ <- [T.stripPrefix "import " (T.stripStart l)]]
 
 parseImportLine :: FilePath -> Text -> Either Text (FilePath, Text)
 parseImportLine file l0 = do
     let bad msg = T.pack file <> ": " <> msg
-        l = T.strip (T.dropWhileEnd (== ';') (T.strip l0))
+        l = T.strip (T.dropWhileEnd (== ';') (T.strip (maskComments l0)))
         unq t = fromMaybe t (T.stripSuffix "\"" =<< T.stripPrefix "\"" t)
     case T.words (T.strip l) of
         ["import", _] -> Left $ bad "needs `as <Alias>`"

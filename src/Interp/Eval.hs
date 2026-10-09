@@ -253,6 +253,8 @@ applyPrim "uncons" [VStr s] = case T.uncons s of
             case env !? n of
                 Just (VCtor _ ar _) -> return $ VCtor n ar args
                 _ -> throwError $ Located Nothing $ UnboundVariable n
+applyPrim "intCompare" [VInt a, VInt b] = return $ VInt $ case compare a b of
+    LT -> -1; EQ -> 0; GT -> 1
 applyPrim "$fieldErr" [VStr f, v] = throwError $ Located Nothing $ NoSuchField f v
 applyPrim n args = throwError $ Located Nothing $ PrimArgMismatch n args
 

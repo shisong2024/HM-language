@@ -292,10 +292,6 @@ opTable =
     , ("^", OArith OpPow)
     , ("==", OCmp OpEq)
     , ("!=", OCmp OpNe)
-    , ("<=", OCmp OpLe)
-    , (">=", OCmp OpGe)
-    , ("<", OCmp OpLt)
-    , (">", OCmp OpGt)
     ]
 
 instance Num Depth where

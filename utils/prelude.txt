@@ -201,18 +201,25 @@ def either f g e = match e with Left x -> f x | Right y -> g y;
 
 -- -- functions of Ordering
 
+-- _ordFromInt :: Int -> Ordering
+def _ordFromInt n = match n with -1 -> LT | 0 -> EQ | _ -> GT;
+
+-- _ord2Int :: Ordering -> Int
+def _ord2Int o = match o with LT -> -1 | EQ -> 0 | GT -> 1;
+
 -- ordInt :: Ord Int
-implicit def ordInt = Ord { cmp = lambda a b -> if a < b then LT else if a > b then GT else EQ } :: Ord Int;
+implicit def ordInt = Ord { cmp = lambda x y -> _ordFromInt (intCompare x y) } :: Ord Int;
+
+-- ordOrdering :: Ord Ordering
+implicit def ordOrdering = Ord { cmp = lambda x y -> _ordFromInt (intCompare (_ord2Int x) (_ord2Int y)) } :: Ord Ordering;
 
 -- cmpString :: String -> String -> Ordering
 def cmpString a b = match (uncons a, uncons b) with
       (None, None) -> EQ
     | (None, _) -> LT
     | (_, None) -> GT
-    | (Just (i, ra), Just (j, rb)) ->
-        if i < j then LT
-        else if i > j then GT
-        else cmpString ra rb
+    | (Just (i, ra), Just (j, rb)) -> match intCompare i j with 
+        -1 -> LT | 1 -> GT | _ -> cmpString ra rb
     ;
 
 -- ordStr :: Ord String
@@ -229,6 +236,11 @@ def minimum l = let _m = lambda res l -> match l with [] -> res | x: xs -> _m (m
 
 -- maximum :: Ord a => [a] -> Maybe a
 def maximum l = let _m = lambda res l -> match l with [] -> res | x: xs -> _m (max x res) xs in match l with [] -> None | x: xs -> Just (_m x xs);
+
+def (<) {o :: Ord a} x y = match o.cmp x y with LT -> true | _ -> false;
+def (>) {o :: Ord a} x y = match o.cmp x y with GT -> true | _ -> false;
+def (<=) {o :: Ord a} x y = match o.cmp x y with GT -> false | _ -> true;
+def (>=) {o :: Ord a} x y = match o.cmp x y with LT -> false | _ -> true;
 
 
 -- -- functions of String

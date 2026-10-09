@@ -6,11 +6,11 @@ import Interp.Types
 import qualified Data.Text as T
 import qualified Data.Map as M
 
-import Text.Megaparsec 
+import Text.Megaparsec
 import Text.Megaparsec.Char (string, char, eol, space, hspace1, hexDigitChar)
 import Text.Megaparsec.Char.Lexer (decimal)
 
-import Data.Char (isLower, isAlphaNum, isUpper, isAsciiLower, chr, digitToInt, isDigit)
+import Data.Char (isLower, isAlphaNum, isUpper, isAsciiLower, chr, digitToInt)
 import Data.Text (cons, Text, pack, unpack)
 import Data.Functor(($>), void)
 
@@ -29,7 +29,9 @@ opInfo = \case
         OpPow -> Fixity 8 AssocR
 
 builtinFix :: FixTab
-builtinFix = M.fromList [("++", Fixity 5 AssocR)]
+builtinFix = M.fromList 
+    $  [("++", Fixity 5 AssocR)]
+    <> [(n, Fixity 4 AssocN) | n <- ["<", ">", "<=", ">="]]
 
 builtinOp :: Text -> Bool
 builtinOp n = n `elem` map fst opTable || M.member n builtinFix
@@ -38,7 +40,7 @@ defaultFix :: Fixity
 defaultFix = Fixity 9 AssocL
 
 reserved :: [Text]
-reserved = 
+reserved =
     [ "let", "in", "lambda", "def"
     , "if", "then", "else", "true", "false"
     , "match", "with", "data", "type"
@@ -62,10 +64,10 @@ nextNotVar :: Parser ()
 nextNotVar = notFollowedBy (satisfy isVarLeft)
 
 symbol :: Text -> Parser Text
-symbol t = lexeme (try (string t <* nextNotVar)) 
+symbol t = lexeme (try (string t <* nextNotVar))
 
 toBool :: Parser Text -> Parser Bool
-toBool p = lexeme $ p >>= \case 
+toBool p = lexeme $ p >>= \case
         "true"  -> return True
         "false" -> return False
         _       -> fail "expected bool"
@@ -116,7 +118,7 @@ parseImpParam = ImplicitParam
 parseVar' :: Parser Text
 parseVar' = lexeme $ do
     name <- lookAhead varName
-    if name `elem` reserved then fail $ "reserved symbol: " ++ show name 
+    if name `elem` reserved then fail $ "reserved symbol: " ++ show name
     else varName
 
 parseVar :: Parser E'
@@ -150,14 +152,39 @@ strEscape = do
             return $ chr (foldl (\a d -> a * 16 + digitToInt d) 0 ds)
         c    -> fail $ "unknown escape `\\" <> [c] <> "`"
 
+operatorExpr :: Text -> E' -> E' -> E'
+operatorExpr n a b = case lookup n opTable of
+    Just op -> BOpr op a b
+    Nothing -> App (App (Var n) a) b
+
+operatorValue :: Text -> E'
+operatorValue n = case lookup n opTable of
+    Just _  -> Lambda "$operator@left" (Lambda "$operator@right"
+        (operatorExpr n (Var "$operator@left") (Var "$operator@right")))
+    Nothing -> Var n
+
 parseParen :: Tabs -> Parser E'
 parseParen tab = withSpan $ do
+    start <- getSourcePos
     _ <- lexeme (char '(')
-    ls <- sepBy1 (parseExpr tab) comma
-    _ <- lexeme (char ')')
-    return $ case ls of
-        [x] -> x
-        es  -> TupleLit es
+    let binder = "$section@" <> pack (show (unPos (sourceLine start))) 
+            <> ":" <> pack (show (unPos (sourceColumn start)))
+        reference = operatorValue <$> (opName <* lexeme (char ')'))
+        rightSection = do
+            n <- opName
+            guard (n /= "-")
+            rhs <- parseExpr tab <* lexeme (char ')')
+            return $ Lambda binder (operatorExpr n (Var binder) rhs)
+        ordin = do
+            lhs <- parseExpr tab
+            (do
+                n <- opName <* lexeme (char ')')
+                return (Lambda binder (operatorExpr n lhs (Var binder))))
+                <|> (do
+                    rest <- many (comma *> parseExpr tab)
+                    _ <- lexeme (char ')')
+                    return $ if null rest then lhs else TupleLit (lhs : rest))
+    try reference <|> try rightSection <|> ordin
 
 parseUnary :: Tabs -> Parser E'
 parseUnary tab = withSpan $ do
@@ -221,8 +248,8 @@ parseLet tab = withSpan $ do
         _ -> let tmp = letTmpName sp0 in return $ Let tmp e1 (Match (Var tmp) [(p, e2)])
     where
         letTmpName :: SourcePos -> Text
-        letTmpName sp = 
-            "$let@" <> pack (show (unPos (sourceLine sp))) 
+        letTmpName sp =
+            "$let@" <> pack (show (unPos (sourceLine sp)))
             <> ":" <> pack (show (unPos (sourceColumn sp)))
 
         refutableLetMsg :: String
@@ -248,6 +275,7 @@ parseOpr tab l = withSpan $ parseUnary tab >>= \t -> lexeme (loop t Nothing)
                     <> [ lexeme (try (string s <* notFollowedBy (satisfy isOpChar))) $> (fx, s, App . App (Var s))
                        | (s, fx) <- M.toList (tbFix tab) ]
                 guard (fixLev fx >= l)
+                notFollowedBy (char ')')
                 return (fx, nm, mk)
             case mop of
                 Nothing -> return lhs
@@ -262,7 +290,7 @@ parseLambda :: Tabs -> Parser E'
 parseLambda tab = withSpan $ do
     _ <- lexeme (symbol "lambda")
     vars <- some parseVar'
-    _ <- lexeme (string "->" <?> "->") 
+    _ <- lexeme (string "->" <?> "->")
     b <- parseExpr tab
     return $ foldr Lambda b vars
 
@@ -307,7 +335,7 @@ parseTypeName vars = do
 
 parseTypeParen :: [(Text, TypeVar)] -> Parser T'
 parseTypeParen vars = do
-    _ <- lexeme (char '(') 
+    _ <- lexeme (char '(')
     ts <- sepBy1 (parseTypeWith vars) comma
     _ <- lexeme (char ')')
     return $ case ts of
@@ -317,7 +345,7 @@ parseTypeParen vars = do
 parseTypeList :: [(Text, TypeVar)] -> Parser T'
 parseTypeList vars = do
     _ <- lexeme (char '[')
-    t <- parseTypeWith vars 
+    t <- parseTypeWith vars
     _ <- lexeme (char ']')
     return $ TList t
 
@@ -426,7 +454,7 @@ parseTypeDecl = do
         fail (unpack (name <> " is a built-in type name and cannot redeclared"))
     ps <- many varName
     case [v | (i, v) <- zip [0..] ps, v `elem` drop (i + 1) ps] of
-        (v: _) -> 
+        (v: _) ->
             fail $ unpack $ "duplicate type parameter " <> v <> " in type " <> name <> "."
         _ -> return ()
     _ <- lexeme (char '=' <?> "=")
@@ -437,10 +465,10 @@ parseTypeDecl = do
 parseInfixDecl :: Parser Statement
 parseInfixDecl = do
     kw <- lexeme (try ((string "infixl" <|> string "infixr" <|> string "infix") <* nextNotVar))
-    lev <- lexeme (decimal <* nextNotVar <?> "precedence")
+    lev <- lexeme (oneOf ['0'..'9'] <* nextNotVar <?> "single digit precedence 0-9")
     nm <- opName
     _ <- semicolon
-    return $ StmtInfix nm (Fixity (fromInteger lev) (assocOf kw))
+    return $ StmtInfix nm (Fixity (digitToInt lev) (assocOf kw))
 
 assocOf :: Text -> Assoc
 assocOf = \case
@@ -449,15 +477,15 @@ assocOf = \case
     _        -> AssocN
 
 parseProg :: Tabs -> Parser [(Int, Statement)]
-parseProg tab = sc *> many 
+parseProg tab = sc *> many
     (   ((,) . unPos . sourceLine <$> getSourcePos)
     <*> (   parseImpDef tab
-        <|> StmtDef <$> parseDef tab 
-        <|> StmtData <$> parseData 
-        <|> parseTypeDecl 
+        <|> StmtDef <$> parseDef tab
+        <|> StmtData <$> parseData
+        <|> parseTypeDecl
         <|> parseInfixDecl
         <|> StmtExpr <$> (parseExpr tab <* semicolon)
-        ) 
+        )
     <*  sc)
     where
         sc :: Parser ()
@@ -470,40 +498,57 @@ run :: Text -> Either Text E'
 run = runWith emptyTabs
 
 runWith :: Tabs -> Text -> Either Text E'
-runWith tab t = case runParser (parseExpr (tab { tbFix = effFix (tbFix tab) }) <* eof) "" t of
+runWith tab t = case runParser (space *> parseExpr (tab { tbFix = effFix (tbFix tab) }) <* eof) "" (maskComments t) of
     Left  err -> Left $ pack (errorBundlePretty err)
     Right res -> desugarE (tbFld tab) res
 
 effFix :: FixTab -> FixTab
 effFix tab = M.union tab builtinFix
 
-codeOf :: Text -> Text
-codeOf = T.pack . go False . T.unpack
+maskComments :: Text -> Text
+maskComments = T.pack . go False . T.unpack
     where
         go :: Bool -> String -> String
         go _ [] = []
-        go True ('\\': c: rest) = '\\' : c : go True rest
+        go True ('\\': c: rest) = '\\': c: go True rest
         go True ('"': rest) = '"' : go False rest
         go False ('"': rest) = '"' : go True rest
-        go False ('-': '-': _) = []
-        go inStr (c: rest) = c : go inStr rest
+        go False ('-': '-': rest) = ' ': ' ': comment rest
+        go quoted (c: rest) = c : go quoted rest
+
+        comment :: String -> String
+        comment = \case
+            [] -> []
+            c: rest -> if c == '\n' || c == '\r' then c: go False rest else ' ': comment rest
+
+codeOf :: Text -> Text
+codeOf = T.stripEnd . maskComments
 
 stripComment :: Text -> Either Text Text
-stripComment t
-    | ((i, _): _) <- [(i, l) | (i, l) <- zip [1 :: Int ..] (T.lines t), trailing l] =
-        Left $ T.unlines [T.pack (show i) <> ":", "Parse Error:", "`--` must be at the start of a line."]
-    | otherwise = Right $ T.unlines (map blanck (T.lines t))
+stripComment = Right . maskComments
+
+sourceStatements :: Text -> [(Int, Text)]
+sourceStatements = go False False 1 Nothing [] . T.unpack . maskComments
     where
-        blanck :: Text -> Text
-        blanck l
-            | commented l && T.null (T.strip (codeOf l)) = ""
-            | otherwise = l
-
-        commented :: Text -> Bool
-        commented l = codeOf l /= l
-
-        trailing :: Text -> Bool
-        trailing l = commented l && not (T.null (T.strip (codeOf l)))
+        go _ _ _ first acc [] = emit first acc []
+        go quoted escaped line first acc (c: rest)
+            | not quoted && c == ';' = emit first (';': acc) 
+                (go False False line Nothing [] rest)
+            | otherwise = 
+                let nextLine = if c == '\n' then line + 1 else line
+                    nextFirst = case first of
+                        Nothing | c `notElem` [' ', '\t', '\r', '\n'] -> Just line
+                        _ -> first
+                    nextQuoted
+                        | escaped = quoted
+                        | c == '"' = not quoted
+                        | otherwise = quoted
+                    nextEscaped = quoted && not escaped && c == '\\'
+                in go nextQuoted nextEscaped nextLine nextFirst (c: acc) rest
+        
+        emit Nothing _ rest = rest
+        emit (Just f) acc rest = (f, T.pack (reverse acc)): rest
+                
 
 irrefutableP :: P' -> Bool
 irrefutableP = \case
@@ -527,53 +572,36 @@ runProgWith tab0 tx = case stripComment tx of
                 return (Tabs fix fld, zip (map fst r) ss)
 
 scanFixities :: FixTab -> Text -> Either Text FixTab
-scanFixities tab0 t = do
-    tab <- foldM symDef tab0 (zip [1 :: Int ..] ls)
-    foldM decl tab (zip [1 :: Int ..] ls)
+scanFixities tab0 source = do
+    let statements = sourceStatements source
+    tab <- foldM symDef tab0 statements
+    foldM decl tab statements
     where
-        ls :: [Text]
-        ls = T.lines t
-
-        wordsOf :: Text -> [Text]
-        wordsOf = filter (/= ";") . T.words . T.strip
-
-        bare :: Text -> Text
-        bare w = case T.stripPrefix "(" w of
-            Just r  -> T.dropWhileEnd (== ')') r
-            Nothing -> T.dropWhileEnd (== ';') w
-
-        symDef :: FixTab -> (Int, Text) -> Either Text FixTab
-        symDef tab (_, l) = case wordsOf l of
-            ("def": w: _)
-                | let nm = bare w
-                , isOpName nm && nm `notElem` map fst opTable
-                -> Right (M.insertWith (\_ old -> old) nm defaultFix tab)
+        symDef tab (_, text) = case runParser (space *> symbol "def" *> defName) "" text of
+            Right n | isOpName n && not (builtinOp n) -> 
+                Right (M.insertWith (\_ old -> old) n defaultFix tab)
             _ -> Right tab
+        
+        decl tab (line, text)
+            | Just kw <- startsFixity text = case runParser (space *> parseInfixDecl <* eof) "" text of
+                Left _ -> Left $ badAt line $ case T.words (T.strip text) of
+                    _: level: _ | T.length level /= 1 || T.any (\c -> c < '0' || c > '9') level -> 
+                        "the precedence must be a single digit 0-9."
+                    [_, _, opToken] | let n = T.dropWhileEnd (== ';') opToken, not (isOpName n) ->
+                        "`" <> T.dropWhileEnd (== ';') opToken <> "` is not an operator name."
+                    _ -> "expected `" <> kw <> " <0-9> <operator>;`."
+                Right (StmtInfix n fx)
+                    | fixLev fx > 9 -> Left $ badAt line "the precedecde must be a single digit 0-9."
+                    | builtinOp n -> Left $ badAt line ("`" <> n <> "` is a builtin operator.")
+                    | otherwise -> Right (M.insert n fx tab)
+                Right _ -> Right tab
+            | otherwise = Right tab
+        
+        startsFixity text = case T.words (T.stripStart text) of
+            kw: _ | kw `elem` ["infixl", "infixr", "infix"] -> Just kw
+            _ -> Nothing
 
-        decl :: FixTab -> (Int, Text) -> Either Text FixTab
-        decl tab (i, l) = case wordsOf l of
-            (kw: rest) | kw `elem` ["infixl", "infixr", "infix"] -> do
-                (nm, fx) <- declOf i kw rest
-                return $ M.insert nm fx tab
-            _ -> Right tab
-
-        declOf :: Int -> Text -> [Text] -> Either Text (Text, Fixity)
-        declOf i kw rest = case rest of
-            [lv, w] -> do
-                lev <- case T.unpack lv of
-                    [c] | isDigit c -> Right (fromEnum c - fromEnum '0')
-                    _ -> Left $ badAt i "the precedence must be a single digit 0-9."
-                let nm = bare w
-                if not (isOpName nm)
-                    then Left $ badAt i ("`" <> nm <> "` is not an operator name.")
-                    else if builtinOp nm
-                        then Left $ badAt i ("`" <> nm <> "` is a built-in operator; its precedence is fixed.")
-                        else Right (nm, Fixity lev (assocOf kw))
-            _ -> Left $ badAt i "expected `infixl <0-9> <operator>;`."
-
-        badAt :: Int -> Text -> Text
-        badAt i msg = T.unlines [T.pack (show i) <> ":", "Parse Error:", msg]
-    
+        badAt line mes = "line " <> pack (show line) <> ": " <> mes
 
 withSpan :: Parser E' -> Parser E'
 withSpan p = do
@@ -705,7 +733,7 @@ recStmt tab = \case
     where
         recDecl :: FieldTab -> Decl -> Either Text Decl
         recDecl t (Def n ps body) = Def n ps <$> desugarE t body
-        
+
 desugarE :: FieldTab -> E' -> Either Text E'
 desugarE tab = \case
     ImpHole i       -> Right (ImpHole i)

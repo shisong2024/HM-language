@@ -13,6 +13,7 @@ builtinEnv = M.fromList
     , ("++", VPrim "++" 2 [])
     , ("uncons", VPrim "uncons" 1 [])
     , ("fromCode", VPrim "fromCode" 1 [])
+    , ("intCompare", VPrim "intCompare" 2 [])
     , ("$fieldErr", VPrim "$fieldErr" 2 [])
     ]
 
@@ -23,6 +24,7 @@ builtinTEnv = M.fromList
     , ("++", strAppTy)
     , ("uncons", unconsTy)
     , ("fromCode", fromCodeTy)
+    , ("intCompare", intCompareTy)
     , ("$fieldErr", fieldErrTy)
     ]
 
@@ -40,6 +42,9 @@ unconsTy = Forall S.empty [] (TFunc TString (TCon "Maybe" [TTuple [TInt, TString
 
 fromCodeTy :: S'
 fromCodeTy = Forall S.empty [] (TFunc TInt TString)
+
+intCompareTy :: S'
+intCompareTy = Forall S.empty [] (TFunc TInt (TFunc TInt TInt))
 
 initSession :: Session
 initSession = Session 
