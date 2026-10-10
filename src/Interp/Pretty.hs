@@ -84,7 +84,9 @@ printT' = go False
             TList tp -> "[" <> go False tp <> "]"
             TTuple tps -> "(" <> T.intercalate ", " (fmap (go False) tps) <> ")"
             TVar i -> "a" <> pack (show i)
-            TFunc t1 t2 -> "(" <> T.unwords [go False t1, "->", go False t2] <> ")"
+            TFunc t1 eff t2 -> "(" <> T.unwords 
+                (  [go False t1, "->"] <> [prettyEff eff | eff /= emptyEff] <> [go False t2])
+                <> ")"
             TCon n x -> case x of
                 [] -> n
                 args -> parenIf needParen (T.unwords (n: fmap (go True) args))
@@ -143,15 +145,23 @@ prettyTypeError = \case
         <> ", but expected " <> prettyT' e <> ".\n" <> prettyTypeError res
     DictInterfaceUnavailable -> "This call head has no named dictionary interface; bind a function with a known scheme first."
     DictConstrainDidNotConverge -> "Recursive dictionary constraints did not converge within 64 rounds."
+    EffMismatch actual allowed -> "Effect mismatch: requires " <> prettyEff actual <> ", allowed " <> prettyEff allowed
+    EffUndetermined actual allowed -> "Cannot determine effect constraint: " <> prettyEff actual <> " <= " <> prettyEff allowed
 
 prettyS' :: S' -> Text
-prettyS' (Forall vars preds ty) =
+prettyS' sch@(Forall vars preds ty) =
     let ordered = dedup (concatMap (varOrder . predType) preds <> varOrder ty)
-        bOrd = filter (`S.member` vars) ordered
-            <> filter (`notElem` ordered) (S.toList vars)
-        ren = M.fromList (zip bOrd [0..])
-        varsText = if null bOrd then ""
-            else "Forall " <> T.unwords ["a" <> pack (show i) | i <- [0 .. length bOrd - 1]] <> ". "
+        eVars = effectVarOrder ty 
+            <> S.toAscList (effVars (sDictCall sch)) 
+            <> concat [S.toAscList (effVars a) <> S.toAscList (effVars b) | (a, b) <- sEffCs sch]
+        normalVars = vars `S.difference` S.fromList eVars
+        bOrd = filter (`S.member` normalVars) ordered
+            <> filter (`notElem` ordered) (S.toList normalVars)
+        ren = M.fromList (zip bOrd [0..] <> zip (dedup eVars) [0..])
+        boundEffs = filter (`S.member` vars) (dedup eVars)
+        quantified = ["a" <> pack (show i) | i <- [0..length bOrd - 1]] 
+            <> ["e" <> pack (show (M.findWithDefault i i ren)) | i <- boundEffs]
+        varsText = if null quantified then "" else "Forall " <> T.unwords quantified <> ". "
         predsText = case preds of
             [] -> ""
             _  -> "{" <> T.intercalate ", "
@@ -162,7 +172,19 @@ prettyS' (Forall vars preds ty) =
                     | p <- preds
                     ]
                 <> "} => "
-    in varsText <> predsText <> printT' (renumberT ren ty)
+    in varsText <> predsText <> printT' (renumberT ren ty) <> constraintsText
+    where
+        renEff e = 
+            let varsInOrder = dedup 
+                    (  effectVarOrder ty 
+                    <> S.toAscList (effVars (sDictCall sch))
+                    <> concat [S.toAscList (effVars a) <> S.toAscList (effVars b) | (a, b) <- sEffCs sch]
+                    )
+                mapping = M.fromList (zip varsInOrder [0..])
+            in e { effVars = S.map (\v -> M.findWithDefault v v mapping) (effVars e) }
+        constraintsText = if null (sEffCs sch) then "" 
+            else " where effects " <> T.intercalate ", " 
+                [prettyEff (renEff a) <> " = " <> prettyEff (renEff b) | (a, b) <- sEffCs sch]
 
 fieldNames :: DataDecl -> Text -> Text
 fieldNames d c = case sortOn (snd . snd)
@@ -264,7 +286,7 @@ renumberT m = go
             TBool -> TBool
             TList t -> TList (go t)
             TTuple ts -> TTuple (fmap go ts)
-            TFunc g r -> TFunc (go g) (go r)
+            TFunc g e r -> TFunc (go g) (e {effVars = S.map (\i -> M.findWithDefault i i m) (effVars e)}) (go r)
             TVar i -> TVar (M.findWithDefault i i m)
             TString -> TString
             TCon n args -> TCon n (fmap go args)
@@ -277,11 +299,11 @@ varOrder = \case
     TVar i -> [i]
     TList t -> varOrder t
     TTuple ts -> concatMap varOrder ts
-    TFunc g r -> varOrder g <> varOrder r
+    TFunc g _ r -> varOrder g <> varOrder r
     TCon _ args -> concatMap varOrder args
 
 normalizeT :: T' -> T'
-normalizeT t = renumberT (M.fromList (zip (dedup (varOrder t)) [0..])) t
+normalizeT t = renumberT (M.fromList (zip (dedup (varOrder t)) [0..] <> zip (dedup (effectVarOrder t)) [0..])) t
 
 normalizeTs :: [T'] -> [T']
 normalizeTs ts = fmap (renumberT $ M.fromList (zip (dedup (concatMap varOrder ts)) [0..])) ts
@@ -325,3 +347,14 @@ hex4 n = T.justifyRight 4 '0' (T.pack (digits n))
         go :: Int -> String
         go 0 = []
         go k = "0123456789ABCDEF" !! (k `mod` 16) : go (k `div` 16)
+
+prettyEff :: Eff -> Text
+prettyEff (Eff ls vs) = "{" <> T.intercalate ", " (S.toAscList ls <> ["e" <> pack (show i) | i <- S.toAscList vs]) <> "}"
+
+effectVarOrder :: T' -> [Int]
+effectVarOrder = \case
+    TFunc a e b -> effectVarOrder a <> S.toAscList (effVars e) <> effectVarOrder b
+    TList t -> effectVarOrder t
+    TTuple ts -> concatMap effectVarOrder ts
+    TCon _ ts -> concatMap effectVarOrder ts
+    _ -> []

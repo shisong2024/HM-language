@@ -131,10 +131,12 @@ doTypeOf s e = case runWith (Tabs (sFixities s) (sFields s)) (T.dropWhileEnd (==
       Left msg -> TIO.putStrLn ("Type Error:\n" <> msg) >> return s
       Right (_, prs) -> case prs of
         [StmtExpr e'] ->do
-            let (tcRes, n) = runState (runExceptT (runReaderT (typeOfExpr (sTEnv s) [sImp s] e') (sDEnv s))) (sNext s)
+            let (tcRes, n) = runState (runExceptT (runReaderT (typeOfExprWE (sTEnv s) [sImp s] e') (sDEnv s))) (sNext s)
             case tcRes of
                 Left terr -> TIO.putStrLn $ "Type Error:\n" <> prettyTypeErrorWith (sBatch s) e terr
-                Right sch -> TIO.putStrLn $ "Type : " <> prettyS' sch
+                Right (sch, now) -> do
+                    TIO.putStrLn $ "Type: " <> prettyS' sch
+                    when (now /= emptyEff) $ TIO.putStrLn ("Effects: " <> prettyEff now)
             return s { sNext = n }
         _ -> do
             let (tcRes, n) = runState (runExceptT (runReaderT (programChecker (sTEnv s) (sImp s) prs) (sDEnv s))) (sNext s)

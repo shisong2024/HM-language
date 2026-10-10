@@ -1,5 +1,4 @@
-{-# LANGUAGE OverloadedStrings, DeriveGeneric, LambdaCase #-}
-{-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE OverloadedStrings, LambdaCase, PatternSynonyms #-}
 module Interp.Types where
 
 import Data.Map (Map)
@@ -10,8 +9,8 @@ import Data.Set (Set)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 
-import GHC.Generics (Generic)
 import Text.Megaparsec (Parsec, SourcePos)
+import qualified Data.Set as S
 
 data P'
     = PVar Text
@@ -117,18 +116,15 @@ data EvalError
     | UnelaboratedDictCall
     deriving (Show, Eq)
 
-newtype Depth = Depth Int deriving (Show, Eq, Ord, Generic)
-
--- The evaluator records requests; only the driver performs output IO.
 data OutputEvent = WriteText Text | WriteLine Text deriving (Show, Eq)
 
 data Runtime = Runtime
-    { rtDepth :: Depth
+    { rtDepth :: Int
     , rtLog :: Seq OutputEvent
     } deriving (Show, Eq)
 
 emptyRuntime :: Runtime
-emptyRuntime = Runtime (Depth 0) Seq.empty
+emptyRuntime = Runtime 0 Seq.empty
 
 data Located e = Located (Maybe Span) e deriving (Show, Eq)
 
@@ -137,9 +133,11 @@ data T'
     | TVar TypeVar 
     | TList T'
     | TTuple [T']
-    | TFunc T' T'
+    | TFunc T' Eff T'
     | TCon Text [T'] 
     deriving (Show, Eq, Ord)
+
+{-# COMPLETE TInt, TBool, TString, TVar, TList, TTuple, TFunc, TCon #-}
 
 data StmtTy 
     = TyDef Text S'
@@ -153,6 +151,7 @@ data InferRes = InferRes
     , irWanted :: [Wanted]
     , irType   :: T'
     , irExpr   :: E'
+    , irNow    :: Eff
     } deriving (Show, Eq)
 
 data CBinding = CBinding
@@ -167,13 +166,25 @@ data CProgram = CProgram
     , cTEnv    :: TEnv
     , cTypes   :: Map Int StmtTy
     , cProgram :: Program
+    , cEffects :: Map Int Eff
     , cIFrame  :: IFrame
     } deriving (Show, Eq)
 
+data Eff = Eff
+    { effLabs :: Set Text
+    , effVars :: Set Int
+    } deriving (Show, Eq, Ord)
+
 type TypeVar = Int
-type Counter = Int
+type Depth   = Int 
 type HoleId  = Int
 type HoleSol = Map HoleId E'
+
+data Counter = Counter
+    { nextId     :: Int
+    , effectDefs :: Map Int Eff
+    , effectRels :: [(Eff, Eff)]
+    } deriving (Show, Eq)
 
 data TypeError
     = UnboundVar Text
@@ -202,6 +213,8 @@ data TypeError
     | DictArgMismatch Text T' T' TypeError
     | DictInterfaceUnavailable
     | DictConstrainDidNotConverge
+    | EffMismatch Eff Eff
+    | EffUndetermined Eff Eff
     deriving (Show, Eq)
 
 type Env  = Map Text V'
@@ -217,11 +230,29 @@ data Param
     deriving (Show, Eq)
 
 data Pred = Implicit T' | NameImplicit Text T' deriving (Show, Eq, Ord)
-data S' = Forall 
-    { sVars  :: Set TypeVar
-    , sPreds :: [Pred]
-    , sType  :: T'
+data S' = Scheme
+    { sVars     :: Set TypeVar
+    , sPreds    :: [Pred]
+    , sType     :: T'
+    , sDictCall :: Eff
+    , sEffCs    :: [(Eff, Eff)]
+    , sInitEff :: Eff
     } deriving (Show, Eq)
+
+pattern Forall :: Set TypeVar -> [Pred] -> T' -> S'
+pattern Forall vs ps ty <- Scheme vs ps ty _ _ _ where
+    Forall vs ps ty = Scheme vs ps ty emptyEff [] emptyEff
+
+pureFunc :: T' -> T' -> T'
+pureFunc a = TFunc a emptyEff
+
+emptyEff :: Eff
+emptyEff = Eff S.empty S.empty
+
+unionEff :: Eff -> Eff -> Eff
+unionEff (Eff a x) (Eff b y) = Eff (S.union a b) (S.union x y)
+
+{-# COMPLETE Forall #-}
 
 predType :: Pred -> T'
 predType= \case
@@ -308,22 +339,3 @@ opTable =
     , ("==", OCmp OpEq)
     , ("!=", OCmp OpNe)
     ]
-
-instance Num Depth where
-    fromInteger :: Integer -> Depth
-    fromInteger = Depth . fromInteger
-
-    (+) :: Depth -> Depth -> Depth
-    (+) (Depth a) (Depth b) = Depth (a + b)
-
-    (-) :: Depth -> Depth -> Depth
-    (-) (Depth a) (Depth b) = Depth (a - b)
-
-    (*) :: Depth -> Depth -> Depth
-    (*) (Depth a) (Depth b) = Depth (a * b)
-
-    abs :: Depth -> Depth
-    abs (Depth a) = Depth (abs a)
-
-    signum :: Depth -> Depth
-    signum (Depth a) = Depth (signum a)

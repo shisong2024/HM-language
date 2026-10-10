@@ -183,7 +183,7 @@ stripAt = \case
     e      -> e
 
 maxDepth :: Depth
-maxDepth = Depth 10000
+maxDepth = 10000
 
 freeVars :: E' -> Set Text
 freeVars = \case

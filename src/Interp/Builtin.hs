@@ -34,32 +34,32 @@ builtinTEnv = M.fromList
     ]
 
 outputTy :: S'
-outputTy = Forall S.empty [] (TFunc TString (TCon "Unit" []))
+outputTy = Forall S.empty [] (TFunc TString consoleEff (TCon "Unit" []))
 
 fieldErrTy :: S'
-fieldErrTy = Forall (S.fromList [0, 1]) [] (TFunc TString (TFunc (TVar 0) (TVar 1)))
+fieldErrTy = Forall (S.fromList [0, 1]) [] (pureFunc TString (pureFunc (TVar 0) (TVar 1)))
 
 consTy :: S'
-consTy = Forall (S.singleton 0) [] (TFunc (TVar 0) (TFunc (TList (TVar 0)) (TList (TVar 0))))
+consTy = Forall (S.singleton 0) [] (pureFunc (TVar 0) (pureFunc (TList (TVar 0)) (TList (TVar 0))))
 
 strAppTy :: S'
-strAppTy = Forall S.empty [] (TFunc TString (TFunc TString TString))
+strAppTy = Forall S.empty [] (pureFunc TString (pureFunc TString TString))
 
 unconsTy :: S'
-unconsTy = Forall S.empty [] (TFunc TString (TCon "Maybe" [TTuple [TInt, TString]]))
+unconsTy = Forall S.empty [] (pureFunc TString (TCon "Maybe" [TTuple [TInt, TString]]))
 
 fromCodeTy :: S'
-fromCodeTy = Forall S.empty [] (TFunc TInt TString)
+fromCodeTy = Forall S.empty [] (pureFunc TInt TString)
 
 intCompareTy :: S'
-intCompareTy = Forall S.empty [] (TFunc TInt (TFunc TInt TInt))
+intCompareTy = Forall S.empty [] (pureFunc TInt (pureFunc TInt TInt))
 
 initSession :: Session
 initSession = Session 
     { sTrace    = Seq.empty
     , sEnv      = builtinEnv
     , sTEnv     = builtinTEnv
-    , sNext     = 0
+    , sNext     = emptyCounter 0
     , sBatch    = ""
     , sDEnv     = emptyDEnv
     , sAliases  = M.empty
@@ -71,3 +71,9 @@ initSession = Session
 
 emptyDEnv :: DEnv
 emptyDEnv = DEnv M.empty M.empty
+
+emptyCounter :: Int -> Counter
+emptyCounter n = Counter n M.empty []
+
+consoleEff :: Eff
+consoleEff = Eff (S.singleton "Console") S.empty

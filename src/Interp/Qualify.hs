@@ -84,7 +84,7 @@ qualifyProgram a prs = map (stmt (topsOf prs)) prs
             TCon n ts -> TCon (qual (tTypes t) n) (map (typ t) ts)
             TList u   -> TList (typ t u)
             TTuple ts -> TTuple (map (typ t) ts)
-            TFunc u v -> TFunc (typ t u) (typ t v)
+            TFunc u e v -> TFunc (typ t u) e (typ t v)
             TInt      -> TInt
             TBool     -> TBool
             TString   -> TString

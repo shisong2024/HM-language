@@ -72,7 +72,7 @@ expandT tab = go S.empty
             TVar i    -> Right (TVar i)
             TList t   -> TList <$> go seen t
             TTuple ts -> TTuple <$> mapM (go seen) ts
-            TFunc a b -> TFunc <$> go seen a <*> go seen b
+            TFunc a e b -> (`TFunc` e) <$> go seen a <*> go seen b
             TCon n args -> case M.lookup n tab of
                 Nothing -> TCon n <$> mapM (go seen) args
                 Just (ps, rhs)
@@ -93,7 +93,7 @@ subst m = \case
     TVar i    -> M.findWithDefault (TVar i) i m
     TList t   -> TList (subst m t)
     TTuple ts -> TTuple (map (subst m) ts)
-    TFunc a b -> TFunc (subst m a) (subst m b)
+    TFunc a e b -> TFunc (subst m a) e (subst m b)
     TCon n as -> TCon n (map (subst m) as)
 
 tshow :: Show a => a -> Text

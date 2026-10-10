@@ -17,6 +17,8 @@ import Data.Functor(($>), void)
 import Control.Monad (guard, when, foldM)
 import Data.List (sortOn, nub)
 import Data.Either (lefts, rights)
+import Data.Maybe (fromMaybe)
+import qualified Data.Set as S
 
 opInfo :: Opr -> Fixity
 opInfo = \case
@@ -351,10 +353,17 @@ parseTypeList vars = do
 
 parseTypeWith :: [(Text, TypeVar)] -> Parser T'
 parseTypeWith vars = do
-    ts <- sepBy1 (parseTypeApp vars) (lexeme (string "->" <?> "?"))
-    return $ case ts of
-        [t] -> t
-        _ -> foldr1 TFunc ts
+    a <- parseTypeApp vars
+    m <- optional $ do
+        _ <- lexeme (string "->")
+        eff <- option emptyEff parseEffRow
+        b <- parseTypeWith vars
+        return (TFunc a eff b)
+    return $ fromMaybe a m
+
+parseEffRow :: Parser Eff
+parseEffRow = (`Eff` S.empty) . S.fromList 
+    <$> (lexeme (char '{') *> sepBy (lexeme (nameRaw isUpper)) comma <* lexeme (char '}'))
 
 parseType :: Parser T'
 parseType = parseTypeWith []
@@ -618,7 +627,7 @@ strayTvs = \case
     TVar i -> [i | i < 0]
     TList t -> strayTvs t
     TTuple ts -> concatMap strayTvs ts
-    TFunc a b -> strayTvs a <> strayTvs b
+    TFunc a _ b -> strayTvs a <> strayTvs b
     TCon _ as -> concatMap strayTvs as
 
 ---

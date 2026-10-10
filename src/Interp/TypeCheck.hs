@@ -7,9 +7,9 @@ import Interp.Types
 import qualified Data.Map as M
 import qualified Data.Set as S
 
-import Control.Monad (foldM, forM, forM_)
+import Control.Monad (foldM, forM, forM_, when)
 import Control.Monad.Error.Class (MonadError (throwError, catchError))
-import Control.Monad.State (MonadState, get, put)
+import Control.Monad.State (MonadState, get, put, modify)
 import Control.Monad.Reader (MonadReader (ask))
 
 import Data.List (nub)
@@ -27,14 +27,18 @@ typeChecker :: Checker m => TEnv -> E' -> m (TSub, T')
 typeChecker env e = do
     r <- inferExpr env [] e
     case irWanted r of
-        [] -> return (irSub r, irType r)
+        [] -> get >>= \st -> return (irSub r, freezeType st $ irType r)
         w: _ -> throwError $ Located (wtdSpan w)
             (AmbiguousImpType (apply (irSub r) (wtdType w)))
 
-typeOfExpr :: Checker m => TEnv -> IEnv -> E' -> m S'
-typeOfExpr env ienv e = do
+typeOfExprWE :: Checker m => TEnv -> IEnv -> E' -> m (S', Eff)
+typeOfExprWE outT outI e = withInferRollback $ typeOfExprWECore outT outI e
+
+typeOfExprWECore :: Checker m => TEnv -> IEnv -> E' -> m (S', Eff)
+typeOfExprWECore env ienv e = do
     r <- inferExpr env ienv e
-    fst <$> closeBinding env (irType r) (irWanted r) (irExpr r)
+    (sch, _) <- closeBinding env (irType r) (irWanted r) (irExpr r) (irNow r)
+    get >>= \st -> return (sch, resolveEff st (applyEff (irSub r) (irNow r)))
 
 inferExpr :: Checker m => TEnv -> IEnv -> E' -> m InferRes
 inferExpr env ienv e = case e of
@@ -46,8 +50,8 @@ inferExpr env ienv e = case e of
 
     Var t -> case env !? t of
         Nothing -> throwError (Located Nothing $ UnboundVar t)
-        Just s  -> do
-            (preds, ty) <- instantiate s
+        Just sch  -> do
+            (preds, ty, callEff) <- instantiateFull sch
             holes <- mapM (const freshHole) preds
             let ws = [ Wanted 
                     { wtdHole = h
@@ -58,36 +62,39 @@ inferExpr env ienv e = case e of
                     , wtdBind = Nothing
                     } | (h, p) <- zip holes preds]
                 e'  = foldl App e (map ImpHole holes)
-            return $ InferRes M.empty ws ty e'
+            return $ InferRes M.empty ws ty e' callEff
 
     ListLit es -> case es of
         [] -> pureInfer e . TList <$> fresh
         e0: rest -> do
             r0 <- inferExpr env ienv e0
-            let step (su, ws, elemTy, es') ex = do
+            let step (su, ws, elemTy, es', now) ex = do
                     r <- inferExpr (applyTEnv su env) ienv ex
                     u <- unify (apply (irSub r) (apply su elemTy), apply (irSub r) (irType r))
                     let su' = compose u (compose (irSub r) su)
-                    return (su', ws <> irWanted r, elemTy, irExpr r: es')
-            (sub, wanted, ty, revE) <- foldM step (irSub r0, irWanted r0, irType r0, [irExpr r0]) rest
+                    return (su', ws <> irWanted r, elemTy, irExpr r: es', unionEff now (irNow r))
+            (sub, wanted, ty, revE, now) <- 
+                foldM step (irSub r0, irWanted r0, irType r0, [irExpr r0], irNow r0) rest
             return $ InferRes
                 { irSub    = sub
                 , irWanted = map (applyWanted sub) wanted
                 , irType   = TList (apply sub ty)
                 , irExpr   = ListLit (reverse revE)
+                , irNow    = applyEff sub now
                 }
     
     TupleLit es -> do
-        let step (su, ws, tys, done) ex = do
+        let step (su, ws, tys, done, now) ex = do
                 r <- inferExpr (applyTEnv su env) ienv ex
                 let su' = compose (irSub r) su
-                return (su', ws <> irWanted r, tys <> [irType r], done <> [irExpr r])
-        (su, ws, tys, es') <- foldM step (M.empty, [], [], []) es
+                return (su', ws <> irWanted r, tys <> [irType r], done <> [irExpr r], unionEff now (irNow r))
+        (su, ws, tys, es', now) <- foldM step (M.empty, [], [], [], emptyEff) es
         return $ InferRes
             { irSub    = su
             , irWanted = map (applyWanted su) ws
             , irType   = TTuple (map (apply su) tys)
             , irExpr   = TupleLit es'
+            , irNow    = applyEff su now
             }
     
     BOpr op a b -> do
@@ -99,7 +106,8 @@ inferExpr env ienv e = case e of
                 u <- unify (apply su0 (irType ra), apply su0 (irType rb))
                 let su = compose u su0
                 return $ InferRes su (map (applyWanted su) (irWanted ra <> irWanted rb))
-                    TBool (BOpr op (irExpr ra) (irExpr rb))
+                    TBool (BOpr op (irExpr ra) (irExpr rb)) 
+                    (applyEff su (unionEff (irNow ra) (irNow rb)))
             _ -> do
                 u1 <- unify (apply su0 (irType ra), TInt)
                 u2 <- unify (apply u1 (apply su0 (irType rb)), TInt)
@@ -109,6 +117,7 @@ inferExpr env ienv e = case e of
                         OCmp _   -> TBool
                 return $ InferRes su (map (applyWanted su) (irWanted ra <> irWanted rb))
                     out (BOpr op (irExpr ra) (irExpr rb))
+                    (applyEff su (unionEff (irNow ra) (irNow rb)))
 
     Let n rhs body -> inferLet env ienv n rhs body
     
@@ -122,36 +131,41 @@ inferExpr env ienv e = case e of
         let su1 = compose (irSub ry) su0
         rn <- inferExpr (applyTEnv su1 env) ienv no
         let su2 = compose (irSub rn) su1
-        u3 <- unify (apply su2 (irType ry), apply su2 (irType rn))
+        (u3, joined) <- joinTypes (apply su2 (irType ry)) (apply su2 (irType rn))
         let su = compose u3 su2
         return $ InferRes su (map (applyWanted su) (irWanted rc <> irWanted ry <> irWanted rn))
-            (apply su (irType ry)) (If (irExpr rc) (irExpr ry) (irExpr rn))
+            (apply su joined) (If (irExpr rc) (irExpr ry) (irExpr rn))
+            (applyEff su (unionsEff [irNow rc, irNow ry, irNow rn]))
 
     Lambda n body -> do
         tv <- fresh
         let env' = M.insert n (Forall S.empty [] tv) env
         r <- inferExpr env' ienv body
-        return $ r { irType = TFunc (apply (irSub r) tv) (irType r), irExpr = Lambda n (irExpr r) }
+        return $ r { irType = TFunc (apply (irSub r) tv) (irNow r) (irType r), irExpr = Lambda n (irExpr r), irNow = emptyEff }
 
     App f arg -> do
         rf <- inferExpr env ienv f
         ra <- inferExpr (applyTEnv (irSub rf) env) ienv arg
         out <- fresh
+        eff <- freshEff
         let su0 = compose (irSub ra) (irSub rf)
-        u <- unify (apply su0 (irType rf), TFunc (apply su0 (irType ra)) out) 
+        u <- applyFunction (apply su0 (irType rf)) (apply su0 (irType ra)) eff out
             `catchError` calleeNote (applyTEnv su0 env) f
         let su = compose u su0
         return $ InferRes su (map (applyWanted su) (irWanted rf <> irWanted ra))
             (apply su out) (App (irExpr rf) (irExpr ra))
+            (applyEff su (unionsEff [irNow rf, irNow ra, eff]))
 
 
     Match scrut arms -> do
         rs <- inferExpr env ienv scrut
-        (su, ws, out, arms') <- foldM (inferArm env ienv (irType rs)) (irSub rs, irWanted rs, Nothing, []) arms
+        (su, ws, out, arms', armNow) <- foldM (inferArm env ienv (irType rs)) 
+            (irSub rs, irWanted rs, Nothing, [], emptyEff) arms
         denv <- ask
         checkNonExhaustive denv (apply su (irType rs)) arms
         outTy <- maybe fresh (return . apply su) out
         return $ InferRes su (map (applyWanted su) ws) outTy (Match (irExpr rs) arms')
+            (applyEff su (unionEff (irNow rs) armNow))
 
     AnnT ex ann -> do
         denv <- ask
@@ -160,8 +174,8 @@ inferExpr env ienv e = case e of
         let vs = S.toList (ftv ann)
         fs <- mapM (const fresh) vs
         let ann' = apply (M.fromList (zip vs fs)) ann
-        u <- unify (apply (irSub r) (irType r), ann')
-        return (applyInfer u r) { irExpr = AnnT (irExpr r) ann }
+        u <- compatible (apply (irSub r) (irType r)) ann'
+        return (applyInfer u r) { irExpr = AnnT (irExpr r) ann, irType = apply u ann' }
 
     At sp ex -> do
         r <- inferExpr env ienv ex `catchError` (throwError . addSpan sp)
@@ -187,8 +201,12 @@ sccChecker env bs = do
         sms  = [(n, generalize env' [] (apply ts tp)) | (n, tp) <- zip ns tps]
     return (ts, M.fromList sms)
 
+
 programChecker :: Checker m => TEnv -> IFrame -> Program -> m CProgram
-programChecker outerT outerI program = do
+programChecker outT outI p = withInferRollback $ programCheckerCore outT outI p
+
+programCheckerCore :: Checker m => TEnv -> IFrame -> Program -> m CProgram
+programCheckerCore outerT outerI program = do
     let datas = dataDeclsOf program
         ctorEnv = M.unions (map ctorSchemes datas)
         outer = M.union ctorEnv outerT
@@ -231,14 +249,17 @@ programChecker outerT outerI program = do
         case blocked of
             n: _ -> return (i, Left $ Located Nothing $ CalleeNotChecked n)
             [] -> do
-                r <- tryEnv $ do
+                r <- tryInfer $ do
                     rr <- inferExpr env scope e
                     let ws = map (applyWanted (irSub rr)) (irWanted rr)
                     solved <- forM ws $ \w -> resolveWanted env w <&> ((wtdHole w,) . Var)
                     e' <- case fillHoles (M.fromList solved) (irExpr rr) of
                         Left h -> throwError $ Located Nothing $ EscapedImpHole h
                         Right x -> return x
-                    return (apply (irSub rr) (irType rr), e')
+                    validateEffects
+                    get >>= \st -> return 
+                        ( freezeType st (apply (irSub rr) (irType rr)), e'
+                        , resolveEff st (applyEff (irSub rr) (irNow rr)))
                 return (i, r)
 
     let bodyByName = M.fromList
@@ -250,7 +271,7 @@ programChecker outerT outerI program = do
             StmtDef d@(Def n _ _) -> StmtDef (rebuild n d)
             StmtImp d@(Def n _ _) -> StmtDef (rebuild n d)
             other -> other
-        exprByIndex = M.fromList [(i, e) | (i, Right (_, e)) <- exprRes]
+        exprByIndex = M.fromList [(i, e) | (i, Right (_, e, _)) <- exprRes]
         elaborated =
             [ case stmt of
                 StmtExpr e -> StmtExpr (M.findWithDefault e i exprByIndex)
@@ -265,13 +286,15 @@ programChecker outerT outerI program = do
                 StmtImp d -> [declName d]
                 _         -> []
             ] <> M.fromList
-            [(i, TyExpr (fmap fst r)) | (i, r) <- exprRes]
+            [(i, TyExpr (fmap (\(j, _, _) -> j) r)) | (i, r) <- exprRes]
 
     return CProgram
         { cSub     = M.empty
         , cTEnv    = M.union ctorEnv newT
         , cTypes   = typeMap
         , cProgram = elaborated
+        , cEffects = M.fromList [(i, e) | (i, Right (_, _, e)) <- exprRes] 
+            <> M.mapMaybe (\case TyDef _ sch -> Just (sInitEff sch); _ -> Nothing) typeMap
         , cIFrame  = impNames
         }
 
@@ -295,7 +318,7 @@ sccCheckerElab outer ienv declarations = do
             skipWith xs = (ts, done, M.union (M.fromList xs) res, S.union (S.fromList names) failed)
         if not (null brk) then return (skipWith [(n, TyDefSkipped brk) | n <- names])
         else do
-            r <- tryEnv (checkOne declMap done ds)
+            r <- tryInfer (checkOne declMap done ds)
             case r of
                 Right (ts1, bs) -> 
                     return (compose ts1 ts, done <> bs, 
@@ -310,7 +333,10 @@ sccCheckerElab outer ienv declarations = do
         return (sub, [CBinding n sch b (M.findWithDefault False n declMap) | (n, sch, b) <- bindings])
 
 fresh :: MonadState Counter m => m T'
-fresh = get >>= \n -> put (n + 1) >> return (TVar n)
+fresh = TVar <$> freshHole
+
+freshEff :: MonadState Counter m => m Eff
+freshEff = Eff S.empty . S.singleton <$> freshHole
 
 apply :: TSub -> T' -> T'
 apply ts = \case
@@ -321,7 +347,7 @@ apply ts = \case
         Nothing -> TVar i
         Just (TVar j) | j == i -> TVar i
         Just tp -> apply ts tp
-    TFunc argt rest -> TFunc (apply ts argt) (apply ts rest)
+    TFunc argt eff rest -> TFunc (apply ts argt) (applyEff ts eff) (apply ts rest)
     TList tp -> TList (apply ts tp)
     TTuple tps -> TTuple (fmap (apply ts) tps)
     TCon n arg -> TCon n (fmap (apply ts) arg)
@@ -332,9 +358,14 @@ applyPred ts = \case
     NameImplicit n t -> NameImplicit n (apply ts t)
 
 applyS' :: TSub -> S' -> S'
-applyS' ts (Forall vs ps t) =
+applyS' ts sch@(Forall vs ps t) =
     let ts' = foldr M.delete ts vs
-    in Forall vs (map (applyPred ts') ps) (apply ts' t)
+    in (
+        (Forall vs (map (applyPred ts') ps) (apply ts' t)) 
+            { sInitEff = applyEff ts' (sInitEff sch)
+            , sEffCs = [(applyEff ts' a, applyEff ts' b) | (a,b) <- sEffCs sch]
+            }
+        ) { sDictCall = applyEff ts' (sDictCall sch) }
 
 applyTEnv :: TSub -> TEnv -> TEnv
 applyTEnv = M.map . applyS'
@@ -347,10 +378,18 @@ applyInfer ts r = r
     { irSub    = compose ts (irSub r)
     , irWanted = map (applyWanted ts) (irWanted r)
     , irType   = apply ts (irType r)
+    , irNow    = applyEff ts (irNow r)
     }
 
+applyEff :: TSub -> Eff -> Eff
+applyEff ts (Eff labs vars) = Eff labs (S.fromList 
+    [case M.lookup i ts of Just (TVar j) -> j; _ -> i | i <- S.toList vars])
+
+unionsEff :: [Eff] -> Eff
+unionsEff = foldr unionEff emptyEff
+
 pureInfer :: E' -> T' -> InferRes
-pureInfer e t = InferRes M.empty [] t e
+pureInfer e t = InferRes M.empty [] t e emptyEff
 
 underSpan :: Span -> Wanted -> Wanted
 underSpan sp w = case wtdSpan w of
@@ -361,12 +400,15 @@ mapInferExpr :: (E' -> E') -> InferRes -> InferRes
 mapInferExpr f r = r { irExpr = f (irExpr r) }
 
 freshHole :: MonadState Counter m => m HoleId
-freshHole = get >>= \n -> put (n + 1) >> return n
+freshHole = do
+    st <- get
+    put st {nextId = nextId st + 1}
+    return (nextId st)
 
 compose :: TSub -> TSub -> TSub
 compose s2 s1 = M.union (M.map (apply s2) s1) s2
 
-unify :: MonadError (Located TypeError) m => (T', T') -> m TSub
+unify :: (MonadState Counter m, MonadError (Located TypeError) m) => (T', T') -> m TSub
 unify = \case
     (TInt, TInt) -> return M.empty
     (TBool, TBool) -> return M.empty
@@ -381,11 +423,28 @@ unify = \case
             foldM step M.empty (zip t1 t2)
     (TVar i, tp)  -> bindVar i tp
     (tp, TVar i)  -> bindVar i tp
-    (TFunc a1 r1, TFunc a2 r2) -> do
+    (TFunc a1 e1 r1, TFunc a2 e2 r2) -> do
+        unifyEff e1 e2
         ts  <- unify (a1, a2)
         ts' <- unify (apply ts r1, apply ts r2)
         return $ compose ts ts'
     (t1, t2) -> throwError (Located Nothing $ TypeMismatch t1 t2)
+
+unifyEff :: (MonadState Counter m, MonadError (Located TypeError) m) => Eff -> Eff -> m ()
+unifyEff a0 b0 = do
+    st <- get
+    let a = resolveEff st a0
+        b = resolveEff st b0
+        variable (Eff ls vs) = if S.null ls && S.size vs == 1 then Just (S.findMin vs) else Nothing
+        bind v e = modify (\c -> c { effectDefs = M.insert v (e { effVars = S.delete v (effVars e) }) (effectDefs c) })
+    if a == b then return ()
+    else case (variable a, variable b) of
+        (Just v, Just w) -> if v < w then bind w a else bind v b
+        (Just v, _) -> bind v b
+        (_, Just w) -> bind w a
+        _ -> if S.null (effVars a) && S.null (effVars b) then
+            throwError $ Located Nothing $ EffMismatch a b
+            else modify (\c -> c { effectRels = (a, b): effectRels c } )
 
 bindVar :: MonadError (Located TypeError) m => TypeVar -> T' -> m TSub
 bindVar i (TVar j)
@@ -393,10 +452,14 @@ bindVar i (TVar j)
 bindVar i t = if i `occursIn` t then throwError $ Located Nothing OccurCheck else return (M.singleton i t)
 
 instantiate :: MonadState Counter m => S' -> m ([Pred], T')
-instantiate (Forall vs ps tp) = do
+instantiate sch = instantiateFull sch >>= \(ps, ty, _) -> return (ps, ty)
+
+instantiateFull :: MonadState Counter m => S' -> m ([Pred], T', Eff)
+instantiateFull sch@(Forall vs ps tp) = do
     ftvs <- mapM (const fresh) (S.toList vs)
     let su = M.fromList $ zip (S.toList vs) ftvs
-    return (map (applyPred su) ps, apply su tp)
+    modify $ \c -> c { effectRels = [(applyEff su a, applyEff su b) | (a, b) <- sEffCs sch] <> effectRels c }
+    return (map (applyPred su) ps, apply su tp, applyEff su (sDictCall sch))
    
 occursIn :: TypeVar -> T' -> Bool
 occursIn i = \case
@@ -406,7 +469,7 @@ occursIn i = \case
     TVar j -> i == j
     TList tp -> i `occursIn` tp
     TTuple tps -> any (occursIn i) tps
-    TFunc at rt -> i `occursIn` at || i `occursIn` rt
+    TFunc at _ rt -> i `occursIn` at || i `occursIn` rt
     TCon _ args -> any (occursIn i) args
 
 generalize :: TEnv -> [Pred] -> T' -> S'
@@ -425,7 +488,7 @@ ftv = \case
     TVar i -> S.singleton i
     TList tp -> ftv tp
     TTuple tps -> S.unions (fmap ftv tps)
-    TFunc arg res -> S.union (ftv arg) (ftv res)
+    TFunc arg e res -> S.unions [ftv arg, effVars e, ftv res]
     TCon _ args -> S.unions (fmap ftv args)
 
 ftvPred :: Pred -> Set TypeVar
@@ -435,7 +498,11 @@ ftvPreds :: [Pred] -> Set TypeVar
 ftvPreds = S.unions . map ftvPred
 
 ftvS' :: S' -> Set TypeVar
-ftvS' (Forall vs ps t) =(ftv t `S.union` ftvPreds ps) `S.difference` vs
+ftvS' sch@(Forall vs ps t) = S.unions 
+    [ ftv t, ftvPreds ps
+    , effVars (sDictCall sch)
+    , S.unions [effVars a `S.union` effVars b | (a,b) <- sEffCs sch]
+    ] `S.difference` vs
 
 ftvTEnv :: TEnv -> Set TypeVar
 ftvTEnv = S.unions . map ftvS' . M.elems
@@ -457,7 +524,7 @@ checkTypeCons denv = \case
     TVar _ -> return ()
     TList t -> checkTypeCons denv t
     TTuple ts -> mapM_ (checkTypeCons denv) ts
-    TFunc a b -> checkTypeCons denv a >> checkTypeCons denv b
+    TFunc a _ b -> checkTypeCons denv a >> checkTypeCons denv b
     TCon n as -> do
         case M.lookup n (denvDatas denv) of
             Nothing -> throwError $ Located Nothing $ UnknownTypeCtor n
@@ -555,7 +622,7 @@ exhaustive denv t ps = any irrefutable ps || case t of
     TInt -> True
     TString -> True
     TVar _ -> True
-    TFunc _ _ -> True
+    TFunc {} -> True
     TList te -> 
         let consRows = ([[h, tt] | PCons h tt <- ps])
         in  any (\case PNil -> True; _ -> False) ps 
@@ -606,7 +673,7 @@ ctorInfo d args = let tvs = S.fromList [0..length (dParams d) - 1] in CtorInfo
 
 ctorSchemes :: DataDecl -> TEnv
 ctorSchemes d = M.fromList 
-    [ (c, Forall (ciTvs ci) [] (foldr TFunc (ciRes ci) (ciArgs ci)))
+    [ (c, Forall (ciTvs ci) [] (foldr pureFunc (ciRes ci) (ciArgs ci)))
     | (c, args) <- dCtors d, let ci = ctorInfo d args]
 
 
@@ -659,25 +726,26 @@ swallowedArmsNote =
 
 inferLet :: Checker m => TEnv -> IEnv -> Text -> E' -> E' -> m InferRes
 inferLet env ienv n rhs body = do
-    (su, sch, rhsIR) <- case stripAt rhs of
+    (su, sch, rhsIR, initNow) <- case stripAt rhs of
         Lambda {} -> do
             (sub, bds) <- inferBindingGroupWithNotes False env ienv [Def n [] rhs]
             case bds of
-                [(_, ty, e)] -> return (sub, ty, e)
+                [(_, ty, e)] -> return (sub, ty, e, emptyEff)
                 _ -> throwError $ Located Nothing DictConstrainDidNotConverge
         _ -> do
             rr <- inferExpr env ienv rhs
             let env1 = applyTEnv (irSub rr) env
-            (ty, e) <- closeBinding env1 (irType rr) (irWanted rr) (irExpr rr)
-            return (irSub rr, ty, e)
+            (ty, e) <- closeBinding env1 (irType rr) (irWanted rr) (irExpr rr) (irNow rr)
+            return (irSub rr, ty, e, if null (sPreds ty) then irNow rr else emptyEff)
     rb <- inferExpr (M.insert n sch (applyTEnv su env)) ienv body
     return $ rb
-        { irSub    = compose (irSub rb) su
+        { irSub  = compose (irSub rb) su
         , irExpr = Let n rhsIR (irExpr rb)
+        , irNow  = unionEff initNow (irNow rb)
         }
 
-inferArm :: Checker m => TEnv -> IEnv -> T' -> (TSub, [Wanted], Maybe T', [(P', E')]) -> (P', E') -> m (TSub, [Wanted], Maybe T', [(P', E')])
-inferArm env ienv scrutTy (su, ws, oldout, done) (pat, body) = do
+inferArm :: Checker m => TEnv -> IEnv -> T' -> (TSub, [Wanted], Maybe T', [(P', E')], Eff) -> (P', E') -> m (TSub, [Wanted], Maybe T', [(P', E')], Eff)
+inferArm env ienv scrutTy (su, ws, oldout, done, now) (pat, body) = do
     checkDupPatVar pat
     (ps, patT, patE) <- patType pat
     let su0  = compose ps su
@@ -692,9 +760,9 @@ inferArm env ienv scrutTy (su, ws, oldout, done) (pat, body) = do
     (su3, out) <- case oldout of
         Nothing -> return (su2, irType rb)
         Just t  -> do
-            u <- unify (apply su2 t, apply su2 (irType rb))
-            return (compose u su2, apply u (irType rb))
-    return (su3, ws <> irWanted rb, Just out, done <> [(pat, irExpr rb)])
+            (u, joined) <- joinTypes (apply su2 t) (apply su2 (irType rb))
+            return (compose u su2, apply u joined)
+    return (su3, ws <> irWanted rb, Just out, done <> [(pat, irExpr rb)], unionEff now (irNow rb))
 
 inferDictCall :: Checker m => TEnv -> [IFrame] -> E' -> [E'] -> [DictArg] -> m InferRes
 inferDictCall env ienv head0 ordinary dicts = do
@@ -722,7 +790,7 @@ inferDictCall env ienv head0 ordinary dicts = do
     headT <- freshInternal "call"
     let headIR = foldl App (Var headT) [ImpHole (dsHole s) | s <- slots]
     appRes <- foldM inferArg (rf { irExpr = headIR }) (prefix <> ordinary)
-    (su, rhsWs, sols, bds) <- foldM inferDict (irSub appRes, [], M.empty, []) chosen
+    (su, rhsWs, sols, bds, dictNow) <- foldM inferDict (irSub appRes, [], M.empty, [], emptyEff) chosen
     let exHoles = S.fromList (map (dsHole . snd) chosen)
         remaining = filter (not . (`S.member` exHoles) . wtdHole) (irWanted appRes)
         body = replaceSolvedHoles sols (irExpr appRes)
@@ -732,6 +800,7 @@ inferDictCall env ienv head0 ordinary dicts = do
         , irWanted = map (applyWanted su) (remaining <> rhsWs)
         , irType   = apply su (irType appRes)
         , irExpr   = lowered
+        , irNow    = applyEff su (unionEff (irNow appRes) dictNow)
         }
     where
         dictSpan n = case [daSpan d | d <- dicts, daName d == n] of
@@ -741,8 +810,9 @@ inferDictCall env ienv head0 ordinary dicts = do
         inferArg acc arg = do
             ra <- inferExpr (applyTEnv (irSub acc) env) ienv arg
             out <- fresh
+            eff <- freshEff
             let su0 = compose (irSub ra) (irSub acc)
-            u <- unify (apply su0 (irType acc), TFunc (apply su0 (irType ra)) out)
+            u <- applyFunction (apply su0 (irType acc)) (apply su0 (irType ra)) eff out
                 `catchError` calleeNote (applyTEnv su0 env) head0
             let su = compose u su0
             return $ InferRes
@@ -750,9 +820,10 @@ inferDictCall env ienv head0 ordinary dicts = do
                 , irWanted = map (applyWanted su) (irWanted acc <> irWanted ra)
                 , irType   = apply su out
                 , irExpr   = App (irExpr acc) (irExpr ra)
+                , irNow    = applyEff su (unionsEff [irNow acc, irNow ra, eff])
                 }
         
-        inferDict (su, ws, solved, bs) (d, slot) = do
+        inferDict (su, ws, solved, bs, now) (d, slot) = do
             rd <- inferExpr (applyTEnv su env) ienv (daExpr d)
             let su0 = compose (irSub rd) su
                 actual = apply su0 (irType rd)
@@ -761,7 +832,7 @@ inferDictCall env ienv head0 ordinary dicts = do
                 throwError $ Located (Just (daSpan d)) (DictArgMismatch (daName d) actual expected reason)
             tmp <- freshInternal "dict"
             return (compose u su0, ws <> irWanted rd, 
-                M.insert (dsHole slot) (Var tmp) solved, bs <> [(tmp, irExpr rd)])
+                M.insert (dsHole slot) (Var tmp) solved, bs <> [(tmp, irExpr rd)], unionEff  now (irNow rd))
 
 inferBindingGroup :: Checker m => TEnv -> [IFrame] -> [Decl] -> m (TSub, [(Text, S', E')])
 inferBindingGroup = inferBindingGroupWithNotes True
@@ -797,7 +868,7 @@ inferBindingGroupWithNotes annoate outer ienv ds = do
                     (finalSu, finalRev) <- foldM (inferOne strictEnv) (su, []) (zip ppd types)
                     checked <- forM (reverse finalRev) $ \(n, r0) -> do
                         let r = applyInfer finalSu r0
-                        (sch, body) <- note n $ closeBinding (applyTEnv finalSu outer) (irType r) (irWanted r) (irExpr r)
+                        (sch, body) <- note n $ closeBinding (applyTEnv finalSu outer) (irType r) (irWanted r) (irExpr r) (irNow r)
                         return (n, sch, body)
                     return (finalSu, checked)
     
@@ -950,11 +1021,21 @@ fillHoles solved = go
             AnnT e t -> AnnT <$> go e <*> pure t
             At sp e -> At sp <$> go e
 
-closeBinding :: Checker m => TEnv -> T' -> [Wanted] -> E' -> m (S', E')
-closeBinding outer ty wanted0 body = do
-    let genVars =
-            (ftv ty `S.union` S.unions (map (ftv . wtdType) wanted0))
+closeBinding :: Checker m => TEnv -> T' -> [Wanted] -> E' -> Eff -> m (S', E')
+closeBinding outer ty0 wanted0 body now = do
+    initial <- get
+    let provisional = freezeType initial ty0
+        anchored = inputEffectVars provisional `S.union` ftvTEnv outer
+        local = typeEffectVars provisional `S.union` effVars (resolveEff initial now)
+    forM_ (S.toList (local `S.difference` anchored)) $ \v -> 
+        modify (\c -> c { effectDefs = M.insert v emptyEff (effectDefs c) })
+    validateEffects
+    st <- get
+    let ty = freezeType st ty0
+        callNow = resolveEff st now
+        seedVars = S.unions [ftv ty, effVars callNow, S.unions (map (ftv . wtdType) wanted0)]
             `S.difference` ftvTEnv outer
+        genVars = relationClosure st seedVars `S.difference` ftvTEnv outer
 
         concrete = not . deferWanted
         propagates w = ftv (wtdType w) `S.isSubsetOf` genVars
@@ -995,7 +1076,11 @@ closeBinding outer ty wanted0 body = do
     let bodyB = foldr (\(n, c) b -> App (Lambda n b) (Var c)) body' captured
         aliasOne (_, pri, aliases, _) b = foldr (\x acc -> Let x (Var pri) acc) b aliases
         body'' = foldr (Lambda . (\(_, n, _, _) -> n)) (foldr aliasOne bodyB hidden) hidden
-        scheme = Forall genVars predicates ty
+        scheme = (Forall genVars predicates ty) 
+            { sDictCall = if null hidden then emptyEff else callNow
+            , sEffCs    = relevantRelations st genVars
+            , sInitEff  = if null hidden then callNow else emptyEff
+            }
     return (scheme, body'')
 
 groupWanted :: [Wanted] -> [(Pred, [Wanted])]
@@ -1017,8 +1102,9 @@ inferDeclBodyPrepared env ienv params body = go env params
                 a <- fresh
                 r <- go (M.insert n (Forall S.empty [] a) current) rest
                 return r
-                    { irType = TFunc (apply (irSub r) a) (irType r)
+                    { irType = TFunc (apply (irSub r) a) (irNow r) (irType r)
                     , irExpr = Lambda n (irExpr r)
+                    , irNow  = emptyEff
                     }
             (ImplicitParam n annotation : rest) -> do
                 denv <- ask
@@ -1044,3 +1130,117 @@ bodySpan = \case
 
 tick :: Text -> Text
 tick n = "`" <> n <> "`"
+
+resolveEff :: Counter -> Eff -> Eff
+resolveEff st initial = canonical (go S.empty initial)
+    where
+        canonical e = 
+            let e1 = foldl rewrite e (effectRels st)
+            in if e1 == e then e else canonical e1
+        rewrite e (a, b) =
+            let (l, s) = if rank a > rank b then (a, b) else (b, a)
+            in  if l /= emptyEff && effLabs l `S.isSubsetOf` effLabs e && effVars l `S.isSubsetOf` effVars e
+                then unionEff s (Eff (effLabs e `S.difference` effLabs l) (effVars e `S.difference` effVars l))
+                else e
+        rank e = (S.size (effLabs e) + S.size (effVars e), e)
+        go seen (Eff ls vs) = unionEff (Eff ls S.empty) (unionsEff (map (one seen) (S.toList vs)))
+        one seen v
+            | S.member v seen = emptyEff
+            | otherwise = case M.lookup v (effectDefs st) of
+                Nothing -> Eff S.empty (S.singleton v)
+                Just e -> go (S.insert v seen) e
+
+freezeType :: Counter -> T' -> T'
+freezeType st = go
+    where
+        go = \case
+            TFunc a e b -> TFunc (go a) (resolveEff st e) (go b)
+            TList t -> TList $ go t
+            TTuple ts -> TTuple $ map go ts
+            TCon n ts -> TCon n $ map go ts
+            t -> t
+
+checkEff :: (MonadState Counter m, MonadError (Located TypeError) m) => Eff -> Eff -> m ()
+checkEff a0 b0 = do
+    st <- get
+    let a = resolveEff st a0
+        b = resolveEff st b0
+    if S.null (effVars b) then do
+        if effLabs a `S.isSubsetOf` effLabs b then return () 
+        else throwError $ Located Nothing $ EffMismatch a b
+        forM_ (S.toList (effVars a)) $ \v -> modify (\c -> c { effectDefs = M.insert v b (effectDefs c) })
+    else unifyEff a b
+
+compatible :: (MonadState Counter m, MonadError (Located TypeError) m) => T' -> T' -> m TSub
+compatible act expe = case (act, expe) of
+    (TFunc aa ae ar, TFunc ea ee er) -> do
+        u <- compatible ea aa
+        checkEff ae ee
+        v <- compatible (apply u ar) (apply u er)
+        return (compose v u)
+    _ -> unify (act, expe)
+
+applyFunction :: (MonadState Counter m, MonadError (Located TypeError) m) => T' -> T' -> Eff -> T' -> m TSub
+applyFunction f a e out = case f of
+    TFunc expected latent res -> do
+        u <- compatible a expected
+        unifyEff latent e
+        v <- unify (apply u res, apply u out)
+        return (compose v u)
+    TVar _ -> unify (f, TFunc a e out)
+    _ -> unify (f, pureFunc a out)
+
+joinTypes :: (MonadState Counter m, MonadError (Located TypeError) m) => T' -> T' -> m (TSub, T')
+joinTypes a b = case (a, b) of
+    (TFunc aa ae ar, TFunc ba be br) -> do
+        u <- unify (aa, ba)
+        (v, r) <- joinTypes (apply u ar) (apply u br)
+        return (compose v u, TFunc (apply v (apply u aa)) (unionEff ae be) r)
+    _ -> unify (a, b) >>= \u -> return (u, apply u a)
+
+relevantRelations :: Counter -> Set Int -> [(Eff, Eff)]
+relevantRelations st vs = [(a, b) | (a, b) <- effectRels st, not (S.null (S.intersection vs (S.union (effVars a) (effVars b))))]
+
+typeEffectVars :: T' -> Set Int
+typeEffectVars = \case
+    TFunc a e b -> S.unions [typeEffectVars a, effVars e, typeEffectVars b]
+    TList t -> typeEffectVars t
+    TTuple ts -> S.unions $ map typeEffectVars ts
+    TCon _ ts -> S.unions $ map typeEffectVars ts
+    _ -> S.empty
+
+inputEffectVars :: T' -> Set Int
+inputEffectVars = \case
+    TFunc a _ b -> typeEffectVars a `S.union` typeEffectVars b
+    TList t -> inputEffectVars t
+    TTuple ts -> S.unions $ map inputEffectVars ts
+    TCon _ ts -> S.unions $ map inputEffectVars ts
+    _ -> S.empty
+
+relationClosure :: Counter -> Set Int -> Set Int
+relationClosure st start =
+    let next = S.unions 
+            ( start: [ effVars a `S.union` effVars b 
+            | (a, b) <- effectRels st, not (S.null (S.intersection start (effVars a `S.union` effVars b)))
+            ])
+    in if next == start then start else relationClosure st next
+
+validateEffects :: (MonadState Counter m, MonadError (Located TypeError) m) => m ()
+validateEffects = do
+    st <- get
+    forM_ (effectRels st) $ \(a0, b0) -> do
+        let a = resolveEff st a0
+            b = resolveEff st b0
+        when (S.null (effVars a) && S.null (effVars b) && a /= b) $
+            throwError $ Located Nothing $ EffMismatch a b
+
+withInferRollback :: (MonadState Counter m, MonadError (Located TypeError) m) => m a -> m a
+withInferRollback act = do
+    before <- get
+    act `catchError` \err -> do
+        after <- get
+        put before { nextId = nextId after }
+        throwError err
+
+tryInfer :: (MonadState Counter m, MonadError (Located TypeError) m) => m a -> m (Either (Located TypeError) a)
+tryInfer act = (Right <$> withInferRollback act) `catchError` (return . Left)
