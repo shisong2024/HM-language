@@ -1,240 +1,212 @@
 -- -- predefined types
 
 data Unit = Unit;
+
 data Maybe a = None | Just a;
 data Either a b = Left a | Right b;
+
 data Ordering = LT | EQ | GT;
 data Ord a = Ord { cmp :: a -> a -> Ordering };
 
+data Show a = Show { show' :: a -> String };
+
+def show {s :: Show a} = s.show';
+
+-- -- functions of Unit
+
+implicit def ordUnit = Ord { cmp = lambda x y -> EQ } :: Ord Unit;
+implicit def showUnit = Show { show' = lambda x -> "Unit" } :: Show Unit;
 
 -- -- functions of numbers
 
--- mod :: Int -> Int -> Int
 def mod q m = q - (q / m) * m;
-
--- even :: Int -> Bool
-def even i = mod i 2 == 0;
-
--- odd :: Int -> Bool
-def odd i = mod i 2 != 0;
-
--- abs :: Int -> Int
-def abs n = if n < 0 then -n else n;
-
--- signum :: Int -> Int
-def signum i = if i < 0 then -1 else if i > 0 then 1 else 0;
-
--- divmod :: Int -> Int -> (Int, Int)
 def divmod m n = (m / n, mod m n);
 
--- gcd :: Int -> Int -> Int
+def even i = mod i 2 == 0;
+def odd i = mod i 2 != 0;
+
+def abs n = if n < 0 then -n else n;
+def signum i = if i < 0 then -1 else if i > 0 then 1 else 0;
+
 def gcd m n = if n == 0 then abs m else gcd n (mod m n);
 
+def _ordFromInt n = match n with -1 -> LT | 0 -> EQ | _ -> GT;
+def _ord2Int o = match o with LT -> -1 | EQ -> 0 | GT -> 1;
+
+implicit def ordInt = Ord { cmp = lambda x y -> _ordFromInt (intCompare x y) } :: Ord Int;
+
+def _showInt n = let sign = intCompare n 0 in
+    if sign == -1 then "-" ++ _showInt (0 - n) 
+    else let res = intCompare n 10 in if res == -1 then fromCode (n + 48) 
+    else _showInt (n / 10) ++ fromCode (n - (n / 10) * 10 + 48)
+    ;
+
+implicit def showInt = Show { show' = _showInt } :: Show Int;
 
 -- -- functions of bool
 
--- and :: Bool -> Bool -> Bool
 def and x y = match (x, y) with (true, true) -> true | _ -> false;
-
--- or :: Bool -> Bool -> Bool
 def or x y = match (x, y) with (false, false) -> false | _ -> true;
-
--- not :: Bool -> Bool
 def not x = match x with true -> false | false -> true;
 
+implicit def ordBool = Ord { cmp = lambda a b -> match (a, b) with (true, false) -> GT | (false, true) -> LT | _ -> EQ } :: Ord Bool;
+implicit def showBool = Show { show' = lambda x -> if x then "true" else "false" } :: Show Bool;
 
 -- -- functions of list
 
--- head :: [a] -> Maybe a
 def head l = match l with [] -> None | x: xs -> Just x;
-
--- tail :: [a] -> [a]
 def tail l = match l with [] -> [] | x: xs -> xs;
-
--- null :: [a] -> Bool
-def null l = match l with [] -> true | _ -> false;
-
--- map :: (a -> b) -> [a] -> [b]
-def map f l = match l with [] -> [] | x: xs -> f x: map f xs;
-
--- filter :: (a -> Bool) -> [a] -> [a]
-def filter f l = match l with [] -> [] | x: xs -> if f x then x: filter f xs else filter f xs;
-
--- foldr :: (a -> b -> b) -> b -> [a] -> b
-def foldr f z l = match l with [] -> z | x: xs -> f x (foldr f z xs);
-
--- foldl :: (b -> a -> b) -> b -> [a] -> b
-def foldl f z l = match l with [] -> z | x: xs -> foldl f (f z x) xs;
-
--- elem :: a -> [a] -> Bool
-def elem e l = match l with [] -> false | x: xs -> or (e == x) (elem e xs);
-
--- any :: [Bool] -> Bool
-def any l = match l with [] -> false | x: xs -> if x then true else any xs;
-
--- all :: [Bool] -> Bool
-def all l = match l with [] -> true | x: xs -> if not x then false else all xs;
-
--- has :: (a -> Bool) -> [a] -> Bool
-def has f l = any (map f l);
-
--- index :: Int -> [a] -> Maybe a
-def index n l = if n < 0 then None else match l with [] -> None | x: xs -> if n == 0 then Just x else index (n - 1) xs;
-
--- find :: a -> [a] -> Int
-def find = let _find = lambda n a l -> match l with [] -> -1 | x: xs -> if x == a then n else _find (n + 1) a xs in _find 0;
-
--- findMaybe :: a -> [a] -> Maybe Int
-def findMaybe = let _find = lambda n a l -> match l with [] -> None | x: xs -> if x == a then Just n else _find (n + 1) a xs in _find 0;
-
--- append :: [a] -> [a] -> [a]
-def append fl bl = match fl with [] -> bl | x: xs -> x: append xs bl;
-
--- snoc :: a -> [a] -> [a]
-def snoc a l = match l with [] -> [a] | x: xs -> x: snoc a xs;
-
--- zip :: [a] -> [b] -> [(a, b)]
-def zip f s = match (f, s) with ([], _) -> [] | (_, []) -> [] | (x: xs, y: ys) -> (x, y): zip xs ys;
-
--- zipWith :: (a -> b -> c) -> ([a] -> [b] -> [c])
-def zipWith f fl bl = match (fl, bl) with ([], _) -> [] | (_, []) -> [] | (x: xs, y: ys) -> f x y: zipWith f xs ys;
-
--- unzip :: [(a, b)] -> ([a], [b])
-def unzip l = match l with [] -> ([], []) | (x, y): rs -> let res = unzip rs in match res with (f, s) -> (x: f, y: s);
-
--- range' :: Int -> Int -> [Int]
-def range' a b = if a >= b then [] else a: range' (a + 1) b;
-
--- range :: Int -> [Int]
-def range = range' 0;
-
--- length :: [a] -> Int
-def length l = match l with [] -> 0 | x: xs -> 1 + length xs;
-
--- concat :: [[a]] -> [a]
-def concat l = foldr append [] l;
-
--- concatMap :: (a -> [b]) -> [a] -> [b]
-def concatMap f l = foldr (lambda x acc -> append (f x) acc) [] l;
-
--- take :: Int -> [a] -> [a]
-def take n l = if n <= 0 then [] else match l with [] -> [] | x: xs -> x: take (n - 1) xs;
-
--- drop :: Int -> [a] -> [a]
-def drop n l = if n <= 0 then l else match l with [] -> [] | x: xs -> drop (n - 1) xs;
-
--- takeWhile :: (a -> Bool) -> [a] -> [a]
-def takeWhile f l = match l with [] -> [] | x: xs -> if f x then [] else x: takeWhile f xs;
-
--- dropWhile :: (a -> Bool) -> [a] -> [a]
-def dropWhile f l = match l with [] -> [] | x: xs -> if f x then l else dropWhile f xs;
-
--- replicate :: Int -> a -> [a]
-def replicate n x = if n <= 0 then [] else x: replicate (n - 1) x;
-
--- last :: [a] -> Maybe a
 def last l = match l with [] -> None | x: [] -> Just x | x: xs -> last xs;
 
--- nub :: [a] -> [a]
-def nub l = match l with [] -> [] | x: xs -> x: nub (filter (lambda y -> y != x) xs);
+def null l = match l with [] -> true | _ -> false;
 
--- sort :: [a] -> [a]
-def sort l = match l with [] -> [] | x: xs -> concat [sort (filter (lambda y -> y <= x) xs), [x], sort (filter (lambda y -> y > x) xs)];
+def map f l = match l with [] -> [] | x: xs -> f x: map f xs;
+def filter f l = match l with [] -> [] | x: xs -> if f x then x: filter f xs else filter f xs;
+def foldr f z l = match l with [] -> z | x: xs -> f x (foldr f z xs);
+def foldl f z l = match l with [] -> z | x: xs -> foldl f (f z x) xs;
+def sum l = foldr (+) 0 l;
 
--- sum :: [Int] -> Int
-def sum l = foldr (lambda a b -> a + b) 0 l;
+def elem e l = match l with [] -> false | x: xs -> or (e == x) (elem e xs);
 
+def any l = match l with [] -> false | x: xs -> if x then true else any xs;
+def all l = match l with [] -> true | x: xs -> if not x then false else all xs;
+
+def has f l = any (map f l);
+def index n l = if n < 0 then None else match l with [] -> None | x: xs -> if n == 0 then Just x else index (n - 1) xs;
+def findMaybe = let _find = lambda n a l -> match l with [] -> None | x: xs -> if x == a then Just n else _find (n + 1) a xs in _find 0;
+
+def append fl bl = match fl with [] -> bl | x: xs -> x: append xs bl;
+def snoc a l = match l with [] -> [a] | x: xs -> x: snoc a xs;
+
+def zip f s = match (f, s) with ([], _) -> [] | (_, []) -> [] | (x: xs, y: ys) -> (x, y): zip xs ys;
+def zipWith f fl bl = match (fl, bl) with ([], _) -> [] | (_, []) -> [] | (x: xs, y: ys) -> f x y: zipWith f xs ys;
+def unzip l = match l with [] -> ([], []) | (x, y): rs -> let res = unzip rs in match res with (f, s) -> (x: f, y: s);
+
+def range' a b = if a >= b then [] else a: range' (a + 1) b;
+def range = range' 0;
+
+def length l = match l with [] -> 0 | x: xs -> 1 + length xs;
+
+def concat l = foldr append [] l;
+def concatMap f l = foldr (lambda x acc -> append (f x) acc) [] l;
+
+def take n l = if n <= 0 then [] else match l with [] -> [] | x: xs -> x: take (n - 1) xs;
+def drop n l = if n <= 0 then l else match l with [] -> [] | x: xs -> drop (n - 1) xs;
+def takeWhile f l = match l with [] -> [] | x: xs -> if f x then [] else x: takeWhile f xs;
+def dropWhile f l = match l with [] -> [] | x: xs -> if f x then l else dropWhile f xs;
+
+def replicate n x = if n <= 0 then [] else x: replicate (n - 1) x;
+
+def nub l = match l with [] -> [] | x: xs -> x: nub (filter (!= x) xs);
+
+def sort l = match l with 
+      [] -> [] 
+    | x: xs -> concat 
+        [ sort (filter (<= x) xs)
+        , [x]
+        , sort (filter (> x) xs)
+        ]
+    ;
+
+def _ordList {o :: Ord a} f b = match (f, b) with
+      ([], []) -> EQ
+    | (_, []) -> GT
+    | ([], _) -> LT
+    | (x: xs, y: ys) -> let res = o.cmp x y in
+        match res with
+              EQ -> _ordList f b
+            | _ -> res
+    ;
+
+implicit def ordList = Ord { cmp = _ordList } :: Ord [a];
+
+def _showList l = 
+    let step = lambda x sl -> (match uncons sl with
+          None -> show x
+        | _    -> show x ++ "," ++ sl)
+    in "[" ++ foldr step "" l ++ "]"
+    ;
+
+implicit def showList = Show { show' = _showList } :: Show [a];
 
 -- -- combinators
 
--- id :: a -> a
 def id a = a;
-
--- flip :: (a -> b -> c) -> b -> a -> c
 def flip f y x = f x y;
-
--- compose :: (b -> c) -> (a -> b) -> a -> c
 def compose g f x = g (f x);
-
--- curry :: ((a, b) -> c) -> a -> b -> c
 def curry f x y = f (x, y);
-
--- uncurry :: (a -> b -> c) -> (a, b) -> c
 def uncurry f tp = match tp with (x, y) -> f x y;
+
+def (=>) x f = f x;
+infixl 6 =>;
 
 
 -- -- functions of tuples
 
--- fst :: (a, b) -> a
 def fst t = match t with (a, b) -> a;
-
--- snd :: (a, b) -> b
 def snd t = match t with (a, b) -> b;
 
+def _showTuple2 t = match t with
+    (x, y) -> "(" ++ show x ++ "," ++ show y ++ ")"
+    ;
+
+implicit def showTuple2 = Show { show' = _showTuple2 } :: Show (a, b);
 
 -- -- functions of datas
 
--- isNone :: Maybe a -> Bool
 def isNone ma = match ma with None -> true | Just _ -> false;
-
--- isJust :: Maybe a -> Bool
 def isJust ma = match ma with Just _ -> true | None -> false;
 
--- fromMaybe :: Maybe a -> a -> a
 def fromMaybe ma d = match ma with None -> d | Just a -> a;
-
--- fmapMaybe :: (a -> b) -> Maybe a -> Maybe b
 def fmapMaybe f ma = match ma with None -> None | Just a -> Just (f a);
-
--- mapMaybe :: (a -> Maybe b) -> [a] -> [b]
 def mapMaybe f l = match l with [] -> [] | x: xs -> match f x with None -> mapMaybe f xs | Just y -> y: mapMaybe f xs;
 
--- isLeft :: Either a b -> Bool
+def _ordMaybe {o :: Ord a} mx my = match (mx, my) with
+      (None, None) -> EQ
+    | (_, None) -> GT
+    | (None, _) -> LT
+    | (Just x, Just y) -> o.cmp x y
+    ;
+
+implicit def ordMaybe = Ord { cmp = _ordMaybe } :: Ord (Maybe a);
+
+def _showMaybe mx = match mx with
+      None -> "None"
+    | Just x -> "Just " ++ show x
+    ;
+
+implicit def showMaybe = Show { show' = _showMaybe } :: Show (Maybe a);
+
 def isLeft e = match e with Left _ -> true | Right _ -> false;
-
--- isRight :: Either a b -> Bool
 def isRight e = match e with Left _ -> false | Right _ -> true;
-
--- either :: (a -> c) -> (b -> d) -> Either a b -> Either c d
 def either f g e = match e with Left x -> f x | Right y -> g y;
+
+def _ordEither {ol :: Ord a} {or :: Ord b} ea eb = match (ea, eb) with
+      (Left _, Right _) -> LT
+    | (Right _, Left _) -> GT
+    | (Left a, Left b) -> ol.cmp a b
+    | (Right a, Right b) -> or.cmp a b
+    ;
+
+implicit def ordEither = Ord { cmp = _ordEither } :: Ord (Either a b);
+
+def _showEither ex = match ex with
+      Left x -> "Left " ++ show x
+    | Right y -> "Right " ++ show y
+    ;
+
+implicit def showEither = Show { show' = _showEither } :: Show (Either a b);
 
 
 -- -- functions of Ordering
 
--- _ordFromInt :: Int -> Ordering
-def _ordFromInt n = match n with -1 -> LT | 0 -> EQ | _ -> GT;
-
--- _ord2Int :: Ordering -> Int
-def _ord2Int o = match o with LT -> -1 | EQ -> 0 | GT -> 1;
-
--- ordInt :: Ord Int
-implicit def ordInt = Ord { cmp = lambda x y -> _ordFromInt (intCompare x y) } :: Ord Int;
-
--- ordOrdering :: Ord Ordering
 implicit def ordOrdering = Ord { cmp = lambda x y -> _ordFromInt (intCompare (_ord2Int x) (_ord2Int y)) } :: Ord Ordering;
+implicit def showOrdering = Show { show' = lambda x -> match x with LT -> "LT" | EQ -> "EQ" | GT -> "GT" } :: Show Ordering;
 
--- cmpString :: String -> String -> Ordering
-def cmpString a b = match (uncons a, uncons b) with
-      (None, None) -> EQ
-    | (None, _) -> LT
-    | (_, None) -> GT
-    | (Just (i, ra), Just (j, rb)) -> match intCompare i j with 
-        -1 -> LT | 1 -> GT | _ -> cmpString ra rb
-    ;
-
--- ordStr :: Ord String
-implicit def ordStr = Ord { cmp = cmpString } :: Ord String;
-
--- min :: Ord a => a -> a -> a
 def min {o :: Ord a} x y = match o.cmp x y with LT -> x | _ -> y;
-
--- max :: a -> a -> a
 def max {o :: Ord a} x y = match o.cmp x y with GT -> x | _ -> y;
 
--- minimum :: Ord a => [a] -> Maybe a
 def minimum l = let _m = lambda res l -> match l with [] -> res | x: xs -> _m (min x res) xs in match l with [] -> None | x: xs -> Just (_m x xs);
-
--- maximum :: Ord a => [a] -> Maybe a
 def maximum l = let _m = lambda res l -> match l with [] -> res | x: xs -> _m (max x res) xs in match l with [] -> None | x: xs -> Just (_m x xs);
 
 def (<) {o :: Ord a} x y = match o.cmp x y with LT -> true | _ -> false;
@@ -245,34 +217,16 @@ def (>=) {o :: Ord a} x y = match o.cmp x y with LT -> false | _ -> true;
 
 -- -- functions of String
 
--- strLen :: String -> Int
 def strLen s = match uncons s with None -> 0 | Just (_, rest) -> 1 + strLen rest;
-
--- strConcat :: [String] -> String
 def strConcat ss = match ss with [] -> "" | s: rest -> s ++ strConcat rest;
-
--- strReverse :: String -> String
 def strReverse s = match uncons s with None -> "" | Just (c, rest) -> strReverse rest ++ fromCode c;
-
--- strTake :: Int -> String -> String
 def strTake n s = if n <= 0 then "" else (match uncons s with None -> "" | Just (c, rest) -> fromCode c ++ strTake (n - 1) rest);
-
--- strDrop :: Int -> String -> String
 def strDrop n s = if n <= 0 then s else (match uncons s with None -> "" | Just (_, rest) -> strDrop (n - 1) rest);
-
--- strIndex :: Int -> String -> Maybe Int
 def strIndex n s = if n < 0 then None else (match uncons s with None -> None | Just (c, rest) -> if n == 0 then Just c else strIndex (n - 1) rest);
-
--- strElem :: Int -> String -> Bool
 def strElem c s = match uncons s with None -> false | Just (d, rest) -> or (c == d) (strElem c rest);
-
--- strMap :: (Int -> Int) -> String -> String
 def strMap f s = match uncons s with None -> "" | Just (c, rest) -> fromCode (f c) ++ strMap f rest;
-
--- strFilter :: (Int -> Bool) -> String -> String
 def strFilter p s = match uncons s with None -> "" | Just (c, rest) -> if p c then fromCode c ++ strFilter p rest else strFilter p rest;
 
--- strSplitAt :: Int -> String -> (String, String)
 def strSplitAt n s = 
     if n <= 0 
         then ("", s) 
@@ -281,34 +235,18 @@ def strSplitAt n s =
         | Just (c, rest) -> let (a, b) = strSplitAt (n - 1) rest in (fromCode c ++ a, b))
     ;
 
--- isDigit :: Int -> Bool
 def isDigit c = and (c >= 48) (c <= 57);
-
--- isUpper :: Int -> Bool
 def isUpper c = and (c >= 65) (c <= 90);
-
--- isLower :: Int -> Bool
 def isLower c = and (c >= 97) (c <= 122);
-
--- isAlpha :: Int -> Bool
 def isAlpha c = or (isUpper c) (isLower c);
-
--- isSpace :: Int -> Bool
 def isSpace c = or (c == 32) (and (c >= 9) (c <= 13));
 
--- toUpperChar :: Int -> Int
 def toUpperChar c = if isLower c then c - 32 else c;
-
--- toLowerChar :: Int -> Int
 def toLowerChar c = if isUpper c then c + 32 else c;
 
--- strToUpper :: String -> String
 def strToUpper s = strMap toUpperChar s;
-
--- strToLower :: String -> String
 def strToLower s = strMap toLowerChar s;
 
--- strWords :: String -> [String]
 def strWords s = let go = lambda acc cur t -> match uncons t with 
         None -> if strLen cur == 0 then acc else snoc (strReverse cur) acc 
     | Just (c, rest) -> 
@@ -319,10 +257,8 @@ def strWords s = let go = lambda acc cur t -> match uncons t with
         else go acc (fromCode c ++ cur) rest in go [] "" s
     ;
 
--- strUnwords :: [String] -> String
 def strUnwords ws = match ws with [] -> "" | w: [] -> w | w: rest -> w ++ " " ++ strUnwords rest;
 
--- strLines :: String -> [String]
 def strLines s = 
     if strLen s == 0 
         then [] 
@@ -333,18 +269,8 @@ def strLines s =
                 then go (snoc (strReverse cur) acc) "" rest 
             else go acc (fromCode c ++ cur) rest in go [] "" s;
 
--- strUnlines :: [String] -> String
 def strUnlines ls = match ls with [] -> "" | l: rest -> l ++ fromCode 10 ++ strUnlines rest;
 
--- showInt :: Int -> String
-def showInt n = 
-    if n < 0 
-        then "-" ++ showInt (0 - n) 
-    else if n < 10 
-        then fromCode (n + 48) 
-    else showInt (n / 10) ++ fromCode (n - (n / 10) * 10 + 48);
-
--- readInt :: String -> Maybe Int
 def readInt s = let go = lambda acc t -> match uncons t with 
       None -> Just acc 
     | Just (c, rest) -> 
@@ -360,3 +286,14 @@ def readInt s = let go = lambda acc t -> match uncons t with
                 ) 
             | _ -> go 0 s
     ;
+
+def _ordStr a b = match (uncons a, uncons b) with
+      (None, None) -> EQ
+    | (None, _) -> LT
+    | (_, None) -> GT
+    | (Just (i, ra), Just (j, rb)) -> match intCompare i j with 
+        -1 -> LT | 1 -> GT | _ -> _ordStr ra rb
+    ;
+
+implicit def ordStr = Ord { cmp = _ordStr } :: Ord String;
+implicit def showStr = Show { show' = id } :: Show String;

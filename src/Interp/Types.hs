@@ -215,6 +215,9 @@ data TypeError
     | DictConstrainDidNotConverge
     | EffMismatch Eff Eff
     | EffUndetermined Eff Eff
+    | InvalidImpCandidate Text Text
+    | ImpResolutionCycle [T']
+    | ImpResolutionDepth [T']
     deriving (Show, Eq)
 
 type Env  = Map Text V'

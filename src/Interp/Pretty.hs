@@ -147,6 +147,12 @@ prettyTypeError = \case
     DictConstrainDidNotConverge -> "Recursive dictionary constraints did not converge within 64 rounds."
     EffMismatch actual allowed -> "Effect mismatch: requires " <> prettyEff actual <> ", allowed " <> prettyEff allowed
     EffUndetermined actual allowed -> "Cannot determine effect constraint: " <> prettyEff actual <> " <= " <> prettyEff allowed
+    InvalidImpCandidate n reason ->
+        tick n <> " cannot be an implicit candidate: " <> reason <> "."
+    ImpResolutionCycle path ->
+        "Implicit resolution cycle: " <> T.intercalate " -> " (map prettyT' path) <> "."
+    ImpResolutionDepth path ->
+        "Implicit resolution exceeded 64 steps: " <> T.intercalate " -> " (map prettyT' path) <> "."
 
 prettyS' :: S' -> Text
 prettyS' sch@(Forall vars preds ty) =

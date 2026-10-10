@@ -186,6 +186,14 @@ showImplicits s = do
     else forM_ (sImp s) $ \n -> case M.lookup n (sTEnv s) of
         Just sch -> TIO.putStrLn $ "  " <> n <> " : " <> prettyS' sch
         Nothing  -> TIO.putStrLn ("  " <> n <> " : <missing type>")
+    let candidates = [(n, sch) | n <- sImp s, Just sch <- [M.lookup n (sTEnv s)]]
+        overlaps   = 
+            [ (a, b) | (i, (a, sa)) <- zip [0 :: Int ..] candidates
+            , (b, sb) <- drop (i + 1) candidates
+            , candidateHeadsOverlap sa sb]
+    unless (null overlaps) $ do
+        TIO.putStrLn "Potential head overlaps (same frame; no specificity priority):"
+        forM_ overlaps $ \(a, b) -> TIO.putStrLn (" " <> a <> " / " <> b)
 
 help :: IO ()
 help = mapM_ TIO.putStrLn
