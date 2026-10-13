@@ -10,9 +10,8 @@ import qualified Data.Set as S
 
 import Data.Text (Text, pack)
 import Data.List (sortOn, find)
-import Text.Megaparsec (SourcePos (sourceName))
+import Text.Megaparsec (SourcePos (sourceName), unPos, sourceLine, sourceColumn)
 
-import Interp.TypeCheck.Common (spanStart, tick)
 import Interp.TypeCheck.Declarations (ctorSchemes)
 
 prettyBOpr :: Opr -> Text
@@ -377,3 +376,14 @@ effectVarOrder = \case
     TTuple ts -> concatMap effectVarOrder ts
     TCon _ ts -> concatMap effectVarOrder ts
     _ -> []
+
+errLine :: Located TypeError -> Int
+errLine = \case
+    Located (Just sp) _ -> fst (spanStart sp)
+    _ -> 1
+
+spanStart :: Span -> (Int, Int)
+spanStart (Span s _) = (unPos (sourceLine s), unPos (sourceColumn s))
+
+tick :: Text -> Text
+tick n = "`" <> n <> "`"

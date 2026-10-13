@@ -6,19 +6,10 @@ import Interp.Types
 import Control.Monad.State (MonadState)
 import Control.Monad.Reader (MonadReader)
 import Control.Monad.Except (MonadError (catchError, throwError))
-import Text.Megaparsec (unPos, sourceColumn, sourceLine)
 import Data.Text (Text)
 import Data.Map (Map, (!?))
 
 type Checker m = (MonadState Counter m, MonadReader DEnv m, MonadError (Located TypeError) m)
-
-errLine :: Located TypeError -> Int
-errLine = \case
-    Located (Just sp) _ -> fst (spanStart sp)
-    _ -> 1
-
-spanStart :: Span -> (Int, Int)
-spanStart (Span s _) = (unPos (sourceLine s), unPos (sourceColumn s))
 
 fstDuplicate :: Eq a => [a] -> Maybe a
 fstDuplicate = \case
@@ -60,9 +51,6 @@ bodySpan :: E' -> Maybe Span
 bodySpan = \case
     At sp _ -> Just sp
     _ -> Nothing
-
-tick :: Text -> Text
-tick n = "`" <> n <> "`"
 
 declName :: Decl -> Text
 declName (Def n _ _) = n

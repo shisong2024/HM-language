@@ -18,6 +18,7 @@ import qualified Data.Set as S
 import Interp.TypeCheck.Solver (freshHole, ftv, fresh, apply)
 import Interp.TypeCheck.Common
 import Interp.TypeCheck.Declarations (checkAbilityType)
+import Interp.Pretty (tick)
 
 pureInfer :: E' -> T' -> InferRes
 pureInfer e t = InferRes M.empty [] t e emptyEff

@@ -25,6 +25,7 @@ import Interp.TypeCheck.Pattern (patType, checkDupPatVar, exhaustive)
 import Interp.TypeCheck.Solver
 import Interp.TypeCheck.Common
 import Interp.TypeCheck.Implicit (groupWanted, deferWanted, resolveWanted)
+import Interp.Pretty (tick)
 
 typeChecker :: Checker m => TEnv -> E' -> m (TSub, T')
 typeChecker env e = do

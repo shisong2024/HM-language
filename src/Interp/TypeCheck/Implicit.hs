@@ -17,6 +17,7 @@ import qualified Data.Map as M
 import Interp.TypeCheck.Common
 import Interp.TypeCheck.Declarations (checkAbilityType)
 import Interp.TypeCheck.Solver
+import Interp.Pretty (tick)
 
 isClosedType :: T' -> Bool
 isClosedType = S.null . ftv
@@ -123,26 +124,3 @@ matchCandidateType allowed= go M.empty
         manyTypes su as bs
             | length as /= length bs = Nothing
             | otherwise = foldM (\acc (a, b) -> go acc a b) su (zip as bs)
-
-candidateHeadsOverlap :: S' -> S' -> Bool
-candidateHeadsOverlap (Forall av _ at) (Forall bv _ bt) =
-    let rename vs start = M.fromList (zip (S.toList vs) (map TVar [start ..]))
-        ar = rename av 1
-        br = rename bv (S.size av + 1)
-        allowed = S.fromList [1 .. S.size av + S.size bv]
-        result = solve allowed M.empty (apply ar at) (apply br bt)
-    in case result of Just _ -> True; Nothing -> False
-    where
-        solve allowed su left right =
-            let a = apply su left; b = apply su right
-                bind v t = if occursIn v t then Nothing else Just (compose (M.singleton v t) su)
-                pairs xs ys = if length xs /= length ys then Nothing
-                    else foldM (\acc (x,y) -> solve allowed acc x y) su (zip xs ys)
-            in if a == b then Just su else case (a,b) of
-                (TVar v,t) | S.member v allowed -> bind v t
-                (t,TVar v) | S.member v allowed -> bind v t
-                (TList x,TList y) -> solve allowed su x y
-                (TTuple xs,TTuple ys) -> pairs xs ys
-                (TCon n xs,TCon m ys) | n == m -> pairs xs ys
-                (TFunc x e y,TFunc u f v) | e == f -> pairs [x,y] [u,v]
-                _ -> Nothing
