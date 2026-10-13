@@ -7,14 +7,16 @@ data Either a b = Left a | Right b;
 
 data Ordering = LT | EQ | GT;
 
-ability Ord a = Ord { cmp :: a -> a -> Ordering };
+ability Ord a = Ord { cmp' :: a -> a -> Ordering };
 ability Show a = Show { show' :: a -> String };
 
 def show {s :: Show a} = s.show';
+def cmp {o :: Ord a} = o.cmp';
+
 
 -- -- functions of Unit
 
-implicit def ordUnit = Ord { cmp = lambda x y -> EQ } :: Ord Unit;
+implicit def ordUnit = Ord { cmp' = lambda x y -> EQ } :: Ord Unit;
 implicit def showUnit = Show { show' = lambda x -> "Unit" } :: Show Unit;
 
 -- -- functions of numbers
@@ -33,7 +35,7 @@ def gcd m n = if n == 0 then abs m else gcd n (mod m n);
 def _ordFromInt n = match n with -1 -> LT | 0 -> EQ | _ -> GT;
 def _ord2Int o = match o with LT -> -1 | EQ -> 0 | GT -> 1;
 
-implicit def ordInt = Ord { cmp = lambda x y -> _ordFromInt (intCompare x y) } :: Ord Int;
+implicit def ordInt = Ord { cmp' = lambda x y -> _ordFromInt (intCompare x y) } :: Ord Int;
 
 def _showInt n = let sign = intCompare n 0 in
     if sign == -1 then "-" ++ _showInt (0 - n) 
@@ -49,7 +51,7 @@ def and x y = match (x, y) with (true, true) -> true | _ -> false;
 def or x y = match (x, y) with (false, false) -> false | _ -> true;
 def not x = match x with true -> false | false -> true;
 
-implicit def ordBool = Ord { cmp = lambda a b -> match (a, b) with (true, false) -> GT | (false, true) -> LT | _ -> EQ } :: Ord Bool;
+implicit def ordBool = Ord { cmp' = lambda a b -> match (a, b) with (true, false) -> GT | (false, true) -> LT | _ -> EQ } :: Ord Bool;
 implicit def showBool = Show { show' = lambda x -> if x then "true" else "false" } :: Show Bool;
 
 -- -- functions of list
@@ -112,13 +114,13 @@ def _ordList {o :: Ord a} f b = match (f, b) with
       ([], []) -> EQ
     | (_, []) -> GT
     | ([], _) -> LT
-    | (x: xs, y: ys) -> let res = o.cmp x y in
+    | (x: xs, y: ys) -> let res = o.cmp' x y in
         match res with
               EQ -> _ordList f b
             | _ -> res
     ;
 
-implicit def ordList = Ord { cmp = _ordList } :: Ord [a];
+implicit def ordList = Ord { cmp' = _ordList } :: Ord [a];
 
 def _showList l = 
     let step = lambda x sl -> (match uncons sl with
@@ -166,10 +168,10 @@ def _ordMaybe {o :: Ord a} mx my = match (mx, my) with
       (None, None) -> EQ
     | (_, None) -> GT
     | (None, _) -> LT
-    | (Just x, Just y) -> o.cmp x y
+    | (Just x, Just y) -> o.cmp' x y
     ;
 
-implicit def ordMaybe = Ord { cmp = _ordMaybe } :: Ord (Maybe a);
+implicit def ordMaybe = Ord { cmp' = _ordMaybe } :: Ord (Maybe a);
 
 def _showMaybe mx = match mx with
       None -> "None"
@@ -188,11 +190,11 @@ def mapRight f e = match e with Right x -> Right (f x) | _ -> e;
 def _ordEither {ol :: Ord a} {or :: Ord b} ea eb = match (ea, eb) with
       (Left _, Right _) -> LT
     | (Right _, Left _) -> GT
-    | (Left a, Left b) -> ol.cmp a b
-    | (Right a, Right b) -> or.cmp a b
+    | (Left a, Left b) -> ol.cmp' a b
+    | (Right a, Right b) -> or.cmp' a b
     ;
 
-implicit def ordEither = Ord { cmp = _ordEither } :: Ord (Either a b);
+implicit def ordEither = Ord { cmp' = _ordEither } :: Ord (Either a b);
 
 def _showEither ex = match ex with
       Left x -> "Left " ++ show x
@@ -204,19 +206,19 @@ implicit def showEither = Show { show' = _showEither } :: Show (Either a b);
 
 -- -- functions of Ordering
 
-implicit def ordOrdering = Ord { cmp = lambda x y -> _ordFromInt (intCompare (_ord2Int x) (_ord2Int y)) } :: Ord Ordering;
+implicit def ordOrdering = Ord { cmp' = lambda x y -> _ordFromInt (intCompare (_ord2Int x) (_ord2Int y)) } :: Ord Ordering;
 implicit def showOrdering = Show { show' = lambda x -> match x with LT -> "LT" | EQ -> "EQ" | GT -> "GT" } :: Show Ordering;
 
-def min {o :: Ord a} x y = match o.cmp x y with LT -> x | _ -> y;
-def max {o :: Ord a} x y = match o.cmp x y with GT -> x | _ -> y;
+def min {o :: Ord a} x y = match o.cmp' x y with LT -> x | _ -> y;
+def max {o :: Ord a} x y = match o.cmp' x y with GT -> x | _ -> y;
 
 def minimum l = let _m = lambda res l -> match l with [] -> res | x: xs -> _m (min x res) xs in match l with [] -> None | x: xs -> Just (_m x xs);
 def maximum l = let _m = lambda res l -> match l with [] -> res | x: xs -> _m (max x res) xs in match l with [] -> None | x: xs -> Just (_m x xs);
 
-def (<) {o :: Ord a} x y = match o.cmp x y with LT -> true | _ -> false;
-def (>) {o :: Ord a} x y = match o.cmp x y with GT -> true | _ -> false;
-def (<=) {o :: Ord a} x y = match o.cmp x y with GT -> false | _ -> true;
-def (>=) {o :: Ord a} x y = match o.cmp x y with LT -> false | _ -> true;
+def (<) {o :: Ord a} x y = match o.cmp' x y with LT -> true | _ -> false;
+def (>) {o :: Ord a} x y = match o.cmp' x y with GT -> true | _ -> false;
+def (<=) {o :: Ord a} x y = match o.cmp' x y with GT -> false | _ -> true;
+def (>=) {o :: Ord a} x y = match o.cmp' x y with LT -> false | _ -> true;
 
 
 -- -- functions of String
@@ -244,6 +246,7 @@ def isUpper c = and (c >= 65) (c <= 90);
 def isLower c = and (c >= 97) (c <= 122);
 def isAlpha c = or (isUpper c) (isLower c);
 def isSpace c = or (c == 32) (and (c >= 9) (c <= 13));
+def isHSpace c = or (c == 32) (c == 9);
 
 def toUpperChar c = if isLower c then c - 32 else c;
 def toLowerChar c = if isUpper c then c + 32 else c;
@@ -299,5 +302,5 @@ def _ordStr a b = match (uncons a, uncons b) with
         -1 -> LT | 1 -> GT | _ -> _ordStr ra rb
     ;
 
-implicit def ordStr = Ord { cmp = _ordStr } :: Ord String;
+implicit def ordStr = Ord { cmp' = _ordStr } :: Ord String;
 implicit def showStr = Show { show' = id } :: Show String;

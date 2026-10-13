@@ -1,7 +1,6 @@
 {-# LANGUAGE LambdaCase, OverloadedStrings #-}
 module Interp.Pretty where
 
-import Interp.TypeCheck
 import Interp.Types
 
 import qualified Data.Text as T
@@ -13,6 +12,8 @@ import Data.Text (Text, pack)
 import Data.List (sortOn, find)
 import Text.Megaparsec (SourcePos (sourceName))
 
+import Interp.TypeCheck.Common (spanStart, tick)
+import Interp.TypeCheck.Declarations (ctorSchemes)
 
 prettyBOpr :: Opr -> Text
 prettyBOpr opr = maybe "?" fst (find ((== opr) . snd) opTable)

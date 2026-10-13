@@ -2,15 +2,16 @@
 module Interp.Types where
 
 import Data.Map (Map)
-import qualified Data.Text as T
 import Data.Text (Text)
 import Data.Void (Void)
 import Data.Set (Set)
 import Data.Sequence (Seq)
+
 import qualified Data.Sequence as Seq
+import qualified Data.Set as S
+import qualified Data.Text as T
 
 import Text.Megaparsec (Parsec, SourcePos)
-import qualified Data.Set as S
 
 data P'
     = PVar Text

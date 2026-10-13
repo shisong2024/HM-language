@@ -1,8 +1,10 @@
 # Language Reference：当前语言参考
 
-更新：2026-10-12。基于 HEAD `b602833` 及当前工作区；具体边界见[文档入口](README.md)。本文件描述当前行为，未来方案见 [Design Notes](DesignNotes.md)。
+更新：2026-10-13。主版本基线为 HEAD `594df6b` 及当前工作区；具体边界见[文档入口](README.md)。未来方案与决策见 [Design Notes](DesignNotes.md)。
 
-本轮状态为源码核对，不声称下列示例已在当前主版本重新执行。R0–R5 已有主源码实现标志，但主工作区完整验收尚待完成。
+主源码已采用 R0–R5 与 ability/固定 effect 基础版。本轮冻结快照的解释器编译通过，接口适配后的基线测试为 332/0；原始主测试仍有旧导入/API，不能直接把这个数字视为未适配主测试的验收结果。
+
+第 6、7 节描述已采用的基础版。第 10 节另列[参数化 effect/handler 隔离交付](../TODO/36-参数化Effect与深层Handler完整代码.md)，供审查和使用副本；该扩展尚未应用到主源码。
 
 ## 1. 运行与程序组织
 
@@ -63,11 +65,11 @@ def asInt x = x :: Int;
 
 ```text
 def same {o1 :: Ord a} {o2 :: Ord a} x y =
-    (o1.cmp x x, o2.cmp y y);
+    (o1.cmp' x x, o2.cmp' y y);
 -- x、y 的类型相同。
 
 def independent {o1 :: Ord a} {o2 :: Ord b} x y =
-    (o1.cmp x x, o2.cmp y y);
+    (o1.cmp' x x, o2.cmp' y y);
 -- a、b 独立。
 ```
 
@@ -108,22 +110,27 @@ infixl 1 |>;
 
 算术主要作用于整数。`==`、`!=` 是内建比较机制，不通过用户定义的 `Eq` 字典。当前 `<`、`>`、`<=`、`>=` 的通用排序行为由 Prelude 的 `Ord` 字典定义。
 
-## 6. 隐式参数与字典
+## 6. Ability、隐式参数与字典
 
-当前能力接口仍是普通 `data`：
+基础版用 `ability` 声明可参与隐式传递的接口：
 
 ```text
-data Ord a = Ord { cmp :: a -> a -> Ordering };
-data Show a = Show { show' :: a -> String };
+ability Ord a = Ord { cmp' :: a -> a -> Ordering };
+ability Show a = Show { show' :: a -> String };
+ability Writer { emit :: String -> {Console} Unit };
 ```
 
-这些是当前 Prelude 的定义形式，不需要再次在加载了 Prelude 的会话里声明。当前没有 `ability`/`trait` 关键字，也没有“仅能力类型可隐式传递”的限制。普通数据类型和基础类型仍可能作为隐式参数，只需满足现有候选检查。
+前两条是当前 Prelude 定义形式，不需要在已加载 Prelude 的会话里重复声明。第三条省略 `= Writer`，构造器默认与能力同名。能力只能有一个 Record 构造器，或使用 `ability Proof = Proof;` 声明无字段标记；不支持多个构造器和位置载荷。字段可以是方法，也可以是普通配置值。方法不会自动导出为全局函数，仍通过字典字段访问。
+
+隐式参数的类型必须是已声明能力的完整应用，例如 `Ord Int`、`Show a`；`implicit def` 的结果和隐式上下文也必须满足此规则。能力的类型别名可以使用，普通 `data` 包装能力不会自动获得资格。`Int`、普通数据类型、函数和裸类型变量不能作为隐式参数，未使用的源隐式参数也会被检查。普通 data 的隐式使用已在基础版采用时收紧；需要普通数据依赖时使用显式参数，或设计一个能力包装。
 
 字典是一等值，可以由普通 `def` 保存、显式传给函数、从函数返回。`implicit def` 将字典或字典工厂注册到搜索空间。只构造一个普通字典值，不会自动注册。
 
+普通数据仍使用 `data`，可以通过普通参数显式传递。Ability 复用现有 Record 构造、模式匹配与字段访问机制，仍受同名字段限制。同一存活作用域不能将已有类型从 `data` 改成 `ability`，或反向改变。
+
 ```text
-def compareWith {o :: Ord a} x y = o.cmp x y;
-def reverseIntOrder = Ord { cmp = lambda x y -> ordInt.cmp y x } :: Ord Int;
+def compareWith {o :: Ord a} x y = o.cmp' x y;
+def reverseIntOrder = Ord { cmp' = lambda x y -> ordInt.cmp' y x } :: Ord Int;
 compareWith 1 2;
 compareWith @{o = reverseIntOrder} 1 2;
 ```
@@ -167,11 +174,19 @@ let u = putStrLn (show 1) in 2;
 ## 7. 效果
 
 ```text
+effect Audit;
+def mark x = x :: Int;
+(lambda x -> x) :: Int -> {Audit} Int;
+
 def greet s = putStrLn s;
 -- String -> {Console} Unit
 
 (lambda s -> putStrLn s) :: String -> {Console} Unit;
 ```
+
+基础版通过 `effect Name;` 声明固定静态效果标签。`Console` 内建可用，显式写 `effect Console;` 也允许。同批重复声明会报错，跨批再次声明同一标签允许。类型与效果使用不同命名空间，效果声明不生成值、构造器、操作或字典。上面的纯函数可满足 `{Audit}` 上界，但声明 Audit 本身不产生任何实际操作。
+
+注解中的效果名必须已声明；函数箭头、Record/能力字段及未使用的类型别名中的效果名都会检查。导入模块的标签使用 `{M.Audit}`，不同模块别名下的标签不同；`Console` 保持全局内建身份。当前沿用既有模块别名与重载规则，没有另行引入基于规范文件路径的标签身份。
 
 箭头上的集合描述调用可能产生的潜在效果；表达式另有立即效果。取出函数或构造闭包不自动执行其 body；调用会将函数潜在效果和求值实参的立即效果传播出去。分支/模式分支采用保守合并，即使运行时某个分支未执行，其效果仍可能出现在静态集合中。
 
@@ -181,7 +196,11 @@ def greet s = putStrLn s;
 
 `putStr`、`putStrLn` 引入 Console，求值器记录输出事件，再由 Main 重放。`:t` 不执行这些操作；错误之前已经产生的事件可以保留。空效果集合只表示没有被追踪的效果，不保证终止、不保证不会除零或发生运行期错误。
 
-效果标签没有自动对应的字典值。用户写 `{FileIO}` 不会创建文件操作或 handler。当前没有语言级可恢复异常、可变状态操作、algebraic effect handlers。
+效果标签没有自动对应的字典值。基础版必须先声明 `effect FileIO;` 才能写 `{FileIO}`，但这仍不会创建文件操作或 handler。主版本已采用此声明检查。
+
+能力与效果分别描述隐式依赖和调用上界。例如 Writer 的 emit 方法可以携带 Console；调用该字段会传播 Console，构造 Writer 或取出字段本身不执行方法。纯 mock 可以满足带 Console 上界的方法类型，通过该接口调用仍保守保留 Console。自动搜索得到的字典必须纯构造，不能借此隐藏立即副作用。
+
+主版本目前不支持 `{State Int}` 等参数化效果、显式效果变量语法、`perform` 或 handlers，也没有新增语言级可恢复异常、可变状态操作。内部高阶效果传播仍保留。
 
 ## 8. Prelude 与 Tuple
 
@@ -199,6 +218,51 @@ Prelude 正在演进；其未提交改动属于用户。本轮文档维护不改
 
 已有源码位置、定义/调用说明、隐式缺候选/歧义、效果不匹配与求值错误。类型检查器有局部恢复机制，但当前 Main 遇到一个坏定义时可能拒绝整批提交；“能够继续检查”不等于“其余定义一定成功提交”。
 
-当前没有同名字段多态、do、guard、模式函数方程、能力关键字、完整 row polymorphism、HKT、higher-rank 字段、GAT 或 handlers。讨论与原型不等于当前语言特性。
+当前没有同名字段多态、do、guard、模式函数方程、完整 row polymorphism、HKT、higher-rank 字段、GAT 或 handlers。Ability 与固定 effect 声明已采用到主源码；参数化 effect、handler 和 do 的新版隔离交付见第 10 节。
 
 源码对应入口：[Parser](../src/Interp/Parser.hs)、[TypeCheck](../src/Interp/TypeCheck.hs)、[Eval](../src/Interp/Eval.hs)、[Types](../src/Interp/Types.hs)、[Main](../app/Main.hs)、[Prelude](../utils/prelude.txt)。历史测试证据见 [归档](../TODO/archive/README.md)，当前验收工作见 [路线](../TODO/32-当前路线与验收.md)。
+
+## 10. 隔离交付：参数化 Effect、handler 与 do
+
+本节对应 [36 的完整代码与验证记录](../TODO/36-参数化Effect与深层Handler完整代码.md)，需要使用隔离解释器或采用配套补丁。当前主版本的 `cabal run interp` 尚不支持本节扩展。
+
+```text
+effect State s { get :: Unit -> s, set :: s -> Unit };
+effect Error e { raise :: e -> a };
+
+handle Error String in do { raise "bad"; 99 } with {
+    return x -> Right x;
+    raise err resume -> Left err;
+};
+-- Left "bad"；99 不执行。
+
+(handle State Int in do { x=get Unit; set (x+1); get Unit } with {
+    return x -> lambda state -> (x,state);
+    get u resume -> lambda state -> resume state state;
+    set value resume -> lambda state -> resume Unit value;
+}) 10;
+-- (11,11)
+```
+
+声明操作的所属效果自动加入第一条调用箭头；`get` 的类型为 `Unit -> {State s} s`。操作是可传递的普通函数值，但调用发出请求。操作接收一个显式参数，多参数可用 Tuple；复杂效果类型参数加括号，例如 `{State (Int,String)}`。没有隐式操作参数或显式 forall 语法；操作声明自身的额外类型变量按每次调用实例化，在 handler 分支中按刚性变量检查。
+
+Handler 显式指定目标效果及类型参数，并且必须有 return 分支、完整且不重复的操作分支。`resume` 是该分支绑定的普通局部名字，不是关键字；可以不用，但同一恢复值最多调用一次。深层恢复会重新进入同一个 handler，操作分支和 return 分支的代码则在它之外执行，因此可以向外层转发。最近的同名 handler 优先，没有具名 effect 实例；一个未处理效果行中的同名参数必须统一。
+
+静态结果消除被处理计算的目标效果，保留其他效果、return/操作分支产生的效果，以及恢复后返回函数的潜在效果。类型显示中的 `{e0 \\ State}` 是内部残余效果记法，用户不能把它当作已经支持的源类型语法。
+
+`do { x=f a; g x; h x }` 从左到右执行全部语句，返回最后表达式；未使用的绑定也初始化。支持遮蔽、嵌套和末尾分号；不支持空块、以绑定结尾或模式绑定。绑定名只在后续语句可见；纯 lambda 保持多态，执行效果的值初始化采用保守泛化限制。普通 let 仍保留既有字典延迟行为，不能把两者混同。
+
+State/Error 的处理器由用户代码实现，示例与通用 `runState`、`runError`、显式回滚 `attempt` 都在 36 配套程序中。Error 本身不保证状态回滚，嵌套处理顺序决定返回状态是否被保留。
+
+隔离版的宿主接口包括：
+
+```text
+putStr   : String -> {Console} Unit
+putStrLn : String -> {Console} Unit
+readFile : String -> {FileIO} Either String String
+writeFile : (String,String) -> {FileIO} Either String Unit
+```
+
+Console 继续记录输出事件并按既有批次规则重放。FileIO 默认进行 UTF-8 文本整文件读写，路径相对解释器进程工作目录，失败返回 Left；调用发生时执行文件操作。用户 handler 可以拦截两者做 mock，宿主接口不允许被 effect 声明改写。需要把文件错误转换成 Error 时，用户显式匹配 Either 并调用 raise。
+
+本次仍未加入多次恢复、异步、具名效果实例或资源区域类型。一次性检查由运行时令牌执行；会话保存使用记录，尚未设计令牌回收。更多原理、完整补丁、限制及复现命令见 36。

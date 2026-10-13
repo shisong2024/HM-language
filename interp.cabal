@@ -15,6 +15,13 @@ library
                       Interp.Builtin
                       Interp.Qualify
                       Interp.Synonym
+    other-modules:    Interp.TypeCheck.Common
+                      Interp.TypeCheck.Solver
+                      Interp.TypeCheck.Declarations
+                      Interp.TypeCheck.Pattern
+                      Interp.TypeCheck.Implicit
+                      Interp.TypeCheck.Elaboration
+                      Interp.TypeCheck.Infer
     build-depends:    base
                     , containers
                     , mtl
