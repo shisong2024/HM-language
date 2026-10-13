@@ -78,8 +78,8 @@ execBatch loud ss src lprs perr = case expandProgram (sSyns ss) (map snd lprs) o
 execBatch' :: Bool -> Session -> Text -> [(Int, Statement)] -> [(Int, Text)] -> IO (Session, Bool)
 execBatch' loud ss src lprs perr = do
     let prs = map snd lprs
-        denv = unionDEnv (buildDEnv (dataDeclsOf prs)) (sDEnv ss)
-        (tsRes, n) = runState (runExceptT (runReaderT (programChecker (sTEnv ss) (sImp ss) prs) denv)) (sNext ss)
+        denv = mergeDEnv (buildProgramDEnv prs) (sDEnv ss)
+        (tsRes, n) = runState (runExceptT (runReaderT (programChecker (sTEnv ss) (sImp ss) prs) (sDEnv ss))) (sNext ss)
         defBad = \case
             TyDefFailed _ -> True
             TyDefSkipped _ -> True
@@ -206,12 +206,6 @@ help = mapM_ TIO.putStrLn
     , "  :q            exit"
     ]
 
-unionDEnv :: DEnv -> DEnv -> DEnv
-unionDEnv a b = 
-    let redef = M.keys (M.intersection (denvDatas a) (denvDatas b))
-        stale = [c | n <- redef, Just cs <- [M.lookup n (denvDatas b)], c <- cs] in
-    DEnv (M.union (denvCtors a) (foldr M.delete (denvCtors b) stale)) (M.union (denvDatas a) (denvDatas b))
-
 preludePath :: FilePath
 preludePath = "utils/prelude.txt"
 
@@ -234,8 +228,8 @@ aliasFields ma lprs s = case ma of
     Just a  -> s { sFields = M.map pre (sFields s) }
         where
             ctors, datas :: S.Set Text
-            ctors = S.fromList [c | (_, StmtData d) <- lprs, (c, _) <- dCtors d]
-            datas = S.fromList [dName d | (_, StmtData d) <- lprs]
+            ctors = S.fromList [c | d <- dataDeclsOf (map snd lprs), (c, _) <- dCtors d]
+            datas = S.fromList [dName d | d <- dataDeclsOf (map snd lprs)]
 
             pre :: FieldInfo -> FieldInfo
             pre fi = fi { fiCtor = qua ctors (fiCtor fi), fiData = qua datas (fiData fi) }
@@ -334,6 +328,8 @@ unload a s = s
     , sEnv = strip (sEnv s)
     , sTEnv = strip (sTEnv s)
     , sDEnv = DEnv (strip (denvCtors d)) (strip (denvDatas d))
+        (S.filter (not . ((a <> ".") `T.isPrefixOf`)) (denvAbilities d))
+        (S.filter (not . ((a <> ".") `T.isPrefixOf`)) (denvEffs d))
     , sSyns = strip (sSyns s)
     , sFixities = strip (sFixities s)
     , sFields = M.filter (not . gone) (sFields s)

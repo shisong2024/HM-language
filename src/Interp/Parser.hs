@@ -47,7 +47,7 @@ reserved =
     , "if", "then", "else", "true", "false"
     , "match", "with", "data", "type"
     , "infixl", "infixr", "infix"
-    , "implicit"
+    , "implicit", "ability", "effect"
     ]
 
 reservedType :: [Text]
@@ -363,7 +363,7 @@ parseTypeWith vars = do
 
 parseEffRow :: Parser Eff
 parseEffRow = (`Eff` S.empty) . S.fromList 
-    <$> (lexeme (char '{') *> sepBy (lexeme (nameRaw isUpper)) comma <* lexeme (char '}'))
+    <$> (lexeme (char '{') *> sepBy qname comma <* lexeme (char '}'))
 
 parseType :: Parser T'
 parseType = parseTypeWith []
@@ -386,8 +386,21 @@ parseAnn tab = do
         Just t -> AnnT e t
 
 parseData :: Parser DataDecl
-parseData = do
-    _ <- symbol "data"
+parseData = symbol "data" *> parseDataCore False
+
+parseAbility :: Parser DataDecl
+parseAbility = do
+    _ <- symbol "ability"
+    d <- parseDataCore True
+    case dCtors d of
+        [(_, args)] | length args == M.size (dFields d) -> return d
+        _ -> fail "an ability must have one constructor (or a nullary maker constructor)"
+
+parseEff :: Parser Statement
+parseEff = StmtEff <$> (symbol "effect" *> upperName <* semicolon)
+
+parseDataCore :: Bool -> Parser DataDecl
+parseDataCore sh = do
     n <- upperName
     when (n `elem` reservedType) $
         fail $ unpack $ n <> " is a built in type name and cannot be redeclared."
@@ -396,8 +409,10 @@ parseData = do
         (v: _) -> fail $ unpack $ "duplicate type parameter " <> v <> " in data " <> n <> "."
         _ -> return ()
     let vars = zip ps [0..]
-    _ <- lexeme (char '=' <?> "=")
-    cs <- sepBy1 (parseCtorDecl vars) (lexeme (char '|' <?> "|"))
+    cs <- if sh then (do
+        fs <- fldBraces (string "::" <?> "::") (parseTypeWith vars)
+        return [(n, map snd fs, map fst fs)]) <|> constructors vars
+        else constructors vars
     case [(c, i) | (c, args, _) <- cs, i <- concatMap strayTvs args] of
         [] -> return ()
         ((c, i): _) -> fail $ unpack (T.unwords
@@ -409,6 +424,9 @@ parseData = do
     _ <- semicolon
     return $ DataDecl n ps [(c, as) | (c, as, _) <- cs]
         (M.fromList [(f, (c, i)) | (c, _, fs) <- cs, (i, f) <- zip [0 :: Int ..] fs])
+    where
+        constructors vars = lexeme (char '=' <?> "=")
+            *> sepBy1 (parseCtorDecl vars) (lexeme (char '|' <?> "|"))
 
 dups :: Eq a => [a] -> [a]
 dups xs = [x | (i, x) <- zip [0 :: Int ..] xs, x `elem` drop (i + 1) xs]
@@ -491,6 +509,8 @@ parseProg tab = sc *> many
     <*> (   parseImpDef tab
         <|> StmtDef <$> parseDef tab
         <|> StmtData <$> parseData
+        <|> StmtAbility <$> parseAbility
+        <|> parseEff
         <|> parseTypeDecl
         <|> parseInfixDecl
         <|> StmtExpr <$> (parseExpr tab <* semicolon)
@@ -701,7 +721,7 @@ parsePatCtor tab = do
 
 recProgram :: FieldTab -> [Statement] -> Either Text (FieldTab, [Statement])
 recProgram tab0 ss = do
-    tab <- foldM addDecl tab0 [d | StmtData d <- ss]
+    tab <- foldM addDecl tab0 $ dataDeclsOf ss
     ss' <- mapM (recStmt tab) ss
     return (tab, ss')
     where
@@ -732,6 +752,14 @@ recProgram tab0 ss = do
 
         base :: Text -> Text
         base n = snd (T.breakOnEnd "." n)
+
+dataDeclsOf :: Program -> [DataDecl]
+dataDeclsOf prs = 
+    [ d | stmt <- prs, d <- case stmt of
+        StmtData x -> [x]
+        StmtAbility x -> [x]
+        _ -> []
+    ]
 
 recStmt :: FieldTab -> Statement -> Either Text Statement
 recStmt tab = \case

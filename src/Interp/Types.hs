@@ -218,6 +218,10 @@ data TypeError
     | InvalidImpCandidate Text Text
     | ImpResolutionCycle [T']
     | ImpResolutionDepth [T']
+    | NotAnAbility T'
+    | UnknownEff Text
+    | DuplicateEff Text
+    | DeclRoleChanged Text
     deriving (Show, Eq)
 
 type Env  = Map Text V'
@@ -274,6 +278,8 @@ data Statement
     | StmtImp Decl
     | StmtExpr E' 
     | StmtData DataDecl
+    | StmtAbility DataDecl
+    | StmtEff Text
     | StmtType Text [Text] T'
     | StmtInfix Text Fixity
     deriving (Show, Eq)
@@ -310,8 +316,10 @@ data CtorInfo = CtorInfo
     } deriving (Show, Eq)
 
 data DEnv = DEnv
-    { denvCtors :: Map Text CtorInfo
-    , denvDatas :: Map Text [Text]
+    { denvCtors     :: Map Text CtorInfo
+    , denvDatas     :: Map Text [Text]
+    , denvAbilities :: Set Text
+    , denvEffs      :: Set Text
     } deriving (Show, Eq)
 
 data Tops = Tops 

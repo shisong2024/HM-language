@@ -70,7 +70,7 @@ initSession = Session
     }
 
 emptyDEnv :: DEnv
-emptyDEnv = DEnv M.empty M.empty
+emptyDEnv = DEnv M.empty M.empty S.empty (S.singleton "Console")
 
 emptyCounter :: Int -> Counter
 emptyCounter n = Counter n M.empty []

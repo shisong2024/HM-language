@@ -2,6 +2,7 @@
 
 module Interp.Eval where
 import Interp.Types
+import Interp.Parser (dataDeclsOf)
 
 import qualified Data.Set as S
 import qualified Data.Map as M
@@ -304,9 +305,6 @@ eqOp :: MonadError (Located EvalError) m => V' -> V' -> Bool -> m V'
 eqOp v1 v2 w = case eqV (v1, v2) of
     Just b -> return $ VBool (if w then b else not b)
     Nothing -> throwError $ Located Nothing $ OprArgIsNotComparable v1 v2
-
-dataDeclsOf :: Program -> [DataDecl]
-dataDeclsOf prs = [d | StmtData d <- prs]
 
 paramName :: Param -> Text
 paramName = \case

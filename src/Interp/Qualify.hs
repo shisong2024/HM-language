@@ -10,17 +10,21 @@ import qualified Data.Set as S
 
 import Data.Text (Text)
 import Data.Bifunctor (Bifunctor(first))
+import Interp.Parser (dataDeclsOf)
 
 topsOf :: Program -> Tops
 topsOf prs = Tops
     { tVals  = S.fromList [n | stmt <- prs, Def n _ _ <- case stmt of StmtDef d -> [d]; StmtImp d -> [d]; _ -> [], not (isOpName n)]
-    , tTypes = S.fromList ([dName d | StmtData d <- prs] ++ [n | StmtType n _ _ <- prs])
-    , tCtors = S.fromList [c | StmtData d <- prs, (c, _) <- dCtors d]
+    , tTypes = S.fromList (map dName (dataDeclsOf prs) ++ [n | StmtType n _ _ <- prs])
+    , tCtors = S.fromList [c | d <- dataDeclsOf prs, (c, _) <- dCtors d]
     }
 
 qualifyProgram :: Text -> Program -> Program
 qualifyProgram a prs = map (stmt (topsOf prs)) prs
     where
+        effs :: S.Set Text
+        effs = S.fromList [n | StmtEff n <- prs]
+
         qual :: S.Set Text -> Text -> Text
         qual s n = if n `S.member` s then a <> "." <> n else n
 
@@ -28,14 +32,19 @@ qualifyProgram a prs = map (stmt (topsOf prs)) prs
         stmt t = \case
             StmtDef d -> StmtDef (decl t d)
             StmtExpr e -> StmtExpr (expr t S.empty e)
-            StmtData d -> StmtData d
-                { dName  = qual (tTypes t) (dName d)
-                , dCtors = [(qual (tCtors t) c, map (typ t) as) | (c, as) <- dCtors d]
-                , dFields = M.map (first (qual (tCtors t))) (dFields d)
-                }
+            StmtData d -> StmtData (dataDecl t d)
+            StmtAbility d -> StmtAbility (dataDecl t d)
+            StmtEff n -> StmtEff (if n == "Console" then n else qual effs n)
             StmtType n ps ty -> StmtType (qual (tTypes t) n) ps (typ t ty)
             StmtInfix n fx -> StmtInfix n fx
             StmtImp d -> StmtImp (decl t d)
+
+        dataDecl :: Tops -> DataDecl -> DataDecl
+        dataDecl t d = d
+            { dName  = qual (tTypes t) (dName d)
+            , dCtors = [(qual (tCtors t) c, map (typ t) as) | (c, as) <- dCtors d]
+            , dFields = M.map (first (qual (tCtors t))) (dFields d)
+            }
 
         decl :: Tops -> Decl -> Decl
         decl t (Def n ps body) = Def (qual (tVals t) n) (map (param t) ps) 
@@ -84,7 +93,8 @@ qualifyProgram a prs = map (stmt (topsOf prs)) prs
             TCon n ts -> TCon (qual (tTypes t) n) (map (typ t) ts)
             TList u   -> TList (typ t u)
             TTuple ts -> TTuple (map (typ t) ts)
-            TFunc u e v -> TFunc (typ t u) e (typ t v)
+            TFunc u e v -> 
+                TFunc (typ t u) (e { effLabs = S.map (\n -> if n == "Console" then n else qual effs n) (effLabs e)}) (typ t v)
             TInt      -> TInt
             TBool     -> TBool
             TString   -> TString

@@ -153,6 +153,13 @@ prettyTypeError = \case
         "Implicit resolution cycle: " <> T.intercalate " -> " (map prettyT' path) <> "."
     ImpResolutionDepth path ->
         "Implicit resolution exceeded 64 steps: " <> T.intercalate " -> " (map prettyT' path) <> "."
+    NotAnAbility t -> "Implicit parameters and candidates require an ability type, but got " <> prettyT' t <> "."
+    UnknownEff n -> "Unknown effect " <> tick n <> ". " <>
+        if T.any (== '.') n then "Check the imported module and effect name."
+        else "Declare it with `effect " <> n <> ";`."
+    DuplicateEff n -> "Duplicate effect declaration " <> tick n <> "."
+    DeclRoleChanged n -> "Cannot change " <> tick n <> " between data and ability in a live scope."
+
 
 prettyS' :: S' -> Text
 prettyS' sch@(Forall vars preds ty) =
@@ -272,6 +279,11 @@ printBatch src bn lprs tps vals perr =
                 <> T.concat [ "  " <> c <> fieldNames d c <> " : "
                               <> (\(Forall _ _ t) -> prettyT' t) sch <> "\n"
                             | (c, sch) <- M.toAscList (ctorSchemes d) ]
+            StmtAbility d -> "ability " <> T.unwords (dName d: dParams d) <> "\n"
+                <> T.concat [ "  " <> c <> fieldNames d c <> " : "
+                              <> (\(Forall _ _ t) -> prettyT' t) sch <> "\n"
+                            | (c, sch) <- M.toAscList (ctorSchemes d) ]
+            StmtEff n -> "effect " <> n <>"\n"
             StmtType n ps t -> "type " <> T.unwords (n : ps) <> " = " <> prettyT' t <> "\n"
             StmtInfix n fx -> fixityTxt n fx <> "\n"
 

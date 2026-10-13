@@ -29,6 +29,10 @@ expandStmt tab = \case
     StmtData d           -> do
         cs <- mapM (\(c, as) -> (,) c <$> mapM (expandT tab) as) (dCtors d)
         return $ StmtData d { dCtors = cs }
+    StmtAbility d        -> do
+        cs <- mapM (\(c, as) -> (,) c <$> mapM (expandT tab) as) (dCtors d)
+        return $ StmtAbility d { dCtors = cs }
+    StmtEff n            -> Right (StmtEff n)
     StmtType n ps t      -> Right (StmtType n ps t)
     StmtInfix n fx       -> Right (StmtInfix n fx)
     StmtImp d -> StmtImp <$> expandDecl tab d

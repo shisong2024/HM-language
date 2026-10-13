@@ -6,9 +6,9 @@ data Maybe a = None | Just a;
 data Either a b = Left a | Right b;
 
 data Ordering = LT | EQ | GT;
-data Ord a = Ord { cmp :: a -> a -> Ordering };
 
-data Show a = Show { show' :: a -> String };
+ability Ord a = Ord { cmp :: a -> a -> Ordering };
+ability Show a = Show { show' :: a -> String };
 
 def show {s :: Show a} = s.show';
 
@@ -145,6 +145,7 @@ infixl 6 =>;
 
 def fst t = match t with (a, b) -> a;
 def snd t = match t with (a, b) -> b;
+def swap t = match t with (a, b) -> (b, a);
 
 def _showTuple2 t = match t with
     (x, y) -> "(" ++ show x ++ "," ++ show y ++ ")"
@@ -180,6 +181,9 @@ implicit def showMaybe = Show { show' = _showMaybe } :: Show (Maybe a);
 def isLeft e = match e with Left _ -> true | Right _ -> false;
 def isRight e = match e with Left _ -> false | Right _ -> true;
 def either f g e = match e with Left x -> f x | Right y -> g y;
+
+def mapLeft f e = match e with Left x -> Left (f x) | _ -> e;
+def mapRight f e = match e with Right x -> Right (f x) | _ -> e;
 
 def _ordEither {ol :: Ord a} {or :: Ord b} ea eb = match (ea, eb) with
       (Left _, Right _) -> LT

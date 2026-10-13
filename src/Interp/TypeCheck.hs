@@ -3,6 +3,7 @@ module Interp.TypeCheck where
 
 import Interp.Eval
 import Interp.Types
+import Interp.Parser (dataDeclsOf)
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -10,7 +11,7 @@ import qualified Data.Set as S
 import Control.Monad (foldM, forM, forM_, when, unless)
 import Control.Monad.Error.Class (MonadError (throwError, catchError))
 import Control.Monad.State (MonadState, get, put, modify)
-import Control.Monad.Reader (MonadReader (ask))
+import Control.Monad.Reader (MonadReader (ask), local)
 
 import Data.List (nub)
 import Data.Map ((!?))
@@ -39,6 +40,8 @@ typeOfExprWECore :: Checker m => TEnv -> IEnv -> E' -> m (S', Eff)
 typeOfExprWECore env ienv e = do
     r <- inferExpr env ienv e
     (sch, _) <- closeBinding env (irType r) (irWanted r) (irExpr r) (irNow r)
+    denv <- ask
+    mapM_ (checkAbilityType denv . predType) (sPreds sch)
     get >>= \st -> return (sch, resolveEff st (applyEff (irSub r) (irNow r)))
 
 inferExpr :: Checker m => TEnv -> IEnv -> E' -> m InferRes
@@ -53,6 +56,10 @@ inferExpr env ienv e = case e of
         Nothing -> throwError (Located Nothing $ UnboundVar t)
         Just sch  -> do
             (preds, ty, callEff) <- instantiateFull sch
+            denv <- ask
+            forM_ preds $ \p -> case predType p of
+                TVar _ -> return ()
+                ty' -> checkAbilityType denv ty'
             holes <- mapM (const freshHole) preds
             let ws = [ Wanted
                     { wtdHole = h
@@ -204,7 +211,19 @@ sccChecker env bs = do
 
 
 programChecker :: Checker m => TEnv -> IFrame -> Program -> m CProgram
-programChecker outT outI p = withInferRollback $ programCheckerCore outT outI p
+programChecker outT outI p = withInferRollback $ do
+    old <- ask
+    forM_ (dataDeclsOf p) $ \d -> when (M.member (dName d) (denvDatas old)) $ do
+        let newAbility = dName d `S.member` S.fromList [dName a | StmtAbility a <- p]
+        when (newAbility /= S.member (dName d) (denvAbilities old)) $
+            throwError $ Located Nothing $ DeclRoleChanged (dName d)
+    case fstDuplicate [n | StmtEff n <- p] of
+        Just n -> throwError $ Located Nothing $ DuplicateEff n
+        Nothing -> return ()
+    let denv = mergeDEnv (buildProgramDEnv p) old
+    local (const denv) $ do
+        mapM_ (checkEffTypes denv) [t | StmtType _ _ t <- p]
+        programCheckerCore outT outI p
 
 programCheckerCore :: Checker m => TEnv -> IFrame -> Program -> m CProgram
 programCheckerCore outerT outerI program = do
@@ -241,6 +260,9 @@ programCheckerCore outerT outerI program = do
         newT = M.union impT (M.fromList [(cName b, cScheme b) | b <- ordBindings])
         env = M.union newT outer
         scope = impNames: [outerI]
+    denv <- ask
+    forM_ allBindings $ \b -> withNote ("in definition of " <> tick (cName b)) $
+        mapM_ (checkAbilityType denv . predType) (sPreds (cScheme b))
     exprRes <- forM [(i, e) | (i, StmtExpr e) <- zip [0..] program] $ \(i, e) -> do
         let blocked = [n | n <- S.toList (freeVars e), S.member n failed]
         case blocked of
@@ -521,7 +543,7 @@ checkTypeCons denv = \case
     TVar _ -> return ()
     TList t -> checkTypeCons denv t
     TTuple ts -> mapM_ (checkTypeCons denv) ts
-    TFunc a _ b -> checkTypeCons denv a >> checkTypeCons denv b
+    TFunc a e b -> checkEffRow denv e >> checkTypeCons denv a >> checkTypeCons denv b
     TCon n as -> do
         case M.lookup n (denvDatas denv) of
             Nothing -> throwError $ Located Nothing $ UnknownTypeCtor n
@@ -529,6 +551,25 @@ checkTypeCons denv = \case
                 Just k | k /= length as -> throwError $ Located Nothing $ TypeCtorArityMisMatch n k (length as)
                 _ -> return ()
         mapM_ (checkTypeCons denv) as
+
+checkAbilityType :: MonadError (Located TypeError) m => DEnv -> T' -> m ()
+checkAbilityType denv ty = do
+    checkTypeCons denv ty
+    case ty of
+        TCon n _ | S.member n (denvAbilities denv) -> return ()
+        _ -> throwError $ Located Nothing $ NotAnAbility ty
+
+checkEffRow :: MonadError (Located TypeError) m => DEnv -> Eff -> m ()
+checkEffRow denv e = forM_ (S.toList (effLabs e)) $ \n ->
+    unless (S.member n (denvEffs denv)) $ throwError $ Located Nothing $ UnknownEff n
+
+checkEffTypes :: MonadError (Located TypeError) m => DEnv -> T' -> m ()
+checkEffTypes denv = \case
+    TFunc a e b -> checkEffRow denv e >> checkEffTypes denv a >> checkEffTypes denv b
+    TList a -> checkEffTypes denv a
+    TTuple as -> mapM_ (checkEffTypes denv) as
+    TCon _ as -> mapM_ (checkEffTypes denv) as
+    _ -> return ()
 
 errLine :: Located TypeError -> Int
 errLine = \case
@@ -659,7 +700,26 @@ buildDEnv :: [DataDecl] -> DEnv
 buildDEnv ds = DEnv
     { denvCtors = M.fromList [(c, ctorInfo d args) | d <- ds, (c, args) <- dCtors d]
     , denvDatas = M.fromList [(dName d, map fst (dCtors d)) | d <- ds]
+    , denvAbilities = S.empty
+    , denvEffs = S.singleton "Console"
     }
+
+buildProgramDEnv :: Program -> DEnv
+buildProgramDEnv p = (buildDEnv (dataDeclsOf p))
+    { denvAbilities = S.fromList [dName d | StmtAbility d <- p]
+    , denvEffs = S.insert "Console" (S.fromList [n | StmtEff n <- p])
+    }
+
+mergeDEnv :: DEnv -> DEnv -> DEnv
+mergeDEnv new old =
+    let redefined = M.keysSet (denvDatas new)
+        stale = concat [cs | (n, cs) <- M.toList (denvDatas old), S.member n redefined]
+    in DEnv
+        { denvCtors = M.union (denvCtors new) (foldr M.delete (denvCtors old) stale)
+        , denvDatas = M.union (denvDatas new) (denvDatas old)
+        , denvAbilities = S.union (denvAbilities new) (denvAbilities old `S.difference` redefined)
+        ,  denvEffs = S.union (denvEffs new) (denvEffs old)
+        }
 
 ctorInfo :: DataDecl -> [T'] -> CtorInfo
 ctorInfo d args = let tvs = S.fromList [0..length (dParams d) - 1] in CtorInfo
@@ -879,7 +939,8 @@ inferBindingGroupWithNotes annoate outer ienv ds = do
 prepareDecl :: Checker m => Decl -> m Decl
 prepareDecl (Def n ps body) = do
     denv <- ask
-    forM_ [t | ImplicitParam _ t <- ps] (checkTypeCons denv)
+    forM_ [(x, t) | ImplicitParam x t <- ps] $ \(x, t) ->
+        withNote ("in implicit parameter " <> tick x) (checkAbilityType denv t)
     let vars = S.toList $ S.filter (< 0) $ S.unions
             ([ftv t | ImplicitParam _ t <- ps] <> annotationVars body)
     freshVars <- mapM (const fresh) vars
@@ -1006,6 +1067,8 @@ resolveWanted :: Checker m => TEnv -> Wanted -> m E'
 resolveWanted tenv = resolve []
     where
         resolve path wtd = do
+            denv <- ask
+            checkAbilityType denv (wtdType wtd)
             let target = wtdType wtd
                 failAt e = throwError $ Located (wtdSpan wtd) e
             unless (isClosedType target) $ failAt (AmbiguousImpType target)
@@ -1076,8 +1139,8 @@ closeBinding outer ty0 wanted0 body now = do
     initial <- get
     let provisional = freezeType initial ty0
         anchored = inputEffectVars provisional `S.union` ftvTEnv outer
-        local = typeEffectVars provisional `S.union` effVars (resolveEff initial now)
-    forM_ (S.toList (local `S.difference` anchored)) $ \v ->
+        lvs = typeEffectVars provisional `S.union` effVars (resolveEff initial now)
+    forM_ (S.toList (lvs `S.difference` anchored)) $ \v ->
         modify (\c -> c { effectDefs = M.insert v emptyEff (effectDefs c) })
     validateEffects
     st <- get
@@ -1158,7 +1221,7 @@ inferDeclBodyPrepared env ienv params body = go env params
                     }
             (ImplicitParam n annotation : rest) -> do
                 denv <- ask
-                checkTypeCons denv annotation
+                checkAbilityType denv annotation
                 r <- go (M.insert n (Forall S.empty [] annotation) current) rest
                 if not (S.member n (freeVars (irExpr r))) then return r
                 else do
@@ -1297,6 +1360,9 @@ tryInfer act = (Right <$> withInferRollback act) `catchError` (return . Left)
 
 validateCandidate :: Checker m => Text -> S' -> m ()
 validateCandidate name sch@(Forall _ ps headTy) = do
+    denv <- ask
+    withNote ("in implicit candidate " <> tick name) (checkAbilityType denv headTy)
+    mapM_ (checkAbilityType denv . predType) ps
     let bad reason = throwError $ Located Nothing $ InvalidImpCandidate name reason
         contextVars = S.unions (map (ftv . predType) ps)
     unless (contextVars `S.isSubsetOf` ftv headTy) $
