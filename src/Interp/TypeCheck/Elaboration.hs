@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts, OverloadedStrings, LambdaCase #-}
+{-# LANGUAGE TupleSections #-}
 module Interp.TypeCheck.Elaboration where
 
 import Interp.Types
@@ -44,6 +45,8 @@ replaceSolvedHoles solved e = let go = replaceSolvedHoles solved in case e of
     ListLit es -> ListLit (map go es)
     TupleLit es -> TupleLit (map go es)
     Let n a b -> Let n (go a) (go b)
+    StrictLet n a b -> StrictLet n (go a) (go b)
+    Handle b n ts r rb os -> Handle (go b) n ts r (go rb) [(o, x, k, go c) | (o, x, k, c) <- os]
     DictCall h as ds -> DictCall (go h) (map go as) [d { daExpr = go (daExpr d) } | d <- ds]
     If c a b -> If (go c) (go a) (go b)
     BOpr op a b -> BOpr op (go a) (go b)
@@ -65,6 +68,9 @@ fillHoles solved = go
             ListLit es -> ListLit <$> mapM go es
             TupleLit es -> TupleLit <$> mapM go es
             Let n a b -> Let n <$> go a <*> go b
+            StrictLet n a b -> StrictLet n <$> go a <*> go b
+            Handle b n ts r rb os -> Handle <$> go b <*> pure n <*> pure ts <*> pure r <*> go rb
+                <*> mapM (\(o, x, k, e) -> (o, x, k, ) <$> go e) os
             DictCall h as ds -> DictCall <$> go h <*> mapM go as
                 <*> mapM (\d -> go (daExpr d) >>= \e -> return d {daExpr = e}) ds
             If c a b -> If <$> go c <*> go a <*> go b
@@ -94,6 +100,8 @@ annotationVars :: E' -> [Set TypeVar]
 annotationVars = \case
     AnnT e t -> ftv t: annotationVars e
     Let _ _ body -> annotationVars body
+    StrictLet _ _ body -> annotationVars body
+    Handle b _ ts _ rb os -> map ftv ts <> concatMap annotationVars (b: rb: [e | (_, _, _, e) <- os])
     e -> concatMap annotationVars (exprChildren e)
 
 exprChildren :: E' -> [E']
@@ -101,6 +109,8 @@ exprChildren = \case
     ListLit es -> es
     TupleLit es -> es
     Let _ a b -> [a, b]
+    StrictLet _ a b -> [a, b]
+    Handle b _ _ _ rb os -> b: rb: [e | (_, _, _, e) <- os]
     If a b c -> [a, b, c]
     BOpr _ a b -> [a, b]
     Lambda _ b -> [b]
@@ -117,6 +127,8 @@ mapAnnotations f enterLet = go
         go = \case
             AnnT a t -> AnnT (go a) (f t)
             Let n a b -> Let n (if enterLet then go a else a) (go b)
+            StrictLet n a b -> StrictLet n (if enterLet then go a else a) (go b)
+            Handle b n ts r rb os -> Handle (go b) n (map f ts) r (go rb) [(o, x, k, go e) | (o, x, k, e) <- os]
             ListLit es -> ListLit (map go es)
             TupleLit es -> TupleLit (map go es)
             If a b c -> If (go a) (go b) (go c)
@@ -152,6 +164,9 @@ dictCallHints bd = go
                         _ -> bd
                 in dictCallHints recBd rhs <> dictCallHints (S.insert n bd) body
             Lambda n body -> dictCallHints (S.insert n bd) body
+            StrictLet n a b -> go a <> dictCallHints (S.insert n bd) b
+            Handle b _ _ r rb os -> go b <> dictCallHints (S.insert r bd) rb <>
+                concat [dictCallHints (S.insert x (S.insert k bd)) e | (_, x, k, e) <- os]
             Match x arms -> go x <> concat
                 [dictCallHints (S.union bd (S.fromList (patVarsList pat))) body | (pat, body) <- arms]
             ListLit es -> concatMap go es

@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, LambdaCase #-}
+{-# LANGUAGE OverloadedStrings, LambdaCase, TupleSections #-}
 module Interp.Parser where
 
 import Interp.Types
@@ -18,6 +18,7 @@ import Control.Monad (guard, when, foldM)
 import Data.List (sortOn, nub)
 import Data.Either (lefts, rights)
 import Data.Maybe (fromMaybe)
+
 import qualified Data.Set as S
 
 opInfo :: Opr -> Fixity
@@ -29,6 +30,12 @@ opInfo = \case
         OpMul -> Fixity 7 AssocL
         OpDiv -> Fixity 7 AssocL
         OpPow -> Fixity 8 AssocR
+
+isOpChar :: Char -> Bool
+isOpChar c = c `elem` ("+-*/^=<>!%&~?" :: String)
+
+isOpName :: Text -> Bool
+isOpName n = not (T.null n) && T.all isOpChar n
 
 builtinFix :: FixTab
 builtinFix = M.fromList 
@@ -48,6 +55,7 @@ reserved =
     , "match", "with", "data", "type"
     , "infixl", "infixr", "infix"
     , "implicit", "ability", "effect"
+    , "handle", "return", "do"
     ]
 
 reservedType :: [Text]
@@ -356,14 +364,21 @@ parseTypeWith vars = do
     a <- parseTypeApp vars
     m <- optional $ do
         _ <- lexeme (string "->")
-        eff <- option emptyEff parseEffRow
+        eff <- option emptyEff (parseEffRowWith vars)
         b <- parseTypeWith vars
         return (TFunc a eff b)
     return $ fromMaybe a m
 
 parseEffRow :: Parser Eff
-parseEffRow = (`Eff` S.empty) . S.fromList 
-    <$> (lexeme (char '{') *> sepBy qname comma <* lexeme (char '}'))
+parseEffRow = parseEffRowWith []
+
+parseEffRowWith :: [(Text, TypeVar)] -> Parser Eff
+parseEffRowWith vars = do
+    _ <- lexeme (char '{')
+    labels <- sepBy ((,) <$> qname <*> many (parseTypeAtom vars)) comma
+    _ <- lexeme (char '}')
+    return $ EffRow (S.fromList (map fst labels)) S.empty
+        (M.fromListWith (++) [(n, [ts]) | (n, ts) <- labels, not (null ts)]) M.empty
 
 parseType :: Parser T'
 parseType = parseTypeWith []
@@ -397,7 +412,58 @@ parseAbility = do
         _ -> fail "an ability must have one constructor (or a nullary maker constructor)"
 
 parseEff :: Parser Statement
-parseEff = StmtEff <$> (symbol "effect" *> upperName <* semicolon)
+parseEff = do
+    _ <- symbol "effect"
+    n <- upperName
+    ps <- many parseVar'
+    when (length ps /= length (nub ps)) $ fail "duplicate effect parameter"
+    ops <- optional $ do
+        _ <- lexeme (char '{')
+        os <- sepEndBy1 ((,) <$> parseVar' <* lexeme (string "::") <*> parseTypeWith (zip ps [0..])) comma
+        _ <- lexeme (char '}')
+        return os
+    _ <- semicolon
+    case (ps, ops) of
+        ([], Nothing) -> return $ StmtEff n
+        (_, Just os) -> return $ StmtOperations $ EffDecl n ps os
+        _ -> fail "parameterized effects require operation declarations"
+
+parseDo :: Tabs -> Parser E'
+parseDo tab = withSpan $ symbol "do" *> lexeme (char '}') *> block
+    where
+        block = do
+            binding <- optional $ try (parseVar' <* lexeme (char '='))
+            e <- parseExpr tab
+            end <- optional (lexeme (char '}'))
+            case end of
+                Just _ -> case binding of
+                    Nothing -> return e
+                    Just _ -> fail "do must end with an expression"
+                Nothing -> do
+                    _ <- semicolon
+                    trailing <- optional (lexeme (char '}'))
+                    case trailing of
+                        Just _ -> case binding of
+                            Nothing -> return e
+                            Just _ -> fail "do must end with an expression"
+                        Nothing -> StrictLet (fromMaybe "$discard" binding) e <$> block
+
+parseHandle :: Tabs -> Parser E'
+parseHandle tab = withSpan $ do
+    _ <- symbol "handle"
+    n <- qname
+    ts <- many (notFollowedBy (symbol "in") *> parseTypeAtom [])
+    _ <- symbol "in"
+    body <- parseExpr tab
+    _ <- symbol "with" *> lexeme (char '{') *> symbol "return"
+    ret <- parseVar' <* lexeme (string "->")
+    retBody <- parseExpr tab <* semicolon
+    ops <- sepEndBy1 arm semicolon
+    _ <- lexeme (char '}')
+    return $ Handle body n ts ret retBody ops
+    where
+        arm = (,,,) <$> (qname <|> parseVar') <*> parseVar' <*> parseVar'
+            <* lexeme (string "->") <*> parseExpr tab
 
 parseDataCore :: Bool -> Parser DataDecl
 parseDataCore sh = do
@@ -442,7 +508,10 @@ parseCtorDecl vars = do
             return (n, as, [])
 
 parseExpr :: Tabs -> Parser E'
-parseExpr tab = parseIf tab <|> parseLet tab <|> parseLambda tab <|> parseMatch tab <|> parseAnn tab <|> parseCons tab
+parseExpr tab 
+     =  parseDo tab <|> parseHandle tab <|> parseIf tab 
+    <|> parseLet tab <|> parseLambda tab <|> parseMatch tab 
+    <|> parseAnn tab <|> parseCons tab
 
 parseCtorExpr :: Tabs -> Parser E'
 parseCtorExpr tab = withSpan ((try qname >>= ctorExpr tab) <?> "constructor")
@@ -781,6 +850,7 @@ desugarE tab = \case
     ListLit es      -> ListLit <$> mapM (desugarE tab) es
     TupleLit es     -> TupleLit <$> mapM (desugarE tab) es
     Let n u v       -> Let n <$> desugarE tab u <*> desugarE tab v
+    StrictLet n u v -> StrictLet n <$> desugarE tab u <*> desugarE tab v
     DictCall h a ds -> DictCall <$> desugarE tab h <*> mapM (desugarE tab) a
         <*> mapM (\d -> desugarE tab (daExpr d) >>= \e -> return d { daExpr = e }) ds
     If b u v        -> If <$> desugarE tab b <*> desugarE tab u <*> desugarE tab v
@@ -796,6 +866,8 @@ desugarE tab = \case
         case spanOf f' of
             (sp, Var n) | isMarker n -> recUse tab sp n a'
             _                        -> Right (App f' a')
+    Handle b n ts r rb os -> Handle <$> desugarE tab b <*> pure n <*> pure ts <*> pure r
+        <*> desugarE tab rb <*> mapM (\(o,x,k,e) -> (o,x,k,) <$> desugarE tab e) os
 
 spanOf :: E' -> (Maybe Span, E')
 spanOf = \case

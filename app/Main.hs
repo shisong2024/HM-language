@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings, LambdaCase #-}
+{-# LANGUAGE FlexibleContexts #-}
 module Main where
 
 import Interp.Eval
@@ -19,20 +20,23 @@ import qualified Data.Sequence as Seq
 import Control.Monad (forM_, unless, when, foldM)
 import Control.Monad.Reader (runReaderT)
 import Control.Monad.Except (runExceptT)
-import Control.Monad.State (runState)
+import Control.Monad.State (runState, StateT (runStateT))
 import Control.Exception (try, IOException)
 
 import System.IO (stdout, hFlush, isEOF)
 import System.Environment (getArgs)
 import System.Exit (exitWith, ExitCode (ExitFailure))
+import GHC.IO.Encoding (setLocaleEncoding, utf8)
 
 import Data.Text (Text)
 import Data.Char (isAlphaNum, isUpper)
 import Data.Maybe (fromMaybe)
 import Data.Either (isLeft)
+import Control.Monad.IO.Class (liftIO)
 
 main :: IO ()
 main = do
+    setLocaleEncoding utf8
     args <- getArgs
     case args of
         [path] -> runFile path
@@ -100,8 +104,19 @@ execBatch' loud ss src lprs perr = do
                 return (ss { sNext = n}, False)
             else do
                 let nTEnv = cTEnv checked
-                    (evRes, runtime) = runState (runReaderT (runExceptT (evalCheckedProgram checked)) (sEnv ss)) emptyRuntime
-                    logged = ss {sTrace = rtLog runtime, sNext = n}
+                    (resNext, resUsed) = sResume ss
+                    initialRuntime = emptyRuntime { rtResumeNext = resNext, rtResumeUsed = resUsed }
+                    host "FileIO" "readFile" (VStr path) = do
+                        result <- liftIO (try (TIO.readFile (T.unpack path)) :: IO (Either IOException Text))
+                        return $ either (left . T.pack . show) (right . VStr) result
+                    host "FileIO" "writeFile" (VTuple [VStr path, VStr content]) = do
+                        result <- liftIO (try (TIO.writeFile (T.unpack path) content) :: IO (Either IOException ()))
+                        return $ either (left . T.pack . show) (const (right (VCtor "Unit" 0 []))) result
+                    host eff operation value = defaultHost eff operation value
+                    left msg = VCtor "Left" 1 [VStr msg]
+                    right v = VCtor "Right" 1 [v]
+                (evRes, runtime) <- runStateT (runReaderT (runExceptT (evalCheckedProgramWith host checked)) (sEnv ss)) initialRuntime
+                let logged = ss { sTrace = rtLog runtime, sNext = n, sResume = (rtResumeNext runtime, rtResumeUsed runtime)}
                 replayOutput (rtLog runtime)
                 case evRes of
                     Left eerr -> do
@@ -330,6 +345,7 @@ unload a s = s
     , sDEnv = DEnv (strip (denvCtors d)) (strip (denvDatas d))
         (S.filter (not . ((a <> ".") `T.isPrefixOf`)) (denvAbilities d))
         (S.filter (not . ((a <> ".") `T.isPrefixOf`)) (denvEffs d))
+        (strip (denvOperations d))
     , sSyns = strip (sSyns s)
     , sFixities = strip (sFixities s)
     , sFields = M.filter (not . gone) (sFields s)

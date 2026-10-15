@@ -34,6 +34,7 @@ import Interp.TypeCheck.Elaboration
 import Interp.TypeCheck.Implicit
 import Interp.TypeCheck.Infer
 import Interp.Pretty (tick)
+import Data.Maybe (isJust)
 
 sccChecker :: Checker m => TEnv -> [Binding] -> m (TSub, TEnv)
 sccChecker env bs = do
@@ -60,9 +61,23 @@ programChecker outT outI p = withInferRollback $ do
         let newAbility = dName d `S.member` S.fromList [dName a | StmtAbility a <- p]
         when (newAbility /= S.member (dName d) (denvAbilities old)) $
             throwError $ Located Nothing $ DeclRoleChanged (dName d)
-    case fstDuplicate [n | StmtEff n <- p] of
+    case fstDuplicate ([n | StmtEff n <- p] <> [edName d | StmtOperations d <- p]) of
         Just n -> throwError $ Located Nothing $ DuplicateEff n
         Nothing -> return ()
+    forM_ [d | StmtOperations d <- p] $ \d ->
+        when (isJust $ fstDuplicate (map fst (edOperations d))) $
+            throwError $ Located Nothing $ HandleError "duplicate operation"
+    case fstDuplicate ([o | StmtOperations d <- p,(o,_) <- edOperations d] <>
+        [n | stmt <- p, Def n _ _ <- case stmt of StmtDef d->[d]; StmtImp d->[d]; _->[]]) of
+        Just n -> throwError $ Located Nothing $ DuplicateDef n
+        Nothing -> return ()
+    forM_ [d | StmtOperations d <- p] $ \d -> do
+        case M.lookup (edName d) (denvOperations old) of
+            Just prior | prior /= d -> throwError $ Located Nothing $ HandleError "effect operation interface changed in a live scope"
+            _ -> return ()
+        let otherOps = [o | oldDecl <- M.elems (denvOperations old),edName oldDecl /= edName d,(o,_) <- edOperations oldDecl]
+        forM_ (edOperations d) $ \(o,_) -> when (o `elem` otherOps || o `elem` ["putStr","putStrLn","readFile","writeFile"]) $
+            throwError $ Located Nothing $ DuplicateDef o
     let denv = mergeDEnv (buildProgramDEnv p) old
     local (const denv) $ do
         mapM_ (checkEffTypes denv) [t | StmtType _ _ t <- p]
@@ -72,7 +87,8 @@ programCheckerCore :: Checker m => TEnv -> IFrame -> Program -> m CProgram
 programCheckerCore outerT outerI program = do
     let datas = dataDeclsOf program
         ctorEnv = M.unions (map ctorSchemes datas)
-        outer = M.union ctorEnv outerT
+        oprEnv = M.unions [operationSchemes d | StmtOperations d <- program]
+        outer = M.unions [oprEnv, ctorEnv, outerT]
         implicitDecls = [(True, d) | StmtImp d <- program]
         ordinaryDecls = [(False, d) | StmtDef d <- program]
         impNames = [n | (True, Def n _ _ ) <- implicitDecls]
@@ -119,6 +135,8 @@ programCheckerCore outerT outerI program = do
                         Left h -> throwError $ Located Nothing $ EscapedImpHole h
                         Right x -> return x
                     validateEffects
+                    _ <- closeBinding env (apply (irSub rr) (irType rr)) [] e' (applyEff (irSub rr) (irNow rr))
+
                     get >>= \st -> return
                         ( freezeType st (apply (irSub rr) (irType rr)), e'
                         , resolveEff st (applyEff (irSub rr) (irNow rr)))
@@ -152,7 +170,7 @@ programCheckerCore outerT outerI program = do
 
     return CProgram
         { cSub     = M.empty
-        , cTEnv    = M.union ctorEnv newT
+        , cTEnv    = M.unions [oprEnv, ctorEnv, newT]
         , cTypes   = typeMap
         , cProgram = elaborated
         , cEffects = M.fromList [(i, e) | (i, Right (_, _, e)) <- exprRes]

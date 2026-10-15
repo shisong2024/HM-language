@@ -17,6 +17,8 @@ builtinEnv = M.fromList
     , ("intCompare", VPrim "intCompare" 2 [])
     , ("putStr", VPrim "putStr" 1 [])
     , ("putStrLn", VPrim "putStrLn" 1 [])
+    , ("readFile", VOperation "FileIO" "readFile")
+    , ("writeFile", VOperation "FileIO" "writeFile")
     , ("$fieldErr", VPrim "$fieldErr" 2 [])
     ]
 
@@ -30,6 +32,8 @@ builtinTEnv = M.fromList
     , ("intCompare", intCompareTy)
     , ("putStr", outputTy)
     , ("putStrLn", outputTy)
+    , ("readFile", readFileTy)
+    , ("writeFile", writeFileTy)
     , ("$fieldErr", fieldErrTy)
     ]
 
@@ -54,6 +58,12 @@ fromCodeTy = Forall S.empty [] (pureFunc TInt TString)
 intCompareTy :: S'
 intCompareTy = Forall S.empty [] (pureFunc TInt (pureFunc TInt TInt))
 
+readFileTy :: S'
+readFileTy = Forall S.empty [] (TFunc TString fileEff (TCon "Either" [TString, TString]))
+
+writeFileTy :: S'
+writeFileTy = Forall S.empty [] (TFunc (TTuple [TString, TString]) fileEff (TCon "Either" [TString, TCon "Unit" []]))
+
 initSession :: Session
 initSession = Session 
     { sTrace    = Seq.empty
@@ -67,13 +77,17 @@ initSession = Session
     , sFields   = M.empty
     , sFixities = M.empty
     , sImp      = []
+    , sResume   = (0, S.empty)
     }
 
 emptyDEnv :: DEnv
-emptyDEnv = DEnv M.empty M.empty S.empty (S.singleton "Console")
+emptyDEnv = DEnv M.empty M.empty S.empty (S.fromList ["Console", "FileIO"]) M.empty
 
 emptyCounter :: Int -> Counter
-emptyCounter n = Counter n M.empty []
+emptyCounter n = Counter n M.empty [] M.empty S.empty
 
 consoleEff :: Eff
 consoleEff = Eff (S.singleton "Console") S.empty
+
+fileEff :: Eff
+fileEff = Eff (S.singleton "FileIO") S.empty

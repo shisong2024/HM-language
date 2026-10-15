@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, LambdaCase, PatternSynonyms #-}
+{-# LANGUAGE OverloadedStrings, LambdaCase, PatternSynonyms, InstanceSigs #-}
 module Interp.Types where
 
 import Data.Map (Map)
@@ -9,7 +9,6 @@ import Data.Sequence (Seq)
 
 import qualified Data.Sequence as Seq
 import qualified Data.Set as S
-import qualified Data.Text as T
 
 import Text.Megaparsec (Parsec, SourcePos)
 
@@ -33,6 +32,8 @@ data E'
     | ListLit [E']
     | TupleLit [E']
     | Let Text E' E'
+    | StrictLet Text E' E'
+    | Handle E' Text [T'] Text E' [(Text, Text, Text, E')]
     | If E' E' E'
     | BOpr Opr E' E'
     | Lambda Text E'
@@ -82,12 +83,6 @@ data Tabs = Tabs
     , tbFld :: FieldTab
     } deriving (Show, Eq)
 
-isOpChar :: Char -> Bool
-isOpChar c = c `elem` ("+-*/^=<>!%&~?" :: String)
-
-isOpName :: Text -> Bool
-isOpName n = not (T.null n) && T.all isOpChar n
-
 data V'
     = VInt Integer
     | VBool Bool
@@ -97,7 +92,27 @@ data V'
     | VClosure Text E' Env
     | VPrim Text Int [V']
     | VCtor Text Int [V']
+    | VOperation Text Text
+    | VResume Int Continuation
     deriving (Show, Eq)
+
+newtype Continuation = Continuation (V' -> Computation)
+
+data Computation
+    = Done V'
+    | Failed (Located EvalError)
+    | Request Text Text V' (Maybe Span) Continuation
+    | Primitive Text [V'] Env (Maybe Span) Continuation
+    | FreshResume (Int -> Computation)
+    | UseResume Int (Maybe Span) Computation
+
+instance Show Continuation where
+    show :: Continuation -> String
+    show _ = "<continuation>"
+
+instance Eq Continuation where
+    (==) :: Continuation -> Continuation -> Bool
+    _ == _ = False
 
 data EvalError
     = UnboundVariable Text
@@ -114,6 +129,8 @@ data EvalError
     | NotACodepoint Integer
     | PrimArgMismatch Text [V']
     | NoSuchField Text V'
+    | UnhandledEff Text Text
+    | ResumeAlreadyUsed Int
     | UnelaboratedDictCall
     deriving (Show, Eq)
 
@@ -122,10 +139,12 @@ data OutputEvent = WriteText Text | WriteLine Text deriving (Show, Eq)
 data Runtime = Runtime
     { rtDepth :: Int
     , rtLog :: Seq OutputEvent
+    , rtResumeNext :: Int
+    , rtResumeUsed :: Set Int
     } deriving (Show, Eq)
 
 emptyRuntime :: Runtime
-emptyRuntime = Runtime 0 Seq.empty
+emptyRuntime = Runtime 0 Seq.empty 0 S.empty
 
 data Located e = Located (Maybe Span) e deriving (Show, Eq)
 
@@ -171,10 +190,17 @@ data CProgram = CProgram
     , cIFrame  :: IFrame
     } deriving (Show, Eq)
 
-data Eff = Eff
+data Eff = EffRow
     { effLabs :: Set Text
     , effVars :: Set Int
+    , effParams :: Map Text [[T']]
+    , effExclusions :: Map Int (Set Text)
     } deriving (Show, Eq, Ord)
+
+pattern Eff :: Set Text -> Set Int -> Eff
+pattern Eff ls vs <- EffRow ls vs _ _ where
+    Eff ls vs = EffRow ls vs mempty mempty
+{-# COMPLETE Eff #-}
 
 type TypeVar = Int
 type Depth   = Int 
@@ -182,9 +208,11 @@ type HoleId  = Int
 type HoleSol = Map HoleId E'
 
 data Counter = Counter
-    { nextId     :: Int
-    , effectDefs :: Map Int Eff
-    , effectRels :: [(Eff, Eff)]
+    { nextId :: Int
+    , effDefs :: Map Int Eff
+    , effRels :: [(Eff, Eff)]
+    , effTypeSub :: TSub
+    , effParamRows :: Set Int
     } deriving (Show, Eq)
 
 data TypeError
@@ -223,6 +251,7 @@ data TypeError
     | UnknownEff Text
     | DuplicateEff Text
     | DeclRoleChanged Text
+    | HandleError Text
     deriving (Show, Eq)
 
 type Env  = Map Text V'
@@ -257,9 +286,6 @@ pureFunc a = TFunc a emptyEff
 emptyEff :: Eff
 emptyEff = Eff S.empty S.empty
 
-unionEff :: Eff -> Eff -> Eff
-unionEff (Eff a x) (Eff b y) = Eff (S.union a b) (S.union x y)
-
 {-# COMPLETE Forall #-}
 
 predType :: Pred -> T'
@@ -283,6 +309,7 @@ data Statement
     | StmtEff Text
     | StmtType Text [Text] T'
     | StmtInfix Text Fixity
+    | StmtOperations EffDecl
     deriving (Show, Eq)
 
 type Program = [Statement]
@@ -294,6 +321,12 @@ data DataDecl = DataDecl
     , dParams :: [Text]
     , dCtors  :: [(Text, [T'])]
     , dFields :: Map Text (Text, Int)
+    } deriving (Show, Eq)
+
+data EffDecl = EffDecl
+    { edName       :: Text
+    , edParams     :: [Text]
+    , edOperations :: [(Text, T')]
     } deriving (Show, Eq)
 
 data Session = Session
@@ -308,6 +341,7 @@ data Session = Session
     , sFixities :: FixTab
     , sFields   :: FieldTab
     , sImp      :: IFrame
+    , sResume   :: (Int, Set Int)
     } deriving (Show, Eq)
 
 data CtorInfo = CtorInfo
@@ -317,10 +351,11 @@ data CtorInfo = CtorInfo
     } deriving (Show, Eq)
 
 data DEnv = DEnv
-    { denvCtors     :: Map Text CtorInfo
-    , denvDatas     :: Map Text [Text]
-    , denvAbilities :: Set Text
-    , denvEffs      :: Set Text
+    { denvCtors      :: Map Text CtorInfo
+    , denvDatas      :: Map Text [Text]
+    , denvAbilities  :: Set Text
+    , denvEffs       :: Set Text
+    , denvOperations :: Map Text EffDecl
     } deriving (Show, Eq)
 
 data Tops = Tops 

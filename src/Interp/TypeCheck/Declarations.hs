@@ -10,6 +10,7 @@ import Data.Text (Text)
 
 import qualified Data.Map as M
 import qualified Data.Set as S
+
 import Control.Monad.Reader (MonadReader (ask))
 import Interp.Parser (dataDeclsOf)
 import Interp.TypeCheck.Common
@@ -48,8 +49,13 @@ checkAbilityType denv ty = do
         _ -> throwError $ Located Nothing $ NotAnAbility ty
 
 checkEffRow :: MonadError (Located TypeError) m => DEnv -> Eff -> m ()
-checkEffRow denv e = forM_ (S.toList (effLabs e)) $ \n ->
+checkEffRow denv e = forM_ (S.toList (effLabs e)) $ \n -> do
     unless (S.member n (denvEffs denv)) $ throwError $ Located Nothing $ UnknownEff n
+    let expected = maybe 0 (length . edParams) (M.lookup n (denvOperations denv))
+        args = M.findWithDefault [[]] n (effParams e)
+    forM_ args $ \ts -> do
+        unless (length ts == expected) $ throwError $ Located Nothing $ HandleError ("effect arity mismatch: " <> n)
+        mapM_ (checkTypeCons denv) ts
 
 checkEffTypes :: MonadError (Located TypeError) m => DEnv -> T' -> m ()
 checkEffTypes denv = \case
@@ -64,13 +70,15 @@ buildDEnv ds = DEnv
     { denvCtors = M.fromList [(c, ctorInfo d args) | d <- ds, (c, args) <- dCtors d]
     , denvDatas = M.fromList [(dName d, map fst (dCtors d)) | d <- ds]
     , denvAbilities = S.empty
-    , denvEffs = S.singleton "Console"
+    , denvEffs = S.fromList ["Console", "FileIO"]
+    , denvOperations = M.empty
     }
 
 buildProgramDEnv :: Program -> DEnv
 buildProgramDEnv p = (buildDEnv (dataDeclsOf p))
     { denvAbilities = S.fromList [dName d | StmtAbility d <- p]
-    , denvEffs = S.insert "Console" (S.fromList [n | StmtEff n <- p])
+    , denvEffs = S.insert "Console" (S.fromList $ [n | StmtEff n <- p] <> [edName d | StmtOperations d <- p])
+    , denvOperations = M.fromList [(edName d, d) | StmtOperations d <- p]
     }
 
 mergeDEnv :: DEnv -> DEnv -> DEnv
@@ -81,7 +89,8 @@ mergeDEnv new old =
         { denvCtors = M.union (denvCtors new) (foldr M.delete (denvCtors old) stale)
         , denvDatas = M.union (denvDatas new) (denvDatas old)
         , denvAbilities = S.union (denvAbilities new) (denvAbilities old `S.difference` redefined)
-        ,  denvEffs = S.union (denvEffs new) (denvEffs old)
+        , denvEffs = S.union (denvEffs new) (denvEffs old)
+        , denvOperations = M.union (denvOperations new) (denvOperations old)
         }
 
 ctorInfo :: DataDecl -> [T'] -> CtorInfo
@@ -95,7 +104,6 @@ ctorSchemes :: DataDecl -> TEnv
 ctorSchemes d = M.fromList
     [ (c, Forall (ciTvs ci) [] (foldr pureFunc (ciRes ci) (ciArgs ci)))
     | (c, args) <- dCtors d, let ci = ctorInfo d args]
-
 
 checkDataDecls :: (MonadReader DEnv m, MonadError (Located TypeError) m) => [DataDecl] -> m ()
 checkDataDecls ds = do

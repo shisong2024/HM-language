@@ -27,6 +27,8 @@ debugE' = \case
     TupleLit es -> "(" <> T.intercalate ", " (fmap debugE' es) <> ")"
     BOpr op e1 e2 -> "(" <> T.unwords [debugE' e1, prettyBOpr op, debugE' e2] <> ")"
     Let t e1 e2 -> T.unwords ["(Let", t, "=", debugE' e1, "in", debugE' e2] <> ")"
+    StrictLet t a b -> "(do " <> t <> " = " <> debugE' a <> "; " <> debugE' b <> ")"
+    Handle b n _ _ _ _ -> "(handle " <> n <> " in " <> debugE' b <> " with ...)"
     DictCall h as ds -> "(DictCall " <> debugE' h <> " " <> T.unwords (map debugE' as) <>
         "@{" <> T.intercalate ", " [daName d <> "=" <> debugE' (daExpr d) | d <- ds] <> "})"
     If eb e1 e2 -> T.unwords ["(If", debugE' eb, "then", debugE' e1, "else", debugE' e2] <> ")"
@@ -48,6 +50,8 @@ prettyV' = \case
     VClosure t _ _ -> T.unwords ["<closure", t, "::", "...>"]
     VPrim n _ args -> primLike n args
     VCtor n _ args -> primLike n args
+    VOperation n o -> "<operation " <> n <> "." <> o <> ">"
+    VResume _ _ -> "<resume>"
     where
         primLike :: Text -> [V'] -> Text
         primLike n = \case
@@ -72,6 +76,8 @@ prettyEvalError = \case
         "`" <> p <> "` does not accept " <> T.intercalate ", " (fmap prettyV' args) <> "."
     NoSuchField f v -> "`" <> f <> "` is not a field of " <> prettyV' v <> "."
     UnelaboratedDictCall -> "Internal Error: dictionary call reached the evaluator."
+    UnhandledEff n o -> "Unhandled effect operation: " <> n <> "." <> o
+    ResumeAlreadyUsed _ -> "A continuation may be resumed at most once."
 
 printT' :: T' -> Text
 printT' = go False
@@ -159,12 +165,13 @@ prettyTypeError = \case
         else "Declare it with `effect " <> n <> ";`."
     DuplicateEff n -> "Duplicate effect declaration " <> tick n <> "."
     DeclRoleChanged n -> "Cannot change " <> tick n <> " between data and ability in a live scope."
+    HandleError msg -> "Handler/effect error: " <> msg
 
 
 prettyS' :: S' -> Text
 prettyS' sch@(Forall vars preds ty) =
     let ordered = dedup (concatMap (varOrder . predType) preds <> varOrder ty)
-        eVars = effectVarOrder ty 
+        eVars = effVarOrder ty 
             <> S.toAscList (effVars (sDictCall sch)) 
             <> concat [S.toAscList (effVars a) <> S.toAscList (effVars b) | (a, b) <- sEffCs sch]
         normalVars = vars `S.difference` S.fromList eVars
@@ -189,7 +196,7 @@ prettyS' sch@(Forall vars preds ty) =
     where
         renEff e = 
             let varsInOrder = dedup 
-                    (  effectVarOrder ty 
+                    (  effVarOrder ty 
                     <> S.toAscList (effVars (sDictCall sch))
                     <> concat [S.toAscList (effVars a) <> S.toAscList (effVars b) | (a, b) <- sEffCs sch]
                     )
@@ -284,6 +291,7 @@ printBatch src bn lprs tps vals perr =
                               <> (\(Forall _ _ t) -> prettyT' t) sch <> "\n"
                             | (c, sch) <- M.toAscList (ctorSchemes d) ]
             StmtEff n -> "effect " <> n <>"\n"
+            StmtOperations d -> "effect " <> edName d <> " " <> T.unwords (edParams d) <> "\n"
             StmtType n ps t -> "type " <> T.unwords (n : ps) <> " = " <> prettyT' t <> "\n"
             StmtInfix n fx -> fixityTxt n fx <> "\n"
 
@@ -304,7 +312,10 @@ renumberT m = go
             TBool -> TBool
             TList t -> TList (go t)
             TTuple ts -> TTuple (fmap go ts)
-            TFunc g e r -> TFunc (go g) (e {effVars = S.map (\i -> M.findWithDefault i i m) (effVars e)}) (go r)
+            TFunc g e r -> TFunc (go g) (e {effVars = S.map (\i -> M.findWithDefault i i m) (effVars e)
+                , effParams = M.map (map (map go)) (effParams e)
+                , effExclusions = M.fromList [(M.findWithDefault i i m, ns) | (i, ns) <- M.toList (effExclusions e)]
+                }) (go r)
             TVar i -> TVar (M.findWithDefault i i m)
             TString -> TString
             TCon n args -> TCon n (fmap go args)
@@ -317,11 +328,11 @@ varOrder = \case
     TVar i -> [i]
     TList t -> varOrder t
     TTuple ts -> concatMap varOrder ts
-    TFunc g _ r -> varOrder g <> varOrder r
+    TFunc g e r -> varOrder g <> concatMap varOrder (concat (concat (M.elems (effParams e)))) <> varOrder r
     TCon _ args -> concatMap varOrder args
 
 normalizeT :: T' -> T'
-normalizeT t = renumberT (M.fromList (zip (dedup (varOrder t)) [0..] <> zip (dedup (effectVarOrder t)) [0..])) t
+normalizeT t = renumberT (M.fromList (zip (dedup (varOrder t)) [0..] <> zip (dedup (effVarOrder t)) [0..])) t
 
 normalizeTs :: [T'] -> [T']
 normalizeTs ts = fmap (renumberT $ M.fromList (zip (dedup (concatMap varOrder ts)) [0..])) ts
@@ -367,14 +378,22 @@ hex4 n = T.justifyRight 4 '0' (T.pack (digits n))
         go k = "0123456789ABCDEF" !! (k `mod` 16) : go (k `div` 16)
 
 prettyEff :: Eff -> Text
-prettyEff (Eff ls vs) = "{" <> T.intercalate ", " (S.toAscList ls <> ["e" <> pack (show i) | i <- S.toAscList vs]) <> "}"
+prettyEff e = "{" <> T.intercalate ", " ([label n | n <- S.toAscList (effLabs e)] <>
+    ["e" <> pack (show i) <> excluded i | i <- S.toAscList (effVars e)]) <> "}"
+    where 
+        label n = n <> case M.lookup n (effParams e) of
+            Just (ts:_) -> " " <> T.unwords (map printT' ts)
+            _ -> ""
+        excluded i = case M.lookup i (effExclusions e) of
+            Just ns | not (S.null ns) -> " \\ " <> T.intercalate "," (S.toAscList ns)
+            _ -> ""
 
-effectVarOrder :: T' -> [Int]
-effectVarOrder = \case
-    TFunc a e b -> effectVarOrder a <> S.toAscList (effVars e) <> effectVarOrder b
-    TList t -> effectVarOrder t
-    TTuple ts -> concatMap effectVarOrder ts
-    TCon _ ts -> concatMap effectVarOrder ts
+effVarOrder :: T' -> [Int]
+effVarOrder = \case
+    TFunc a e b -> effVarOrder a <> S.toAscList (effVars e) <> effVarOrder b
+    TList t -> effVarOrder t
+    TTuple ts -> concatMap effVarOrder ts
+    TCon _ ts -> concatMap effVarOrder ts
     _ -> []
 
 errLine :: Located TypeError -> Int

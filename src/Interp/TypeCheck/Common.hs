@@ -6,8 +6,12 @@ import Interp.Types
 import Control.Monad.State (MonadState)
 import Control.Monad.Reader (MonadReader)
 import Control.Monad.Except (MonadError (catchError, throwError))
+
 import Data.Text (Text)
 import Data.Map (Map, (!?))
+
+import qualified Data.Map as M
+import qualified Data.Set as S
 
 type Checker m = (MonadState Counter m, MonadReader DEnv m, MonadError (Located TypeError) m)
 
@@ -54,3 +58,25 @@ bodySpan = \case
 
 declName :: Decl -> Text
 declName (Def n _ _) = n
+
+unionEff :: Eff -> Eff -> Eff
+unionEff a b = EffRow 
+    (S.union (effLabs a) (effLabs b))
+    (S.union (effVars a) (effVars b))
+    (M.unionWith (\x y -> S.toList (S.fromList (x ++ y))) (effParams a) (effParams b))
+    (M.fromList [(v, mask v) | v <- S.toList (effVars a `S.union` effVars b), not (S.null (mask v))])
+    where
+        mask v = S.intersection (get a v) (get b v)
+        get x v = if S.member v (effVars x) then M.findWithDefault S.empty v (effExclusions x) else S.empty
+
+removeEff :: Text -> Eff -> Eff
+removeEff n e = e 
+    { effLabs = S.delete n (effLabs e) 
+    , effParams = M.delete n (effParams e)
+    , effExclusions = M.fromList 
+        [ (v, S.insert n (M.findWithDefault S.empty v (effExclusions e))) 
+        | v <- S.toList (effVars e)]
+    }
+
+reject :: MonadError (Located TypeError) m => Text -> m a
+reject = throwError . Located Nothing . HandleError

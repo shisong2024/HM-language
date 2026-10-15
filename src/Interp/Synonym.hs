@@ -1,4 +1,4 @@
-{-# LANGUAGE LambdaCase, OverloadedStrings #-}
+{-# LANGUAGE LambdaCase, OverloadedStrings, TupleSections #-}
 
 module Interp.Synonym where
 
@@ -36,6 +36,9 @@ expandStmt tab = \case
     StmtType n ps t      -> Right (StmtType n ps t)
     StmtInfix n fx       -> Right (StmtInfix n fx)
     StmtImp d -> StmtImp <$> expandDecl tab d
+    StmtOperations d -> do
+        ops <- mapM (\(n, t) -> (,) n <$> expandT tab t) (edOperations d)
+        return (StmtOperations d { edOperations = ops })
 
 expandDecl :: SynTable -> Decl -> Either Text Decl
 expandDecl tab (Def n ps body) = Def n <$> mapM expandParam ps <*> expandE tab body
@@ -46,24 +49,27 @@ expandDecl tab (Def n ps body) = Def n <$> mapM expandParam ps <*> expandE tab b
 
 expandE :: SynTable -> E' -> Either Text E'
 expandE tab = \case
-    ILit i           -> Right (ILit i)
-    BLit b           -> Right (BLit b)
-    SLit s           -> Right (SLit s)
-    Var n            -> Right (Var n)
-    ListLit es       -> ListLit <$> mapM (expandE tab) es
-    TupleLit es      -> TupleLit <$> mapM (expandE tab) es
-    Let n u v        -> Let n <$> expandE tab u <*> expandE tab v
+    ILit i -> Right (ILit i)
+    BLit b -> Right (BLit b)
+    SLit s -> Right (SLit s)
+    Var n -> Right (Var n)
+    ListLit es -> ListLit <$> mapM (expandE tab) es
+    TupleLit es -> TupleLit <$> mapM (expandE tab) es
+    Let n u v -> Let n <$> expandE tab u <*> expandE tab v
+    StrictLet n u v -> StrictLet n <$> expandE tab u <*> expandE tab v
     DictCall h as ds -> DictCall <$> expandE tab h <*> mapM (expandE tab) as
         <*> mapM (\d -> expandE tab (daExpr d) >>= \e -> return d { daExpr = e }) ds
-    If b u v         -> If <$> expandE tab b <*> expandE tab u <*> expandE tab v
-    BOpr o u v       -> BOpr o <$> expandE tab u <*> expandE tab v
-    Lambda n b       -> Lambda n <$> expandE tab b
-    App u v          -> App <$> expandE tab u <*> expandE tab v
-    Match s as       -> Match <$> expandE tab s
-                         <*> mapM (\(p, b) -> (,) p <$> expandE tab b) as
-    AnnT e ty        -> AnnT <$> expandE tab e <*> expandT tab ty
-    At sp e          -> At sp <$> expandE tab e
-    ImpHole h        -> Right $ ImpHole h
+    If b u v -> If <$> expandE tab b <*> expandE tab u <*> expandE tab v
+    BOpr o u v -> BOpr o <$> expandE tab u <*> expandE tab v
+    Lambda n b -> Lambda n <$> expandE tab b
+    App u v -> App <$> expandE tab u <*> expandE tab v
+    Match s as -> Match <$> expandE tab s
+        <*> mapM (\(p, b) -> (,) p <$> expandE tab b) as
+    AnnT e ty -> AnnT <$> expandE tab e <*> expandT tab ty
+    At sp e -> At sp <$> expandE tab e
+    ImpHole h -> Right $ ImpHole h
+    Handle b n ts r rb os -> Handle <$> expandE tab b <*> pure n <*> mapM (expandT tab) ts <*> pure r
+        <*> expandE tab rb <*> mapM (\(o,x,k,e) -> (o,x,k,) <$> expandE tab e) os
 
 expandT :: SynTable -> T' -> Either Text T'
 expandT tab = go S.empty
@@ -76,7 +82,9 @@ expandT tab = go S.empty
             TVar i    -> Right (TVar i)
             TList t   -> TList <$> go seen t
             TTuple ts -> TTuple <$> mapM (go seen) ts
-            TFunc a e b -> (`TFunc` e) <$> go seen a <*> go seen b
+            TFunc a e b -> do
+                args <- mapM (mapM (mapM (go seen))) (effParams e)
+                TFunc <$> go seen a <*> pure (e { effParams = args }) <*> go seen b 
             TCon n args -> case M.lookup n tab of
                 Nothing -> TCon n <$> mapM (go seen) args
                 Just (ps, rhs)
@@ -97,7 +105,7 @@ subst m = \case
     TVar i    -> M.findWithDefault (TVar i) i m
     TList t   -> TList (subst m t)
     TTuple ts -> TTuple (map (subst m) ts)
-    TFunc a e b -> TFunc (subst m a) e (subst m b)
+    TFunc a e b -> TFunc (subst m a) (e { effParams = M.map (map (map (subst m))) (effParams e) }) (subst m b)
     TCon n as -> TCon n (map (subst m) as)
 
 tshow :: Show a => a -> Text

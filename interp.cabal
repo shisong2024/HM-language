@@ -15,6 +15,7 @@ library
                       Interp.Builtin
                       Interp.Qualify
                       Interp.Synonym
+                      Interp.Computation
     other-modules:    Interp.TypeCheck.Common
                       Interp.TypeCheck.Solver
                       Interp.TypeCheck.Declarations

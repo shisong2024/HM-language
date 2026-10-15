@@ -1,8 +1,10 @@
 {-# LANGUAGE LambdaCase, FlexibleContexts, TupleSections, OverloadedStrings #-}
+{-# LANGUAGE ConstraintKinds #-}
 
 module Interp.Eval where
 import Interp.Types
 import Interp.Parser (dataDeclsOf)
+import Interp.Computation
 
 import qualified Data.Set as S
 import qualified Data.Map as M
@@ -10,7 +12,7 @@ import qualified Data.Sequence as Seq
 import qualified Data.Text as T
 
 import Control.Monad (when, foldM, forM)
-import Control.Monad.Reader (MonadReader, ask, local, asks)
+import Control.Monad.Reader (MonadReader, ask, local)
 import Control.Monad.Error.Class (MonadError (throwError, catchError))
 import Control.Monad.State (MonadState, modify, gets)
 
@@ -21,7 +23,9 @@ import Data.Text (Text)
 import Data.Set (Set)
 import Data.Maybe (isJust)
 
-evalwDepth :: (MonadState Runtime m, MonadReader Env m, MonadError (Located EvalError) m) => E' -> m V'
+type Eval m = (MonadState Runtime m, MonadReader Env m, MonadError (Located EvalError) m)
+
+evalwDepth :: Eval m => E' -> m V'
 evalwDepth expr = do
     d <- gets rtDepth
     when (d > maxDepth) $
@@ -32,103 +36,130 @@ evalwDepth expr = do
     restoreDepth
     return res
 
-eval :: (MonadState Runtime m, MonadReader Env m, MonadError (Located EvalError) m) => E' -> m V'
-eval = \case
-    ILit i -> return $ VInt i
+eval :: Eval m => E' -> m V'
+eval e = ask >>= \env -> gets rtDepth >>= \d -> runC (evaluate env d e)
 
-    BLit b -> return $ VBool b
+runC :: Eval m => Computation -> m V'
+runC = runCWith defaultHost
 
-    SLit s -> return $ VStr s
+defaultHost :: Eval m => Text -> Text -> V' -> m V'
+defaultHost t o v = if t == "Console" then applyPrim o [v] else throwError (Located Nothing (UnhandledEff t o))
 
-    Var v -> do
-        env <- ask
-        case env !? v of
-            Nothing -> throwError (Located Nothing $ UnboundVariable v)
-            Just v' -> return v'
+runCWith :: Eval m => (Text -> Text -> V' -> m V') -> Computation -> m V'
+runCWith host = loop
+    where
+        loop = \case
+            Done v -> return v
+            Failed e -> throwError e
+            Request n o v sp (Continuation k) -> atSource sp (host n o v) >>= loop . k
+            Primitive n vs env sp (Continuation k) -> atSource sp (local (const env) (applyPrim n vs)) >>= loop . k
+            FreshResume k -> resumeNext >>= loop . k
+            UseResume i sp c -> do
+                used <- gets rtResumeUsed
+                when (S.member i used) $ throwError $ Located sp $ ResumeAlreadyUsed i
+                modify (\rt -> rt { rtResumeUsed = S.insert i (rtResumeUsed rt) })
+                loop c
+        
+        atSource m action = case m of
+            Nothing -> action
+            Just sp -> action `catchError` (throwError . addSpan sp)
+                
+resumeNext :: MonadState Runtime m => m Int
+resumeNext = do
+    i <- gets rtResumeNext
+    modify (\rt -> rt { rtResumeNext = i + 1 })
+    return i
 
-    ListLit es -> VList <$> mapM eval es
+evalWith :: Eval m => (Text -> Text -> V' -> m V') -> E' -> m V'
+evalWith host e = ask >>= \env -> gets rtDepth >>= \depth -> runCWith host (evaluate env depth e)
 
-    TupleLit es -> VTuple <$> mapM eval es
-
-    BOpr bopr e1 e2 -> do
-        v1 <- eval e1
-        v2 <- eval e2
-        case bopr of
-            OCmp OpEq -> eqOp v1 v2 True
-            OCmp OpNe -> eqOp v1 v2 False
-            _ -> case (v1, v2) of
-                (VInt vi1, VInt vi2) -> case bopr of
-                    OArith OpDiv | vi2 == 0 -> throwError (Located Nothing $ DividedByZero vi2)
-                    OArith OpPow | vi2 < 0  -> throwError (Located Nothing $ NegativeExponent vi2)
-                    _  -> return $ case bopr of
-                        OArith opr -> VInt $ calArithOpr opr vi1 vi2
-                        OCmp opr   -> VBool $ calCmpOpr opr vi1 vi2
-                (VInt _, _) -> throwError (Located Nothing $ OprArgIsNotNum bopr v2)
-                _           -> throwError (Located Nothing $ OprArgIsNotNum bopr v1)
-
-    At sp e -> catchError (eval e) (throwError . addSpan sp)
-
-    Let t e1 e2 -> do
-        env <- ask
-        case stripAt e1 of
+evaluate :: Env -> Int -> E' -> Computation
+evaluate env d e = 
+    if d > maxDepth then Failed (Located Nothing (RecursionLimited d)) 
+    else case e of
+        ILit i -> Done $ VInt i
+        BLit b -> Done $ VBool b
+        SLit s -> Done $ VStr s
+        Var v -> maybe (Failed $ Located Nothing $ UnboundVariable v) Done (M.lookup v env)
+        ListLit es -> values es (Done . VList)
+        TupleLit es -> values es (Done . VTuple)
+        BOpr bopr e1 e2 -> bindC (go e1) $ \va -> bindC (go e2) $ \vb -> arithmetic bopr va vb
+        At sp ex -> mapFailure sp (go ex)
+        Let t e1 e2 -> case stripAt e1 of
             Lambda x eb ->
-                let recEnv = M.insert t (VClosure x eb recEnv) env in
-                local (const recEnv) (eval e2)
-            _ -> eval e1 >>= \v -> local (const (M.insert t v env)) (eval e2)
-    
-    DictCall {} -> throwError $ Located Nothing UnelaboratedDictCall
-
-    If eb e1 e2 -> do
-        mb <- eval eb
-        case mb of
-            VBool b -> eval (if b then e1 else e2)
-            _       -> throwError (Located Nothing $ IfNeedsBool mb)
-
-    Lambda t expr -> asks $ VClosure t expr
-
-    App e1 e2 -> do
-        v1 <- eval e1
-        v2 <- eval e2
-        case v1 of
-            VClosure t ec env -> local (const (M.insert t v2 env)) (evalwDepth ec)
-            VPrim n ar args -> do
-                let args' = args ++ [v2]
-                if length args' < ar then return $ VPrim n ar args'
-                else applyPrim n args'
-            VCtor n ar args -> do
-                let args' = args ++ [v2]
-                if length args' <= ar then return $ VCtor n ar args'
-                else throwError $ Located Nothing $ IsNotFunction v1
-            _ -> throwError (Located Nothing $ IsNotFunction v1)
-    
-    Match e pes -> eval e >>= \v -> matchArms v pes
-
-    AnnT e _ -> eval e
-
-    ImpHole h -> throwError (Located Nothing (UnboundVariable
-        ("internal implicit hole " <> T.pack (show h))))
-
-evalProgram :: (MonadState Runtime m, MonadReader Env m, MonadError (Located EvalError) m) => Program -> m (Env, M.Map Int (Either (Located EvalError) V'))
+                let recEnv = M.insert t (VClosure x eb recEnv) env in evaluate recEnv d e2
+            _ -> bindC (go e1) (\v -> evaluate (M.insert t v env) d e2)
+        StrictLet t e1 e2 -> bindC (go e1) (\v -> evaluate (M.insert t v env) d e2)
+        Handle b n _ r rb arms -> handleC evaluate env d n r rb arms (go b)
+        DictCall {} -> Failed $ Located Nothing UnelaboratedDictCall
+        If c y n -> bindC (go c) $ \case
+            VBool b -> go (if b then y else n)
+            v       -> Failed $ Located Nothing $ IfNeedsBool v
+        Lambda t expr -> Done $ VClosure t expr env
+        App f a -> bindC (go f) $ \vf -> bindC (go a) $ \va -> applyValue vf va
+        Match s arms -> bindC (go s) (`arm` arms)
+        AnnT a _ -> go a
+        ImpHole h -> Failed (Located Nothing (UnboundVariable
+            ("internal implicit hole " <> T.pack (show h))))
+    where
+        go = evaluate env d
+        values l k = case l of
+            [] -> k []
+            x: xs -> bindC (go x) (\v -> values xs (k . (v: )))
+        arm v = \case
+            [] -> Failed $ Located Nothing $ NonExhaustiveMatch v
+            (p, b): rest -> case matchP (p, v) of
+                Nothing -> arm v rest
+                Just bs -> evaluate (M.union (M.fromList bs) env) d b
+        applyValue f v = case f of
+            VClosure n b cap -> evaluate (M.insert n v cap) (d + 1) b
+            VOperation n o -> Request n o v Nothing (Continuation Done)
+            VResume i (Continuation k) -> UseResume i Nothing (k v)
+            VPrim n ar args -> let args' = args ++ [v] in
+                if length args' < ar then Done $ VPrim n ar args'
+                else if n == "putStr" || n == "putStrLn" then Request "Console" n v Nothing (Continuation Done)
+                else Primitive n args' env Nothing (Continuation Done)
+            VCtor n ar args | length args < ar -> Done $ VCtor n ar (args ++ [v])
+            _ -> Failed (Located Nothing $ IsNotFunction f)
+        arithmetic bopr e1 e2 = case bopr of
+            OCmp c | c == OpEq || c == OpNe -> case eqV (e1, e2) of
+                Just x -> Done $ VBool (if c == OpEq then x else not x)
+                Nothing -> Failed $ Located Nothing $ OprArgIsNotComparable e1 e2
+            _ -> case (e1, e2) of
+                (VInt vi1, VInt vi2) -> case bopr of
+                    OArith OpDiv | vi2 == 0 -> Failed (Located Nothing $ DividedByZero vi2)
+                    OArith OpPow | vi2 < 0  -> Failed (Located Nothing $ NegativeExponent vi2)
+                    OArith opr -> Done $ VInt $ calArithOpr opr vi1 vi2
+                    OCmp opr   -> Done $ VBool $ calCmpOpr opr vi1 vi2
+                (VInt _, _) -> Failed (Located Nothing $ OprArgIsNotNum bopr e2)
+                _ -> Failed (Located Nothing $ OprArgIsNotNum bopr e1)
+ 
+evalProgram :: Eval m => Program -> m (Env, M.Map Int (Either (Located EvalError) V'))
 evalProgram = evalProgramSkipping S.empty
 
--- Failed expression types must never execute raw, unelaborated expressions.
--- Preserve statement indices so the driver's diagnostics still align.
-evalCheckedProgram :: (MonadState Runtime m, MonadReader Env m, MonadError (Located EvalError) m) => CProgram -> m (Env, M.Map Int (Either (Located EvalError) V'))
+evalCheckedProgram :: Eval m => CProgram -> m (Env, M.Map Int (Either (Located EvalError) V'))
 evalCheckedProgram checked = evalProgramSkipping skipped (cProgram checked)
   where
     skipped = S.fromList [i | (i, TyExpr (Left _)) <- M.toList (cTypes checked)]
 
-evalProgramSkipping :: (MonadState Runtime m, MonadReader Env m, MonadError (Located EvalError) m) => Set Int -> Program -> m (Env, M.Map Int (Either (Located EvalError) V'))
-evalProgramSkipping skipped prs = ask >>= \env -> do
-    let env0 = M.union (ctorValues (dataDeclsOf prs)) env
+evalCheckedProgramWith :: Eval m => (Text -> Text -> V' -> m V') -> CProgram -> m (Env, M.Map Int (Either (Located EvalError) V'))
+evalCheckedProgramWith host checked = evalProgramSkippingWith host 
+    (S.fromList [i | (i, TyExpr (Left _)) <- M.toList (cTypes checked)]) (cProgram checked)
+
+evalProgramSkipping :: Eval m => Set Int -> Program -> m (Env, M.Map Int (Either (Located EvalError) V'))
+evalProgramSkipping = evalProgramSkippingWith defaultHost
+
+evalProgramSkippingWith :: Eval m => (Text -> Text -> V' -> m V') -> Set Int -> [Statement] -> m (Env, M.Map Int (Either (Located EvalError) V'))
+evalProgramSkippingWith host skipped prs = ask >>= \env -> do
+    let operations = M.fromList [(o, VOperation (edName d) o) | StmtOperations d <- prs, (o, _) <- edOperations d]
+        env0 = M.unions [operations, ctorValues (dataDeclsOf prs), env]
     env1 <- foldM step env0 (stronglyConnComp (deps prs))
-    vals <- forM [(i, e) | (i, StmtExpr e) <- zip [0..] prs, not (S.member i skipped)] $ \(i, e) -> (i, ) <$> tryEnv (local (const env1) (evalwDepth e))
+    vals <- forM [(i, e) | (i, StmtExpr e) <- zip [0..] prs, not (S.member i skipped)] $ \(i, e) -> (i, ) <$> tryEnv (local (const env1) (evalWith host e))
     return (env1, M.fromList vals)
     where
-        step :: (MonadState Runtime m, MonadReader Env m, MonadError (Located EvalError) m) => Env -> SCC Decl -> m Env
         step env scc = case scc of
             AcyclicSCC (Def n [] b) | not (isLambda b) -> do
-                v <- local (const env) (evalwDepth b)
+                v <- local (const env) (evalWith host b)
                 return $ M.insert n v env
             _ -> case flatten scc of
                 ds | not $ all canKnot ds -> 
@@ -196,6 +227,9 @@ freeVars = \case
     TupleLit vs -> S.unions (map freeVars vs)
     Lambda x e -> S.delete x (freeVars e)
     Let t e1 e2 -> freeVars e1 `S.union` S.delete t (freeVars e2)
+    StrictLet t e1 e2 -> freeVars e1 `S.union` S.delete t (freeVars e2)
+    Handle b _ _ r rb os -> S.unions (freeVars b: S.delete r (freeVars rb): 
+        [freeVars e `S.difference` S.fromList [x, k] | (_, x, k, e) <- os])
     DictCall h as ds -> S.unions (map freeVars (h: as <> map daExpr ds))
     If b e1 e2 -> S.unions (map freeVars [b, e1, e2])
     BOpr _ e1 e2 -> freeVars e1 `S.union` freeVars e2
@@ -250,7 +284,7 @@ matchP = \case
     
     _ -> Nothing
 
-applyPrim :: (MonadState Runtime m, MonadReader Env m, MonadError (Located EvalError) m) => Text -> [V'] -> m V'
+applyPrim :: Eval m => Text -> [V'] -> m V'
 applyPrim "putStr" [VStr text] = recordOutput (WriteText text)
 applyPrim "putStrLn" [VStr text] = recordOutput (WriteLine text)
 applyPrim "#cons" [h, t] = case t of
@@ -274,7 +308,7 @@ applyPrim "intCompare" [VInt a, VInt b] = return $ VInt $ case compare a b of
 applyPrim "$fieldErr" [VStr f, v] = throwError $ Located Nothing $ NoSuchField f v
 applyPrim n args = throwError $ Located Nothing $ PrimArgMismatch n args
 
-recordOutput :: (MonadState Runtime m, MonadReader Env m, MonadError (Located EvalError) m) => OutputEvent -> m V'
+recordOutput :: Eval m => OutputEvent -> m V'
 recordOutput event = do
     env <- ask
     unit <- case env !? "Unit" of
