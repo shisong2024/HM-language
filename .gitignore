@@ -1,9 +1,12 @@
 dist-newstyle/
 node_modules/
+build-tmp/
 
 TODO/
 test/
 
+*.patch
+*.json
 *.project
 *.hi
 *.o
@@ -11,8 +14,3 @@ test/
 lang.txt
 test.txt
 _*.txt
-
-humming-strolling-nest.md
-
-# under test
-utils/data/_*.txt

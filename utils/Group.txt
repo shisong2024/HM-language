@@ -1,0 +1,37 @@
+------ Monoid ------
+
+ability Monoid m = Monoid { _mempty :: m, _mappend :: m -> m -> m };
+
+def mempty { monoid :: Monoid m } = monoid._mempty;
+def mappend { monoid :: Monoid m } = monoid._mappend;
+def (<>) = mappend;
+infixr 6 <>;
+
+def mconcat xs = foldr mappend mempty xs;
+
+implicit def monoidIntPlus = Monoid { _mempty = 0, _mappend = (+) } :: Monoid Int;
+implicit def monoidString = Monoid { _mempty = "", _mappend = (++) } :: Monoid String;
+implicit def monoidList = Monoid { _mempty = [], _mappend = append } :: Monoid [a];
+implicit def monoidTuple2 = Monoid
+    { _mempty = (mempty, mempty)
+    , _mappend = lambda x y -> (mappend (fst x) (fst y), mappend (snd x) (snd y)) 
+    } :: Monoid (a, b);
+
+implicit def monoidBool = Monoid { _mempty = false, _mappend = xor } :: Monoid Bool;
+implicit def monoidMaybe = Monoid 
+    { _mempty = None
+    , _mappend = lambda mx my -> match (mx, my) with 
+          (Just x, Just y) -> Just (mappend x y) 
+        | (_, None) -> mx
+        | (None, _) -> my 
+    } :: Monoid (Maybe a);
+
+------ Invertible ------
+
+ability Invertible m = Invertible { _inverse :: m -> m };
+def inverse { i :: Invertible m } = i._inverse;
+
+implicit def invertibleIntPlus = Invertible { _inverse = lambda n -> -n } :: Invertible Int;
+implicit def invertibleTuple2 = Invertible
+    { _inverse = lambda x -> match x with (a, b) -> (inverse a, inverse b) };
+implicit def invertibleBool = Invertible { _inverse = not } :: Invertible Bool;

@@ -1,0 +1,253 @@
+import ../Effects.txt as E
+import ../data/Map.txt as M
+
+-- definition of JSON
+
+data JSON
+    = JNull
+    | JBool Bool
+    | JNumber String
+    | JString String
+    | JArray [JSON]
+    | JObject (M.Map String JSON)
+    ;
+
+data Pos = Pos { line :: Int, column :: Int };
+data Errors = ParseError Pos String | FileError String;
+data Result = Result { pos :: Pos, rest :: String };
+
+def failJson msg = do {
+    state = E.get Unit :: Result;
+    match state with
+        Result position _ -> E.raise (ParseError position msg)
+};
+
+def peek u = do {
+    state = E.get Unit :: Result;
+    match state with 
+        Result _ r -> match uncons r with
+            None -> -1 | Just (code, _) -> code
+};
+
+def takeChar u = do {
+    state = E.get Unit :: Result;
+    match uncons state.rest with
+          None -> failJson "unexpected end"
+        | Just (code, t) -> do {
+            position = if code == 10 
+                then state.pos { line = state.pos.line + 1, column = 1 }
+                else state.pos { column = state.pos.column + 1 };
+            E.set (Result position t);
+            fromCode code
+        }
+};
+
+def expect code = do {
+    act = peek Unit;
+    if act == code then takeChar Unit else failJson "unexpected character"
+};
+
+def isSpace code = any [code == 32, code == 9, code == 10, code == 13];
+
+def lexeme u = do {
+    act = peek Unit;
+    if isSpace act then do {
+        takeChar Unit;
+        lexeme Unit;
+    } else Unit
+};
+
+------
+
+def digit code = and (code >= 48) (code <= 57);
+
+def digits u = do {
+    code = peek Unit;
+    if digit code then do {
+        h = takeChar Unit;
+        ts = digits Unit;
+        h ++ ts;
+    } else ""
+};
+
+def requireDigits u = do {
+    code = peek Unit;
+    if digit code then digits Unit else failJson "expect digit"
+};
+
+def number u = do {
+    code = peek Unit;
+    sign = if code == 45 then takeChar Unit else "";
+    first = peek Unit;
+    whole = if first == 48 then takeChar Unit else requireDigits Unit;
+    point = peek Unit;
+    fraction = if point == 46 then do {
+        dot = takeChar Unit;
+        ts = requireDigits Unit;
+        dot ++ ts
+    } else "";
+    ex = peek Unit;
+    exponent = if or (ex == 69) (ex == 101) then do {
+        e = takeChar Unit;
+        s = peek Unit;
+        es = if or (s == 43) (s == 45) then takeChar Unit else "";
+        ta = requireDigits Unit;
+        e ++ es ++ ta
+    } else "";
+    JNumber (sign ++ whole ++ fraction ++ exponent)
+};
+
+
+-------
+
+def escapeChar s = match s with
+      "\"" -> "\"" | "\\" -> "\\" | "/" -> "/"
+    | "b" -> fromCode 8 | "f" -> fromCode 12
+    | "n" -> "\n" | "r" -> "\r" | "t" -> "\t"
+    | _ -> failJson "unsupported or invalid escape"
+    ;
+
+def stringTail u = do {
+    code = peek Unit;
+    if code == 34 then do { 
+        takeChar Unit; 
+        "" 
+    } else if code == 92 then do {
+        takeChar Unit;
+        escape = takeChar Unit;
+        char = escapeChar escape;
+        tail = stringTail Unit;
+        char ++ tail;
+    } else if code < 32 then failJson "invalid string character"
+    else do {
+        head = takeChar Unit;
+        tail = stringTail Unit;
+        head ++ tail
+    }
+};
+
+def parseString u = do {
+    expect 34;
+    stringTail Unit
+};
+
+def literal tx res = match uncons tx with
+      None -> res
+    | Just (code, rest) -> do {
+        expect code;
+        literal rest res
+    };
+
+def arrayTail u = do {
+    lexeme Unit;
+    val = parseValue Unit;
+    lexeme Unit;
+    code = peek Unit;
+    if code == 93 then do {
+        takeChar Unit;
+        [val]
+    } else do {
+        expect 44;
+        tail = arrayTail Unit;
+        val: tail
+    }
+};
+
+def objectTail u = do {
+    lexeme Unit;
+    key = parseString Unit;
+    lexeme Unit;
+    expect 58;
+    value = parseValue Unit;
+    lexeme Unit;
+    code = peek Unit;
+    if code == 125 then do {
+        takeChar Unit;
+        M.Node 1 key value M.Leaf M.Leaf
+    } else do {
+        expect 44;
+        tail = objectTail Unit;
+        M.insert key value tail
+    }
+};
+
+def parseValue u = do {
+    lexeme Unit;
+    code = peek Unit;
+    if code == 110 then literal "null" JNull
+    else if code == 116 then literal "true" (JBool true)
+    else if code == 102 then literal "false" (JBool false)
+    else if code == 34 then do {
+        text = parseString Unit;
+        JString text
+    } else if code == 91 then do {
+        takeChar Unit;
+        lexeme Unit;
+        next = peek Unit;
+        vals = if next == 93 then do {
+            takeChar Unit;
+            []
+        } else arrayTail Unit;
+        JArray vals;
+    } else if code == 123 then do {
+        takeChar Unit;
+        lexeme Unit;
+        next = peek Unit;
+        kvs = if next == 125 then do {
+            takeChar Unit;
+            M.Leaf;
+        } else objectTail Unit;
+        JObject kvs;
+    } else if or (code == 45) (digit code) then number Unit
+    else failJson "expect JSON values"
+};
+
+def parseJson input = E.runError (lambda u -> 
+    E.runState (Result (Pos 1 1) input) (lambda v -> do {
+        val = parseValue Unit;
+        lexeme Unit;
+        next = peek Unit;
+        if next == -1 then val else failJson "trailing input"
+    })
+);
+
+def parseJsonFile path = match readFile path with
+      Left err -> E.runError (lambda u -> E.raise (FileError "cannot read file"))
+    | Right input -> parseJson input
+    ;
+
+def _jsonFormatter json tab = match json with
+      JNull -> "null"
+    | JBool b -> if b then "true" else "false"
+    | JNumber s -> s
+    | JString s -> quote s
+    | JArray jsons -> "[" ++ formatArray jsons tab ++ "]"
+    | JObject objs -> "{\n" ++ formatObject (M.toList objs) tab ++ strReplicate (tab - 1) "\t" ++ "}"
+    ;
+
+def quote s = "\"" ++ s ++ "\"";
+
+def formatArray jsons tab = match jsons with
+      [] -> ""
+    | x: xs -> _jsonFormatter x tab ++ (match xs with 
+          [] -> "" 
+        | _ -> ", " ++ formatArray xs tab
+        )
+    ;
+
+def formatObject objs tab = 
+    let go = lambda x -> match x with (k, v) -> strReplicate tab "\t" ++ quote k ++ ": " ++ _jsonFormatter v (tab + 1)
+    in match objs with
+          [] -> ""
+        | [x] -> go x ++ "\n"
+        | x: xs -> go x ++ ",\n" ++ formatObject xs tab
+    ;
+
+def jsonFormatter json = _jsonFormatter json 1;
+
+def writeJsonFile path json = writeFile (path, jsonFormatter json);
+
+def writeResultFile path result = match result with
+      Left err -> E.runError (lambda u -> E.raise "illegal json")
+    | Right (json, _) -> writeFile (path, jsonFormatter json)
+    ;

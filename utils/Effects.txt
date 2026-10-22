@@ -1,0 +1,74 @@
+import Group.txt as G;
+
+-- definition of types
+
+effect Writer w { tell :: w -> Unit };
+effect State s { get :: Unit -> s, set :: s -> Unit };
+effect Reader r { ask :: Unit -> r };
+effect Error e { raise :: e -> a };
+effect FRandom { nextInt :: (Int, Int) -> Int };
+
+------ Writer ------
+
+def runWriter action = handle Writer a in action Unit with {
+    return x -> (x, G.mempty);
+    tell val res -> match res Unit with
+        (x, log) -> (x, val <> log)
+};
+
+
+------ Reader ------
+
+def runReader env action = handle Reader a in action Unit with {
+    return x -> x;
+    ask u res -> res env
+};
+
+
+------ State ------
+
+def runState initial action = (handle State a in action Unit with {
+    return x -> lambda state -> (x, state);
+    get u res -> lambda state -> res state state;
+    set value res -> lambda state -> res Unit value;
+}) initial;
+
+def evalState initial action = (handle State a in action Unit with {
+    return x -> lambda state -> x;
+    get u res -> lambda state -> res state state;
+    set value res -> lambda state -> res Unit value;
+}) initial;
+
+def execState initial action = (handle State a in action Unit with {
+    return x -> lambda state -> state;
+    get u res -> lambda state -> res state state;
+    set value res -> lambda state -> res Unit value;
+}) initial;
+
+def modify f = do {
+    state = get Unit;
+    set (f state);
+};
+
+
+------ Error ------
+
+def runError action = handle Error a in action Unit with {
+    return x -> Right x;
+    raise err res -> Left err;
+};
+
+
+------ Fake Random ------
+
+def runFRandom initial action = (handle FRandom in action Unit with {
+    return x -> lambda seed -> (x, seed);
+    nextInt bounds res -> lambda seed -> match bounds with
+        (lo, hi) -> do {
+            next = nextSeed seed;
+            value = lo + mod next (hi - lo);
+            res value next
+        }
+}) initial;
+
+def nextSeed seed = mod (seed * 25173 + 13849) 65536;

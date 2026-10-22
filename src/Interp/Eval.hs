@@ -314,7 +314,7 @@ recordOutput event = do
     unit <- case env !? "Unit" of
         Just value@(VCtor "Unit" 0 []) -> return value
         _ -> throwError $ Located Nothing $ UnboundVariable "Unit"
-    modify $ \rt -> rt {rtLog = rtLog rt Seq.|> event}
+    modify $ \rt -> rt { rtLog = rtLog rt Seq.|> event }
     return unit
 
 matchArms :: (MonadError (Located EvalError) m, MonadReader Env m,  MonadState Runtime m) => V' -> [(P', E')] -> m V'

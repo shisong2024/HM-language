@@ -13,15 +13,20 @@ def height m = match m with
 
 def node k v l r = Node (1 + max (height l) (height r)) k v l r;
 
-def lookup {o :: Ord a} k m = match m with
+def lookup k m = match m with
       Leaf -> None
-    | Node _ k' v l r -> match o.cmp k k' with
+    | Node _ k' v l r -> match cmp k k' with
           LT -> lookup k l
         | EQ -> Just v
         | GT -> lookup k r
     ;
 
 def member k m = isJust (lookup k m);
+
+def toList m = match m with
+      Leaf -> []
+    | Node _ k v l r -> concat [toList l, [(k, v)], toList r]
+    ;
 
 --- 
 
@@ -37,9 +42,9 @@ def findMax m = match m with
     | Node _ _ _ _ r -> findMax r
     ;
 
-def insert {o :: Ord a} k v m = match m with
+def insert k v m = match m with
       Leaf -> Node 1 k v Leaf Leaf
-    | Node _ k' v' l r -> match o.cmp k k' with
+    | Node _ k' v' l r -> match cmp k k' with
           LT -> balance k' v' (insert k v l) r
         | EQ -> node k v l r
         | GT -> balance k' v' l (insert k v r)
@@ -89,9 +94,9 @@ def deleteRoot l r = match (l, r) with
         | Just (mk, mv) -> balance mk mv l (deleteMin r)
     ;
 
-def delete {o :: Ord a} k m = match m with
+def delete k m = match m with
       Leaf -> Leaf
-    | Node _ k' v' l r -> match o.cmp k k' with
+    | Node _ k' v' l r -> match cmp k k' with
           LT -> balance k' v' (delete k l) r
         | EQ -> deleteRoot l r
         | GT -> balance k' v' l (delete k r)
@@ -115,9 +120,9 @@ def map f m = match m with
     ;
 
 -- union/difference/intersection
-def split {o :: Ord a} k m = match m with
+def split k m = match m with
       Leaf -> (Leaf, None, Leaf)
-    | Node _ k' v l r -> match o.cmp k k' with
+    | Node _ k' v l r -> match cmp k k' with
           LT -> (match split k l with 
             (ll, mv, lr) -> (ll, mv, join k' v lr r))
         | EQ -> (l, Just v, r)

@@ -50,6 +50,7 @@ implicit def showInt = Show { show' = _showInt } :: Show Int;
 def and x y = match (x, y) with (true, true) -> true | _ -> false;
 def or x y = match (x, y) with (false, false) -> false | _ -> true;
 def not x = match x with true -> false | false -> true;
+def xor x y = if x == y then false else true;
 
 implicit def ordBool = Ord { cmp' = lambda a b -> match (a, b) with (true, false) -> GT | (false, true) -> LT | _ -> EQ } :: Ord Bool;
 implicit def showBool = Show { show' = lambda x -> if x then "true" else "false" } :: Show Bool;
@@ -94,8 +95,8 @@ def concatMap f l = foldr (lambda x acc -> append (f x) acc) [] l;
 
 def take n l = if n <= 0 then [] else match l with [] -> [] | x: xs -> x: take (n - 1) xs;
 def drop n l = if n <= 0 then l else match l with [] -> [] | x: xs -> drop (n - 1) xs;
-def takeWhile f l = match l with [] -> [] | x: xs -> if f x then [] else x: takeWhile f xs;
-def dropWhile f l = match l with [] -> [] | x: xs -> if f x then l else dropWhile f xs;
+def takeWhile f l = match l with [] -> [] | x: xs -> if f x then x: takeWhile f xs else [];
+def dropWhile f l = match l with [] -> [] | x: xs -> if f x then dropWhile f xs else l;
 
 def replicate n x = if n <= 0 then [] else x: replicate (n - 1) x;
 
@@ -116,7 +117,7 @@ def _ordList {o :: Ord a} f b = match (f, b) with
     | ([], _) -> LT
     | (x: xs, y: ys) -> let res = o.cmp' x y in
         match res with
-              EQ -> _ordList f b
+              EQ -> _ordList xs ys
             | _ -> res
     ;
 
@@ -232,6 +233,7 @@ def strIndex n s = if n < 0 then None else (match uncons s with None -> None | J
 def strElem c s = match uncons s with None -> false | Just (d, rest) -> or (c == d) (strElem c rest);
 def strMap f s = match uncons s with None -> "" | Just (c, rest) -> fromCode (f c) ++ strMap f rest;
 def strFilter p s = match uncons s with None -> "" | Just (c, rest) -> if p c then fromCode c ++ strFilter p rest else strFilter p rest;
+def strReplicate n s = if n <= 0 then "" else (s ++ strReplicate (n - 1) s);
 
 def strSplitAt n s = 
     if n <= 0 

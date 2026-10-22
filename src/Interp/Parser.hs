@@ -32,7 +32,7 @@ opInfo = \case
         OpPow -> Fixity 8 AssocR
 
 isOpChar :: Char -> Bool
-isOpChar c = c `elem` ("+-*/^=<>!%&~?" :: String)
+isOpChar c = c `elem` ("+-*/^=<>!%&~?|" :: String)
 
 isOpName :: Text -> Bool
 isOpName n = not (T.null n) && T.all isOpChar n
@@ -429,10 +429,10 @@ parseEff = do
         _ -> fail "parameterized effects require operation declarations"
 
 parseDo :: Tabs -> Parser E'
-parseDo tab = withSpan $ symbol "do" *> lexeme (char '}') *> block
+parseDo tab = withSpan $ symbol "do" *> lexeme (char '{') *> block
     where
         block = do
-            binding <- optional $ try (parseVar' <* lexeme (char '='))
+            binding <- optional $ try (parseVar' <* lexeme (char '=' <* notFollowedBy (char '=')))
             e <- parseExpr tab
             end <- optional (lexeme (char '}'))
             case end of

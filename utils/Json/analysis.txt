@@ -1,0 +1,20 @@
+import parseJson.txt as P
+
+data AnalysisError
+    = IsNotJObject P.JSON
+    | NotSuchConfig String
+    ;
+
+data Config = Config { _cfg :: M.Map String P.JSON };
+
+def isNull json = match json with P.JNull -> true | _ -> false;
+def isNumber json = match json with P.JNumber _ -> true | _ -> false;
+def isString json = match json with P.JString _ -> true | _ -> false;
+def isBool json = match json with P.JBool _ -> true | _ -> false;
+def isArray json = match json with P.JArray _ -> true | _ -> false;
+def isObject json = match json with P.JObject _ -> true | _ -> false;
+
+def lookupS k = do {
+    cfg = (E.ask Unit :: Config)._cfg;
+    fromMaybe (M.lookup k cfg) (E.raise (NotSuchConfig k))
+};
