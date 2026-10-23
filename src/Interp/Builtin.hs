@@ -72,12 +72,13 @@ initSession = Session
     , sNext     = emptyCounter 0
     , sBatch    = ""
     , sDEnv     = emptyDEnv
-    , sAliases  = M.empty
     , sSyns     = M.empty
     , sFields   = M.empty
     , sFixities = M.empty
     , sImp      = []
     , sResume   = (0, S.empty)
+    , sImports  = M.empty
+    , sModAlias = M.empty
     }
 
 emptyDEnv :: DEnv

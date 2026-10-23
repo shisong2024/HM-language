@@ -99,6 +99,40 @@ varIndex t = case unpack t of
     [c] | isAsciiLower c -> Just (negate $ fromEnum c)
     _ -> Nothing
 
+parseImportLine :: Parser ImportDecl
+parseImportLine = do
+    _ <- symbol "import"
+    p <- lexeme (strLiteral <|> barePath <?> "import path")
+    _ <- symbol "as"
+    a <- upperName
+    _ <- optional semicolon
+    return $ ImportDecl (T.unpack p) a
+  where
+    -- 兼容历史写法：路径可以不加引号（不能含空白与 `;`）。
+    barePath = takeWhile1P (Just "import path")
+        (\c -> c /= ' ' && c /= '\t' && c /= '\r' && c /= '\n' && c /= ';')
+
+-- | 解析一条 import 行，并做别名/路径校验。错误文本带文件名。
+parseImportLineText :: FilePath -> Text -> Either Text ImportDecl
+parseImportLineText file l0 =
+    case runParser (space *> parseImportLine <* eof) file (maskComments l0) of
+        Left err -> Left (pack file <> ": " <> pack (errorBundlePretty err))
+        Right d
+            | null (importPath d) ->
+                Left (pack file <> ": the import path must not be empty")
+            | not (upperAlias (importAlias d)) ->
+                Left (pack file <> ": module alias `" <> importAlias d
+                    <> "` must start with an uppercase letter")
+            | importAlias d == "Prelude" ->
+                Left (pack file <> ": `Prelude` is reserved for the prelude")
+            | importAlias d `elem` reservedType ->
+                Left (pack file <> ": `" <> importAlias d <> "` is a built-in type name and cannot be a module alias")
+            | otherwise -> Right d
+  where
+    upperAlias a = case T.uncons a of
+        Just (c, r) -> isUpper c && T.all (\x -> isAlphaNum x || x `elem` ['_', '\'']) r
+        Nothing -> False
+
 parseILit :: Parser E'
 parseILit = withSpan $ ILit <$> lexeme (decimal <* nextNotVar <?> "integer literal")
 
@@ -670,11 +704,15 @@ runProg :: Text -> Either Text [(Int, Statement)]
 runProg = fmap snd . runProgWith emptyTabs
 
 runProgWith :: Tabs -> Text -> Either Text (Tabs, [(Int, Statement)])
-runProgWith tab0 tx = case stripComment tx of
+runProgWith = runProgWithAt ""
+
+-- | 与 'runProgWith' 相同，但把文件名写进源码位置，供错误渲染显示 @path:line@。
+runProgWithAt :: FilePath -> Tabs -> Text -> Either Text (Tabs, [(Int, Statement)])
+runProgWithAt path tab0 tx = case stripComment tx of
     Left msg -> Left msg
     Right t -> case scanFixities (tbFix tab0) t of
         Left msg -> Left msg
-        Right fix -> case runParser (parseProg (tab0 { tbFix = effFix fix }) <* eof) "" t of
+        Right fix -> case runParser (parseProg (tab0 { tbFix = effFix fix }) <* eof) path t of
             Left err -> Left $ pack $ errorBundlePretty err
             Right r  -> do
                 (fld, ss) <- recProgram (tbFld tab0) (map snd r)

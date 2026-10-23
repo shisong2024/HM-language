@@ -1,5 +1,5 @@
 Parse Error:
-1:4:
+test/parse-errors.txt:1:4:
   |
 1 | 123abc
   |    ^

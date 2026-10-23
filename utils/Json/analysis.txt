@@ -1,3 +1,5 @@
+import ../Effects.txt as E
+import ../data/Map.txt as M
 import parseJson.txt as P
 
 data AnalysisError

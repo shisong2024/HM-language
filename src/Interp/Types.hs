@@ -336,12 +336,13 @@ data Session = Session
     , sNext     :: Counter
     , sBatch    :: BatchName
     , sDEnv     :: DEnv
-    , sAliases  :: Map Text FilePath
     , sSyns     :: SynTable
     , sFixities :: FixTab
     , sFields   :: FieldTab
     , sImp      :: IFrame
     , sResume   :: (Int, Set Int)
+    , sImports  :: Map Text ModuleRef
+    , sModAlias :: Map FilePath Text
     } deriving (Show, Eq)
 
 data CtorInfo = CtorInfo
@@ -375,6 +376,32 @@ data Wanted = Wanted
 
 type IFrame  = [Text]
 type IEnv    = [IFrame]
+
+data ImportDecl = ImportDecl
+    { importPath  :: FilePath
+    , importAlias :: Text
+    } deriving (Show, Eq)
+
+data ModuleRef = ModuleRef
+    { mrAlias     :: Text
+    , mrCanonical :: FilePath
+    , mrPath      :: FilePath
+    , mrExports   :: ModuleExports
+    , mrHash      :: Maybe Text
+    } deriving (Show, Eq)
+
+data ModuleExports = ModuleExports
+    { meVals   :: Set Text
+    , meTypes  :: Set Text
+    , meCtors  :: Set Text
+    , meEffs   :: Set Text
+    , meOps    :: Set Text
+    , meAbils  :: Set Text
+    , meSyns   :: Set Text
+    , meFields :: Set Text
+    , meFix    :: Set Text
+    , meImps   :: Set Text
+    } deriving (Show, Eq)
 
 opTable :: [(Text, Opr)]
 opTable = 
