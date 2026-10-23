@@ -77,10 +77,10 @@ execBatch :: Bool -> Session -> Text -> [(Int, Statement)] -> [(Int, Text)] -> I
 execBatch loud ss src lprs perr = case expandProgram (sSyns ss) (map snd lprs) of
     Left msg -> TIO.putStrLn ("Type Error:\n" <> msg) >> return (ss, False)
     Right (syns, prs) ->
-        execBatch' loud (ss { sSyns = syns }) src (zip (map fst lprs) prs) perr
+        execBatch' syns loud ss src (zip (map fst lprs) prs) perr
 
-execBatch' :: Bool -> Session -> Text -> [(Int, Statement)] -> [(Int, Text)] -> IO (Session, Bool)
-execBatch' loud ss src lprs perr = do
+execBatch' :: SynTable -> Bool -> Session -> Text -> [(Int, Statement)] -> [(Int, Text)] -> IO (Session, Bool)
+execBatch' pendingSyns loud ss src lprs perr = do
     let prs = map snd lprs
         denv = mergeDEnv (buildProgramDEnv prs) (sDEnv ss)
         (tsRes, n) = runState (runExceptT (runReaderT (programChecker (sTEnv ss) (sImp ss) prs) (sDEnv ss))) (sNext ss)
@@ -137,6 +137,7 @@ execBatch' loud ss src lprs perr = do
                             , sDEnv   = denv
                             , sFields = M.filter (\fi -> fiCtor fi `notElem` stale) (sFields ss)
                             , sImp    = newImp <> filter (`notElem` newImp) (sImp ss)
+                            , sSyns   = pendingSyns
                             }, ok)
 
 doTypeOf :: Session -> Text -> IO Session

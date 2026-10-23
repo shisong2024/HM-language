@@ -58,9 +58,7 @@ programChecker :: Checker m => TEnv -> IFrame -> Program -> m CProgram
 programChecker outT outI p = withInferRollback $ do
     old <- ask
     forM_ (dataDeclsOf p) $ \d -> when (M.member (dName d) (denvDatas old)) $ do
-        let newAbility = dName d `S.member` S.fromList [dName a | StmtAbility a <- p]
-        when (newAbility /= S.member (dName d) (denvAbilities old)) $
-            throwError $ Located Nothing $ DeclRoleChanged (dName d)
+        throwError $ Located Nothing $ DuplicateData (dName d)
     case fstDuplicate ([n | StmtEff n <- p] <> [edName d | StmtOperations d <- p]) of
         Just n -> throwError $ Located Nothing $ DuplicateEff n
         Nothing -> return ()
@@ -80,7 +78,7 @@ programChecker outT outI p = withInferRollback $ do
             throwError $ Located Nothing $ DuplicateDef o
     let denv = mergeDEnv (buildProgramDEnv p) old
     local (const denv) $ do
-        mapM_ (checkEffTypes denv) [t | StmtType _ _ t <- p]
+        forM_ [t | StmtType _ _ t <- p] $ \t -> checkEffTypes denv t >> checkTypeCons denv t
         programCheckerCore outT outI p
 
 programCheckerCore :: Checker m => TEnv -> IFrame -> Program -> m CProgram

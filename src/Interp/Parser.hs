@@ -31,8 +31,14 @@ opInfo = \case
         OpDiv -> Fixity 7 AssocL
         OpPow -> Fixity 8 AssocR
 
+reservedOps :: [Text]
+reservedOps = ["|", "=", "->", "::"]
+
+isReservedOp :: Text -> Bool
+isReservedOp c = c `elem` reservedOps
+
 isOpChar :: Char -> Bool
-isOpChar c = c `elem` ("+-*/^=<>!%&~?|" :: String)
+isOpChar c = c `elem` ("+-*/^=<>!%&~?|$" :: String)
 
 isOpName :: Text -> Bool
 isOpName n = not (T.null n) && T.all isOpChar n
@@ -540,7 +546,12 @@ defName :: Parser Text
 defName = parseVar' <|> (lexeme (char '(') *> opName <* lexeme (char ')')) <|> opName
 
 opName :: Parser Text
-opName = lexeme (T.pack <$> some (satisfy isOpChar))
+opName = lexeme $ do
+    op <- some (satisfy isOpChar)
+    let op' = T.pack op
+    when (isReservedOp op') $
+        fail ("`" <> op <> "` is reserved syntax and cannot be used as an operator.")
+    return op'
 
 parseTypeDecl :: Parser Statement
 parseTypeDecl = do
@@ -676,7 +687,7 @@ scanFixities tab0 source = do
     foldM decl tab statements
     where
         symDef tab (_, text) = case runParser (space *> symbol "def" *> defName) "" text of
-            Right n | isOpName n && not (builtinOp n) -> 
+            Right n | isOpName n && not (builtinOp n) && not (isReservedOp n) -> 
                 Right (M.insertWith (\_ old -> old) n defaultFix tab)
             _ -> Right tab
         
