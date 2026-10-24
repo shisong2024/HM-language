@@ -1,0 +1,1 @@
+def compareTwice x y=(x<y,y<x);

@@ -1,0 +1,4 @@
+1: def L.compareTwice : Forall a0. {ord0 :: Ord a0} => (a0 -> (a0 -> (Bool, Bool)))
+2: def eq : Ord Int
+3: Type : (Bool, Bool)
+Value: (false, false)

@@ -1,0 +1,1 @@
+def f x=x<1; f @{ord9=ordInt} 1;

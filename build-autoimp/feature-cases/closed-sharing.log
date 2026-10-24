@@ -1,0 +1,4 @@
+1: def eq : Ord Int
+2: def h : {ord0 :: Ord Int} => (Int -> (Int -> (Bool, Bool)))
+2: Type : (Bool, Bool)
+Value: (false, false)

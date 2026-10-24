@@ -1,0 +1,1 @@
+ability Render a=Render {render::a->String}; def renderText {s::Show a} x=show @{s=s} x; implicit def r=Render {render=renderText}::Render a; def use {r::Render a} x=r.render x; use 1; use true;

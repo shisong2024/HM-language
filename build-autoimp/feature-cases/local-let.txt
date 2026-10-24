@@ -1,0 +1,2 @@
+def eq=Ord {cmp'=lambda x y->EQ}::Ord Int;
+def f x=let cmpLocal=lambda y->x<y in cmpLocal x; f @{ord0=eq} 1;

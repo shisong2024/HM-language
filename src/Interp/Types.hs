@@ -266,7 +266,12 @@ data Param
     | ImplicitParam Text T' 
     deriving (Show, Eq)
 
-data Pred = Implicit T' | NameImplicit Text T' deriving (Show, Eq, Ord)
+data Pred 
+    = Implicit T' 
+    | NameImplicit Text T' 
+    | AutoImplicit Text T'
+    deriving (Show, Eq, Ord)
+
 data S' = Scheme
     { sVars     :: Set TypeVar
     , sPreds    :: [Pred]
@@ -292,11 +297,18 @@ predType :: Pred -> T'
 predType= \case
     Implicit t       -> t
     NameImplicit _ t -> t
+    AutoImplicit _ t -> t
 
 predName :: Pred -> Maybe Text
 predName = \case
     Implicit       _ -> Nothing
     NameImplicit n _ -> Just n
+    AutoImplicit n _ -> Just n
+
+predSearchName :: Pred -> Maybe Text
+predSearchName = \case
+    NameImplicit n _ -> Just n
+    _ -> Nothing
 
 data Decl = Def Text [Param] E' deriving (Show, Eq)
 
@@ -366,12 +378,13 @@ data Tops = Tops
     } deriving (Show, Eq)
 
 data Wanted = Wanted
-    { wtdHole  :: HoleId
-    , wtdType  :: T'
-    , wtdScope :: IEnv
-    , wtdSpan  :: Maybe Span
-    , wtdBind  :: Maybe Text
-    , wtdName  :: Maybe Text
+    { wtdHole   :: HoleId
+    , wtdType   :: T'
+    , wtdScope  :: IEnv
+    , wtdSpan   :: Maybe Span
+    , wtdBind   :: Maybe Text
+    , wtdName   :: Maybe Text
+    , wtdSearch :: Maybe Text
     } deriving (Show, Eq)
 
 type IFrame  = [Text]

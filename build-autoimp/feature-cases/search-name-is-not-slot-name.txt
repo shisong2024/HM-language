@@ -1,0 +1,1 @@
+implicit def ord0=Ord {cmp'=lambda x y->LT}::Ord Int; implicit def another=Ord {cmp'=lambda x y->GT}::Ord Int; def f x=x<1; f 0;

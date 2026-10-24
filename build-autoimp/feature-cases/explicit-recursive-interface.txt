@@ -1,0 +1,2 @@
+def lt=Ord {cmp'=lambda x y->LT}::Ord Int;
+def f {chosen::Ord Int} n=if n==0 then chosen.cmp' 1 2 else f @{chosen=lt} (n-1); f 2;

@@ -24,7 +24,7 @@ import Interp.TypeCheck.Elaboration
 import Interp.TypeCheck.Pattern (patType, checkDupPatVar, exhaustive)
 import Interp.TypeCheck.Solver
 import Interp.TypeCheck.Common
-import Interp.TypeCheck.Implicit (groupWanted, deferWanted, resolveWanted)
+import Interp.TypeCheck.Implicit (groupWanted, nameGroups, deferWanted, resolveWanted)
 import Interp.Pretty (tick)
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
@@ -43,7 +43,12 @@ typeOfExprWE outT outI e = withInferRollback $ typeOfExprWECore outT outI e
 typeOfExprWECore :: Checker m => TEnv -> IEnv -> E' -> m (S', Eff)
 typeOfExprWECore env ienv e = do
     r <- inferExpr env ienv e
-    (sch, _) <- closeBinding env (irType r) (irWanted r) (irExpr r) (irNow r)
+    -- Inspecting a binding is not defining a wrapper around it: keep its
+    -- public slots, including distinct explicitly named slots of one type.
+    let wanted = case stripAt e of
+            Var _ -> [w { wtdBind = wtdName w } | w <- irWanted r]
+            _ -> irWanted r
+    (sch, _) <- closeBinding env (irType r) wanted (irExpr r) (irNow r)
     denv <- ask
     mapM_ (checkAbilityType denv . predType) (sPreds sch)
     get >>= \st -> return (sch, resolveEff st (applyEff (irSub r) (irNow r)))
@@ -78,6 +83,7 @@ inferExprCore env ienv e = case e of
                     , wtdSpan = Nothing
                     , wtdName = predName p
                     , wtdBind = Nothing
+                    , wtdSearch = predSearchName p
                     } | (h, p) <- zip holes preds]
                 e'  = foldl App e (map ImpHole holes)
             return $ InferRes M.empty ws ty e' callEff
@@ -225,7 +231,7 @@ inferExprCore env ienv e = case e of
 inferLet :: Checker m => TEnv -> IEnv -> Text -> E' -> E' -> m InferRes
 inferLet env ienv n rhs body = do
     (su, sch, rhsIR, initNow, outward) <- case stripAt rhs of
-        Lambda {} -> do
+        Lambda {} | S.member n (freeVars rhs) -> do
             (sub, bds) <- inferBindingGroupWithNotes False env ienv [Def n [] rhs]
             case bds of
                 [(_, ty, e)] -> return (sub, ty, e, emptyEff, [])
@@ -433,7 +439,7 @@ inferBindingGroupWithNotes annoate outer ienv ds = do
                 (su, rev) <- foldM (inferOne renv) (sub, []) (zip ppd types)
                 let inferred = reverse rev
                     next = M.fromList [(n, Forall S.empty
-                        (map fst (groupWanted (filter deferWanted (irWanted (applyInfer su r)))))
+                        (map fst (nameGroups (groupWanted (filter deferWanted (irWanted (applyInfer su r))))))
                         (apply su ty)) | ((n, r), ty) <- zip inferred types]
                 if next /= applyTEnv su schs then settle (fuel - 1) su next ppd types hs
                 else do
@@ -496,7 +502,7 @@ closeBindingWithOpen open outer ty0 wanted0 body now = do
         candidate <- resolveWanted outer w
         return (wtdBind w, wtdHole w, candidate)
 
-    let grouped = groupWanted outwardWs
+    let grouped = nameGroups (groupWanted outwardWs)
         hidden = zipWith mkHidden [0 :: Int ..] grouped
         mkHidden i (pred', ws) =
             let bound = [n | w <- ws, Just n <- [wtdBind w]]
@@ -557,6 +563,7 @@ inferDeclBodyPrepared env ienv params body = go env params
                         , wtdSpan = bodySpan body
                         , wtdBind = Just n
                         , wtdName = Just n
+                        , wtdSearch = Just n
                         } : irWanted r
                     }
 

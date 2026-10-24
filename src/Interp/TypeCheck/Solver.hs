@@ -44,6 +44,7 @@ applyPred :: TSub -> Pred -> Pred
 applyPred ts = \case
     Implicit t -> Implicit (apply ts t)
     NameImplicit n t -> NameImplicit n (apply ts t)
+    AutoImplicit n t -> AutoImplicit n (apply ts t)
 
 applyS' :: TSub -> S' -> S'
 applyS' ts sch@(Forall vs ps t) =

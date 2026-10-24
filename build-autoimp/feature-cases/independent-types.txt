@@ -1,0 +1,2 @@
+def eq=Ord {cmp'=lambda x y->EQ}::Ord Int;
+def st=Ord {cmp'=lambda x y->LT}::Ord String; def g x y z w=(x<y,z<w); g @{ord0=eq,ord1=st} 2 1 "z" "a";

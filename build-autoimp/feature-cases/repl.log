@@ -1,0 +1,8 @@
+HM interpreter. Type :q to quit.
+> 1: def eq : Ord Int
+> 1: def lt : Ord Int
+> 1: def u : {a :: Ord Int, b :: Ord Int} => (Int -> (Ordering, Ordering))
+> Type: {a :: Ord Int, b :: Ord Int} => (Int -> (Ordering, Ordering))
+> 1: Type : (Ordering, Ordering)
+Value: (EQ, LT)
+> Bye.

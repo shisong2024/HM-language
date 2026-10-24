@@ -1,0 +1,5 @@
+1: def lt : Ord Int
+2: def a : Forall a0. {ord0 :: Ord a0} => (Int -> (a0 -> Bool))
+2: def b : Forall a0. {ord0 :: Ord a0} => (Int -> (a0 -> Bool))
+2: Type : Bool
+Value: true

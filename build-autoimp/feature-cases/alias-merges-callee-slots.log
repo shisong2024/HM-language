@@ -1,0 +1,4 @@
+1: def lt : Ord Int
+2: def u : {a :: Ord Int, b :: Ord Int} => (Int -> (Ordering, Ordering))
+2: Type : (Ordering, Ordering)
+Value: (LT, LT)

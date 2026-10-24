@@ -4,6 +4,7 @@ build-tmp/
 
 TODO/
 test/
+AGENTS/
 
 *.patch
 *.json

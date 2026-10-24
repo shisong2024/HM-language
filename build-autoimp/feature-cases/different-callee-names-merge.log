@@ -1,0 +1,6 @@
+1: def eq : Ord Int
+2: def a : {first :: Ord Int} => (Int -> Ordering)
+2: def b : {second :: Ord Int} => (Int -> Ordering)
+2: def f : {ord0 :: Ord Int} => (Int -> (Ordering, Ordering))
+2: Type : (Ordering, Ordering)
+Value: (EQ, EQ)

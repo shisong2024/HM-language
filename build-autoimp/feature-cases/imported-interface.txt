@@ -1,0 +1,3 @@
+import library.txt as L
+def eq=Ord {cmp'=lambda x y->EQ}::Ord Int;
+L.compareTwice @{ord0=eq} 1 2;

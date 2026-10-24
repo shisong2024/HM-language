@@ -1,0 +1,7 @@
+1: implicit def ord0 : Ord Int
+1: implicit def another : Ord Int
+1: def f : {ord0 :: Ord Int} => (Int -> Bool)
+1: Type Error:
+1 | implicit def ord0=Ord {cmp'=lambda x y->LT}::Ord Int; implicit def another=Ord {cmp'=lambda x y->GT}::Ord Int; def f x=x<1; f 0;
+  |                                                                                                                             ^
+More than one implicit value matches Ord Int: `ord0`, `another`.

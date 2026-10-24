@@ -1,0 +1,5 @@
+effect-marker
+1: def eq : Ord Int
+2: def f : {ord0 :: Ord Int} => (Int -> {Console} Bool)
+2: Type : Bool
+Value: false

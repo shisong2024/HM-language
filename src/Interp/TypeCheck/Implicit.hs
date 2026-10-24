@@ -18,6 +18,8 @@ import Interp.TypeCheck.Common
 import Interp.TypeCheck.Declarations (checkAbilityType)
 import Interp.TypeCheck.Solver
 import Interp.Pretty (tick)
+import qualified Data.Text as T
+import Data.Char (toLower)
 
 isClosedType :: T' -> Bool
 isClosedType = S.null . ftv
@@ -28,9 +30,27 @@ deferWanted w = case wtdName w of
     Nothing -> not (isClosedType (wtdType w))
 
 wantedPred :: Wanted -> Pred
-wantedPred w = case wtdName w of
+wantedPred w = case wtdBind w of
     Nothing -> Implicit $ wtdType w
     Just n  -> NameImplicit n (wtdType w)
+
+-- Public names belong to the enclosing definition, not to its callees.
+-- Only locally declared implicit binders retain a user-chosen identity.
+nameGroups :: [(Pred, [Wanted])] -> [(Pred, [Wanted])]
+nameGroups groups = snd $ foldl assign (reserved, []) groups
+    where
+        reserved = S.fromList [n | (NameImplicit n _, _) <- groups]
+        assign (used, done) group@(NameImplicit _ _, _) = (used, done <> [group])
+        assign (used, done) (p, ws) =
+            let ty = predType p
+                base = case ty of
+                    TCon n _ -> case T.uncons (last (T.splitOn "." n)) of
+                        Just (c, rest) -> T.cons (toLower c) rest
+                        Nothing -> "dict"
+                    _ -> "dict"
+                name = head [base <> T.pack (show i) | i <- [0 :: Int ..],
+                    S.notMember (base <> T.pack (show i)) used]
+            in (S.insert name used, done <> [(AutoImplicit name ty, ws)])
 
 resolveWanted :: Checker m => TEnv -> Wanted -> m E'
 resolveWanted tenv = resolve []
@@ -43,13 +63,13 @@ resolveWanted tenv = resolve []
             unless (isClosedType target) $ failAt (AmbiguousImpType target)
             when (target `elem` path) $ failAt (ImpResolutionCycle (reverse (target: path)))
             when (length path >= 64) $ failAt (ImpResolutionDepth (reverse (target: path)))
-            selected <- case wtdName wtd of
+            selected <- case wtdSearch wtd of
                 Nothing -> search wtd (wtdScope wtd)
                 Just n -> byName wtd n (wtdScope wtd)
 
             let (name, predicates) = selected
             args <- forM predicates $ \p -> resolve (target: path) wtd
-                { wtdType = predType p, wtdName = predName p, wtdBind = Nothing }
+                { wtdType = predType p, wtdName = predName p, wtdBind = Nothing, wtdSearch = predSearchName p }
             return $ foldl App (Var name) args 
 
         match wtd name = case M.lookup name tenv of

@@ -1,0 +1,2 @@
+def eq=Ord {cmp'=lambda x y->EQ}::Ord Int;
+def h x y=(x<1,y<1); h @{ord0=eq} 2 3;

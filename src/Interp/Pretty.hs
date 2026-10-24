@@ -189,6 +189,7 @@ prettyS' sch@(Forall vars preds ty) =
                     case p of 
                         Implicit t -> printT' (renumberT ren t)
                         NameImplicit n t -> n <> " :: " <> printT' (renumberT ren t)
+                        AutoImplicit n t -> n <> " :: " <> printT' (renumberT ren t)
                     | p <- preds
                     ]
                 <> "} => "

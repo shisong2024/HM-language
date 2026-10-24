@@ -1,0 +1,2 @@
+def lt=Ord {cmp'=lambda x y->LT}::Ord Int;
+def f n=if n==0 then 1<2 else f @{ord0=lt} (n-1); f 3;

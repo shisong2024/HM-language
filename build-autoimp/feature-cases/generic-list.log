@@ -1,0 +1,5 @@
+1: def f : Forall a0. {show0 :: Show a0} => ([a0] -> [String])
+1: Type : [String]
+Value: ["1", "2"]
+1: Type : [String]
+Value: ["true"]

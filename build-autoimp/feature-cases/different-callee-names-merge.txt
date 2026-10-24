@@ -1,0 +1,2 @@
+def eq=Ord {cmp'=lambda x y->EQ}::Ord Int;
+def a {first::Ord Int} x=first.cmp' x x; def b {second::Ord Int} x=second.cmp' x x; def f x=(a x,b x); f @{ord0=eq} 1;

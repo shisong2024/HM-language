@@ -1,0 +1,5 @@
+1: def eq : Ord Int
+2: def lt : Ord Int
+3: def g : Forall a0 a1. {ord0 :: Ord a0, ord1 :: Ord a1} => (a0 -> (a0 -> (a1 -> (a1 -> (Bool, Bool)))))
+3: Type : (Bool, Bool)
+Value: (false, true)

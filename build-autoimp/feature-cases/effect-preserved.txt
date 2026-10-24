@@ -1,0 +1,2 @@
+def eq=Ord {cmp'=lambda x y->EQ}::Ord Int;
+def f x=do {putStrLn "effect-marker"; x<1}; f @{ord0=eq} 2;

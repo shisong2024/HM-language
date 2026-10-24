@@ -1,0 +1,7 @@
+Parse Error:
+build-autoimp/feature-cases/duplicate-slot.txt:1:44:
+  |
+1 | def f x=x<1; f @{ord0=ordInt,ord0=ordInt} 1;
+  |                                            ^
+duplicate named dictionary argument
+

@@ -1,0 +1,6 @@
+1: def f : {ord0 :: Ord Int} => (Int -> Bool)
+1: Type Error:
+1 | def f x=x<1; f @{ord0=showInt} 1;
+  |                  ^
+Dictionary argument `ord0` has type Show Int, but expected Ord Int.
+Type mismatch: expected Ord Int but got Show Int.

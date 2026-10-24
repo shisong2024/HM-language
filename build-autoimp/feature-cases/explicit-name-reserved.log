@@ -1,0 +1,4 @@
+1: def eq : Ord Int
+2: def f : Forall a0. {ord0 :: Ord Int, ord1 :: Ord a0} => (Int -> (a0 -> (Ordering, Bool)))
+2: Type : (Ordering, Bool)
+Value: (EQ, false)

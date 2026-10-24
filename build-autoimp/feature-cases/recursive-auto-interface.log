@@ -1,0 +1,4 @@
+1: def lt : Ord Int
+2: def f : {ord0 :: Ord Int} => (Int -> Bool)
+2: Type : Bool
+Value: true

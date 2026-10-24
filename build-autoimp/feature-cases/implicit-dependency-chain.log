@@ -1,0 +1,9 @@
+1: ability Render a
+  Render {render} : ((a0 -> String) -> Render a0)
+1: def renderText : Forall a0. {s :: Show a0} => (a0 -> String)
+1: implicit def r : Forall a0. {show0 :: Show a0} => Render a0
+1: def use : Forall a0. {r :: Render a0} => (a0 -> String)
+1: Type : String
+Value: "1"
+1: Type : String
+Value: "true"

@@ -1,0 +1,2 @@
+def lt=Ord {cmp'=lambda x y->LT}::Ord Int;
+def u {a::Ord Int} {b::Ord Int} x=(a.cmp' x x,b.cmp' x x); let f=u in f @{ord0=lt} 1;

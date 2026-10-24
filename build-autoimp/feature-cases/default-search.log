@@ -1,0 +1,3 @@
+1: def h : {ord0 :: Ord Int} => (Int -> (Int -> (Bool, Bool)))
+1: Type : (Bool, Bool)
+Value: (true, false)

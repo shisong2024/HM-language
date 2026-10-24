@@ -1,0 +1,5 @@
+1: def f : {ord0 :: Ord Int} => (Int -> Bool)
+1: Type Error:
+1 | def f x=x<1; f @{ord9=ordInt} 1;
+  |                  ^
+Unknown dictionary argument `ord9`. Available arguments: `ord0`.

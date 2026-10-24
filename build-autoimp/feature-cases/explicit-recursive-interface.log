@@ -1,0 +1,4 @@
+1: def lt : Ord Int
+2: def f : {chosen :: Ord Int} => (Int -> Ordering)
+2: Type : Ordering
+Value: LT
