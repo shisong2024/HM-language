@@ -342,11 +342,11 @@ eqOp v1 v2 w = case eqV (v1, v2) of
 
 paramName :: Param -> Text
 paramName = \case
-    ExplicitParam n -> n
+    ExplicitParam n _ -> n
     ImplicitParam n _ -> n
 
 explicitParams :: [Param] -> [Text]
-explicitParams ps = [n | ExplicitParam n <- ps]
+explicitParams ps = [n | ExplicitParam n _ <- ps]
 
 implicitParams :: [Param] -> [(Text, T')]
 implicitParams ps = [(n, t) | ImplicitParam n t <- ps]

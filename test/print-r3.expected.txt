@@ -1,0 +1,13 @@
+Hello, world!
+hi Codex
+a
+b
+1: Type : Unit
+Value: Unit
+2: Type : Unit
+Value: Unit
+3: def greet : (String -> {Console} Unit)
+4: Type : Unit
+Value: Unit
+5: Type : [Unit]
+Value: [Unit, Unit]

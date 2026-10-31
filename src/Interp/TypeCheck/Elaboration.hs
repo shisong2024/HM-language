@@ -88,12 +88,14 @@ prepareDecl (Def n ps body) = do
     forM_ [(x, t) | ImplicitParam x t <- ps] $ \(x, t) ->
         withNote ("in implicit parameter " <> tick x) (checkAbilityType denv t)
     let vars = S.toList $ S.filter (< 0) $ S.unions
-            ([ftv t | ImplicitParam _ t <- ps] <> annotationVars body)
+            ([ftv t | ImplicitParam _ t <- ps]
+             <> [ftv t | ExplicitParam _ (Just t) <- ps]
+             <> annotationVars body)
     freshVars <- mapM (const fresh) vars
     let su = M.fromList (zip vars freshVars)
         param = \case
             ImplicitParam x t -> ImplicitParam x (apply su t)
-            x -> x
+            ExplicitParam x mty -> ExplicitParam x (fmap (apply su) mty)
     return $ Def n (map param ps) (mapAnnotations (apply su) False body)
 
 annotationVars :: E' -> [Set TypeVar]

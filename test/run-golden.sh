@@ -226,17 +226,18 @@ repl_check () {
 repl_check "REPL 求值了管道输入的最后一行"        '1+1;\n'                 'Value: 2'
 repl_check "REPL 跨行保持定义（def 后能用）"      'def f x = x + 1;\nf 10;\n' 'Value: 11'
 repl_check "REPL 里 0 参 def 也能用"              'def x = 1;\nx;\n'      'Value: 1'
-repl_check "REPL 的 :t 打印表达式类型"            ':t 1+1\n'              'Type : Int'
+repl_check "REPL 的 :t 打印表达式类型"            ':t 1+1\n'              'Type: Int'
 # 尾部分号可有可无（两种写法都得收），但两条语句仍必须拒。
-repl_check "REPL 的 :t 尾部带分号也收"            ':t 1+1;\n'             'Type : Int'
+repl_check "REPL 的 :t 尾部带分号也收"            ':t 1+1;\n'             'Type: Int'
 repl_check "REPL 的 :t 认得会话里的 def"          'def f x = x + 1;\n:t f\n' 'Int -> Int'
 repl_check "REPL 解析错误不退出、继续下一行"      '(((\n1+1;\n'           'Value: 2'
 repl_check "REPL 类型变量显示从 a0 起编号"        'lambda a -> a;\nlambda b -> b;\n' 'a0 -> a0'
 # 会话跑很久之后计数器会到 100+，显示层必须把它压回 a0/a1（旧行为会打 a1xx）。
-# （原来这里是 `:load utils/list.txt` —— 那个文件在 f156c51 已并进 prelude 删掉了，
-#   所以改成 load prelude：既测 :load 本身，也测 toplevel 里 map 的泛化。）
+# 2026-10-30：exe 启动即自动加载 prelude，计数器在首个提示符前就已远超 100，因此不必
+#   再 :load（重复加载 prelude 现在会报 "Duplicate data declaration: Unit"，见 DN-013）。
+#   map 的类型现在带效果变量 {e0}（R4 效果跟踪），needle 相应更新。
 repl_check "长会话里 :t 仍从 a0 起编号（不泄漏计数器原值）" \
-    ':load utils/prelude.txt\n:t map\n' '((a0 -> a1) -> ([a0] -> [a1]))'
+    ':t map\n' '((a0 -> {e0} a1) -> ([a0] -> {e0} [a1]))'
 
 # 2026-09-23 补：def 体调用另一个 def。
 # 之前缺这条，于是 Eval.hs「闭包只捕获本 SCC 的 knot」的缺陷没被发现 ——

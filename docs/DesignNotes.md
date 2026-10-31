@@ -1,6 +1,6 @@
 # Design Notes：设计目的与决策记录
 
-更新：2026-10-13。当前语义以 [Language Reference](LanguageReference.md) 为准；实现排期见 [TODO](../TODO/32-当前路线与验收.md)。本文件把用户诉求、助手建议、已确认规则和开放问题分开。未经明确确认的建议不成为语言规范。
+更新：2026-10-30。当前语义以 [Language Reference](LanguageReference.md) 为准；实现排期见 [TODO](../TODO/32-当前路线与验收.md)。本文件把用户诉求、助手建议、已确认规则和开放问题分开。未经明确确认的建议不成为语言规范。
 
 ## 维护方式
 
@@ -38,7 +38,7 @@
 
 ## DN-003：能力接口与普通 data 是否区分
 
-**状态：用户授权基础版实施；隔离验证；主源码尚未采用。**
+**状态：用户授权基础版实施；已进入主源码（commit `594df6b basic ability and effect`，当前 HEAD `9e56a12`）。`utils/prelude.txt` 已用 `ability Ord`/`ability Show` 声明能力，主测试与金标均通过。旧记的“隔离验证；主源码尚未采用”是当时快照。**
 
 初衷：Person 描述数据形状，Ord/Show 描述如何操作数据；全部写成 data 虽然实现统一，用户理解上缺少角色区分。
 
@@ -77,7 +77,7 @@ ability Ord a { cmp :: a -> a -> Ordering };
 
 ## DN-004：同名字段与字段多态
 
-**状态：备忘录方案与助手建议；未实现。**
+**状态：已实现（2026-10-31）。** 第一阶段（跨 data 同名字段 + 类型驱动的字段访问/更新）与第二阶段（多态投影/更新）均已进入主源码，并额外补上显式参数类型标注 `(x :: T)`。实现细节与取舍见文末 2026-10-31 沿革补记；下面保留最初的备忘录方案作为设计背景。
 
 初衷：Person.name、Cat.name 等自然字段名称因全局 FieldTab 限制而冲突；人为添加前缀损害可读性。
 
@@ -100,6 +100,24 @@ ability Ord a { cmp :: a -> a -> Ordering };
 还要决定多构造器 ADT 的部分字段：结果类型唯一不保证读取成功。第一轮优先单构造器 Record；现有部分字段访问行为另行处理，不假装已经总化。
 
 暂不加入虚拟字段、字段别名映射、完整 Lens、开放 Record row。验收重点是消歧与推断顺序无关、更新准确、模块间标签/类型身份一致，以及旧程序兼容边界清楚。
+
+### 2026-10-31 沿革补记（实现落地）
+
+用户要求优先实现「完整字段多态 + 同名字段」，经商量选定路线 B（复用隐式机制，只针对具名 data/ability 字段，不引入完整 row 类型），分三阶段实现，每阶段跑测试后确认。基线：`cabal test` 从 297 → 314 examples / 0 failures，golden 全绿，构建无警告。
+
+**第一阶段（类型驱动解析 + 跨 data 同名字段）。** `FieldTab` 由 `Map Text FieldInfo` 改为 `Map Text [FieldInfo]`（一名可属多构造子）；`DEnv` 新增 `denvFields :: Map Text (Map Text (Text,Int))`（data→字段→(构造子,下标)）。字段访问 `r.f` 与更新 `r{f=v}` 不再在解析期脱糖，parser 保留 `$fld@`/`$upd@` marker，改由 `Infer.inferFieldAccess/inferFieldUpdate` 在拿到 scrutinee 的具体 `TCon d _` 后现场构造投影/更新 `Match` 再重新推断（重推断让 `patType` 自动算出实例化后的字段类型，`$fieldErr` 兜底臂也正常过检）。放开了原 `addField`/`agrees` 的跨 data 同名拒绝，并删除模块系统里不再成立的「跨模块字段冲突」检查（构造子名带别名前缀，天然无歧义）。这印证了备忘录第 86 行的判断：改动确实波及构造、更新、模式、Qualify、Pretty、可见性与重载，不只是改 Map 的值类型。
+
+**第二阶段（多态投影/更新）。** 这里与备忘录的设想有一处**路径差异**，需明确记录：备忘录第 92 行建议加专用 `HasField(label, record, result)` 约束，第 96 行又告诫「不推荐现在批量生成 HasName/HasAge 类型」。实际实现走的是 M1 方案——为每个字段名 x **批量合成两个内部 ability** `$get_x r a`（getter）与 `$set_x r a`（setter），字段名编码进 ability 名，于是不同字段约束的类型头不同、天然不歧义，`checkAbilityType` 也自然通过，**完全复用现有 `resolveWanted`/`closeBinding`/泛化管线，未新增 `Pred` 构造子、未改 `unify` 核心**。第 96 行担心的名字管理/重复声明/可见性污染，通过三点收敛：合成名带 `$` 前缀（用户写不出、不会与真实 data 撞名）、只对程序里真实出现的字段名合成、字段名收集时跳过 `$`-前缀避免跨批无限增殖。
+
+关键难点是**字段约束带一个「输出」类型**（字段类型 a），而现有隐式搜索只解闭合的输入约束、不解输出变量（`matchCandidateType` 只绑定候选自己的 forall 变量，无法反解 wanted 侧的结果变量）。解法是在 `inferExpr` 里加一个 `resolveFieldWanted` 即时解析步：一旦记录类型被统一成具体 `TCon d args`，立刻查 `denvFields` 得字段类型 FT、把输出变量统一成 FT、按 d 现场构造投影/setter 闭包替换字典洞、丢弃该约束；仍抽象的约束则留给 `closeBinding` 泛化成隐藏字典参数。这满足备忘录第 88 行「必须在普通约束传播后再判断不确定访问，不能一遇到 x.name 就拒绝」的要求。
+
+**参数类型标注 `(x :: T)`（附带实现）。** 用户希望把「任何带 name 字段的类型都行」的多态投影收窄到具体类型（如只要 Person）。`ExplicitParam Text` 改为 `ExplicitParam Text (Maybe T')`，parser 支持参数位 `(x :: T)`；`inferDeclBodyPrepared` 在推断 body **之前**先 `checkTypeCons` + `unify(参数变量, 标注)`，于是 body 里的字段访问看到具体类型、走单态解析，整个 def 不再泛化。标注含类型变量（如 `(o :: Ord a)`）时照常泛化。
+
+**与备忘录一致的保留项：** 多构造器 ADT 的部分字段（字段只在某构造子里）仍是「类型检查通过、运行期若命中不含该字段的构造子则走 `$fieldErr` 报错」，未总化（备忘录第 100 行）；未引入虚拟字段、字段别名、完整 Lens、开放 Record row（第 102 行）。
+
+**已知瑕疵（非阻塞）：** 多态约束在 `:t`/def 类型里显示为 `{{v : a1 | a0}}`（外层是约束括号 `{…} =>`，内层是记录行记法 `{v : a1 | a0}`，Pretty 已把内部合成名 `$get_v`/`$set_v` 渲染成行记法），双花括号略冗余但可读；字段在任何 data 都不存在时报友好错「No record type in scope has a field `n`」而非泄漏内部名。
+
+**Level 2（只允许某几个类型）结论：** 不需要在字段多态上加白名单——受控集合用现有 `ability HasName a` + `implicit def` 实例即可精确表达（`nameOf (Dog …)` 会因无实例被拒）。结构化字段访问（`r.name`＝任何带该字段的类型）与名义白名单（ability 实例）是两种取向，前者要开放、后者要受控，不混用。
 
 ## DN-005：Tuple 实例与 Show 的含义
 
@@ -167,7 +185,7 @@ Type Witness/Apply 仍需类型归约；GAT 仍需投影与归约；参数化模
 
 ## DN-008：顺序块、guard 与模式函数
 
-**状态：建议和待设计事项；当前均未支持。**
+**状态：`do` 顺序块已进入主源码（commit `2df939b`，随 DN-011 handler 主线）；guard 与模式函数方程仍未支持。** 2026-10-30 实测 `do { x = 1 + 1; x * 2 }` 得 `4`。落地的 `do` 是严格绑定节点（非最后语句从左到右执行、未使用绑定也初始化、最后表达式返回结果），规则见 LanguageReference §10；下面草案里“空块、末尾只有绑定、遮蔽”等待决项已按 §10 定型（不支持空块、不支持以绑定结尾、不支持模式绑定、支持遮蔽与嵌套）。guard/模式函数仍是建议。
 
 初衷：嵌套 let/if/match 影响实际带效果程序和分类逻辑的可读性。
 
@@ -215,7 +233,7 @@ Pattern guard 引入变量与失败路径，另行设计。模式函数参数和
 
 ## DN-011：用户自定义操作与深层 handler
 
-**状态：2026-10-13 用户明确授权实施；隔离交付与验证证据见 [36](../TODO/36-参数化Effect与深层Handler完整代码.md)，主源码尚未采用此扩展。**
+**状态：2026-10-13 用户明确授权实施；已进入主源码（commit `2df939b effects and handlers`，当前 HEAD `9e56a12`）。2026-10-30 在主 exe 实测：Error/State 深层 handler 示例、`do` 块、`readFile`/`writeFile` 宿主接口均通过（见 LanguageReference 第 10 节）。隔离交付的完整代码与验证证据见 [36](../TODO/36-参数化Effect与深层Handler完整代码.md)。**
 
 初衷：用户编写 JSON 解析器时发现，仅追踪 Console 等静态标签，无法自然表达读取输入、更新位置、报告错误与中止计算。用户不希望把 State、Error 一一做成内建机制；希望用语言自身定义它们。
 
@@ -235,12 +253,14 @@ Handler 写作 `handle State Int in computation with {return x->...; get arg res
 
 未采用：多次恢复、非确定性搜索、具名 effect 实例、资源区域类型、线程或异步、HKT/higher-rank 字段、自动能力继承。FileIO 当前只提供 UTF-8 文本整文件读写，失败返回 Either；需要可恢复 Error 时由用户包装，未将宿主 IOException 自动变成某个用户定义的 effect。
 
-沿革补记：基础版 ability/fixed effect 已由用户采用，当前 HEAD 为 `594df6b`。旧 35 的“尚未采用”属于当时快照，已归档保留；当前主测试仍需接口适配，不能把隔离验证等同于原始主测试直接通过。
+沿革补记：基础版 ability/fixed effect 已由用户采用；参数化 effect/handler/do 亦已进入主源码（commit `2df939b`）。当前 HEAD 为 `9e56a12`（旧记的 `594df6b` 是当时快照）。2026-10-30：主测试接口已迁移到当前源码，`cabal test` 283/0、`test/run-golden.sh` 全绿；旧 35 的“尚未采用”属于当时快照，已归档保留。
+
+沿革补记（2026-10-30，补测与修 bug）：`test/Spec.hs` 新增“参数化 effect、handler 与 do”一组共 14 条断言，把此前的覆盖缺口补上（状态传递式深 handler、resume 只能用一次、abort 丢弃续体、嵌套 handler 转发、漏 arm 静态拒绝、effect row 与残余效果、拦截内置 Console、do 的左到右/强制初始化/遮蔽/嵌套/空块与末尾绑定拒绝），`cabal test` 297/0。补测中查出一处真实 bug 并修复：`inferHandler` 里为 Console/FileIO 各写了一份兜底 `EffDecl`，与 `Interp.Builtin` 的权威签名重复；FileIO 的 `readFile` 在 handler 侧被误标成 `String -> Either String Unit`，而宿主实际返回文件内容 `Either String String`（`app/Main.hs` 的 host 与 `Builtin.readFileTy` 都是 String），于是 `handle FileIO` 中 `readFile` 的续体拒绝字符串内容。修法：把 Console/FileIO 的操作签名收敛到 `Interp.Builtin`（`consoleEffDecl`/`fileIOEffDecl`，`builtinTEnv` 与 handler 兜底共用同一份），消除会再次漂移的重复来源；并加回归断言（去掉修复该断言即红）。
 
 
 ## DN-012：TypeCheck 的 HM 设计笔记
 
-2026-10-23。用户要求整理当前 TypeCheck 的设计细节，重点是 HM 类型系统的设计经验与实现技术，记录于 [dairy/TypeCheck.md](../dairy/TypeCheck.md)。目的：建立替换、统一、实例化、泛化、作用域和状态提交的不变量，便于用户自行排错及后续维护。
+2026-10-23。用户要求整理当前 TypeCheck 的设计细节，重点是 HM 类型系统的设计经验与实现技术，本应记录于 `dairy/TypeCheck.md`（**2026-10-30 核对：该笔记文件当前不在仓库中，原相对链接已失效，内容待补**）。目的：建立替换、统一、实例化、泛化、作用域和状态提交的不变量，便于用户自行排错及后续维护。
 
 本次仅整理文档：以主工作区 HEAD `d10efca` 和阅读时的未提交源码为观察基线，区分基础 HM、implicit/elaboration 和 effect/handler 扩展，不把当前实现当成已经证明正确的规则。笔记记录阅读顺序、教学伪代码、当前函数位置、测试建议及待审计点；未重新编译运行，不引用历史隔离测试数字证明当前版本正确。
 

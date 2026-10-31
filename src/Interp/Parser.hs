@@ -158,7 +158,15 @@ upperName :: Parser Text
 upperName = lexeme $ nameRaw isUpper
 
 parseParam :: Parser Param
-parseParam = try parseImpParam <|> (ExplicitParam <$> parseVar')
+parseParam = try parseImpParam <|> try parseAnnParam <|> (ExplicitParam <$> parseVar' <*> pure Nothing)
+
+-- | 带类型标注的显式参数 `(x :: T)`：把参数类型钉住（例如 `def f (r :: Person) = r.name`
+-- 得到单态的 `Person -> String`，而不是对任何带 name 字段的类型都成立的多态投影）。
+parseAnnParam :: Parser Param
+parseAnnParam = ExplicitParam
+    <$> (lexeme (char '(') *> parseVar')
+    <*> (Just <$> (lexeme (string "::" <?> "::") *> parseType))
+    <* lexeme (char ')')
 
 parseImpParam :: Parser Param
 parseImpParam = ImplicitParam
@@ -844,17 +852,15 @@ recProgram tab0 ss = do
     return (tab, ss')
     where
         addDecl :: FieldTab -> DataDecl -> Either Text FieldTab
-        addDecl tab d = foldM (addField d) (dropData (dName d) tab) (M.toList (dFields d))
+        addDecl tab d = return (foldl (addField d) (dropData (dName d) tab) (M.toList (dFields d)))
 
         dropData :: Text -> FieldTab -> FieldTab
-        dropData n = M.filter (\fi -> fiData fi /= n)
+        dropData n = M.filter (not . null) . M.map (filter (\fi -> fiData fi /= n))
 
-        addField :: DataDecl -> FieldTab -> (Text, (Text, Int)) -> Either Text FieldTab
-        addField d tab (f, (c, i)) = case M.lookup f tab of
-            Just old | not (agrees old new) -> Left $
-                "data " <> dName d <> ": field `" <> f <> "` is already a field of `"
-                    <> fiCtor old <> "`."
-            _ -> Right (M.insert f new tab)
+        -- 跨 data 的同名字段现在被允许：字段名 → 多个 FieldInfo（各属一个构造子）。
+        -- 同一 data 内的重名已由 parseDataCore 的 `duplicate field` 检查拦下。
+        addField :: DataDecl -> FieldTab -> (Text, (Text, Int)) -> FieldTab
+        addField d tab (f, (c, i)) = M.insert f (new : M.findWithDefault [] f tab) tab
             where
                 new = FieldInfo
                     { fiCtor  = c
@@ -863,13 +869,6 @@ recProgram tab0 ss = do
                     , fiArity = maybe 0 length (lookup c (dCtors d))
                     , fiSolo  = length (dCtors d) == 1
                     }
-
-        agrees :: FieldInfo -> FieldInfo -> Bool
-        agrees a b = base (fiCtor a) == base (fiCtor b)
-                  && fiIdx a == fiIdx b && fiArity a == fiArity b
-
-        base :: Text -> Text
-        base n = snd (T.breakOnEnd "." n)
 
 dataDeclsOf :: Program -> [DataDecl]
 dataDeclsOf prs = 
@@ -913,7 +912,10 @@ desugarE tab = \case
         f' <- desugarE tab f
         a' <- desugarE tab a
         case spanOf f' of
-            (sp, Var n) | isMarker n -> recUse tab sp n a'
+            -- 只有记录构造 `C { f = v }` 在解析期脱糖（构造子名已写明，无歧义）。
+            -- 字段访问 `$fld@`、更新 `$upd@` 保留为 marker，交给类型检查期按 scrutinee
+            -- 的具体类型解析（Infer.inferFieldAccess / inferFieldUpdate）。
+            (sp, Var n) | Just r <- T.stripPrefix "$rec@" n -> recBuild sp tab r a'
             _                        -> Right (App f' a')
     Handle b n ts r rb os -> Handle <$> desugarE tab b <*> pure n <*> pure ts <*> pure r
         <*> desugarE tab rb <*> mapM (\(o,x,k,e) -> (o,x,k,) <$> desugarE tab e) os
@@ -925,37 +927,9 @@ spanOf = \case
         (s, e')       -> (s, e')
     e -> (Nothing, e)
 
-isMarker :: Text -> Bool
-isMarker n = any (`T.isPrefixOf` n) ["$fld@", "$rec@", "$upd@", "$pat@"]
-
-recUse :: FieldTab -> Maybe Span -> Text -> E' -> Either Text E'
-recUse tab sp n a
-    | Just f <- T.stripPrefix "$fld@" n = fieldGet sp tab f a
-    | Just r <- T.stripPrefix "$rec@" n = recBuild sp tab r a
-    | Just f <- T.stripPrefix "$upd@" n = recUpdate sp tab f a
-    | otherwise = Right (App (Var n) a)
-
-fieldGet :: Maybe Span -> FieldTab -> Text -> E' -> Either Text E'
-fieldGet sp tab f a = do
-    fi <- lookupField sp tab f
-    let i  = fiIdx fi
-        ar = fiArity fi
-        ps = [if j == i then PVar recVal else PWild | j <- [0 .. ar - 1]]
-        bad = (PVar recOther, App (App (Var fieldErr) (SLit f)) (Var recOther))
-    return $ Match a ((PCtor (fiCtor fi) ps, Var recVal) : [bad | not (fiSolo fi)])
-
-recVal, recOther, fieldErr :: Text
-recVal   = "$recVal"
-recOther = "$recOther"
-fieldErr = "$fieldErr"
-
-lookupField :: Maybe Span -> FieldTab -> Text -> Either Text FieldInfo
-lookupField sp tab f =
-    maybe (Left $ badSpan sp ("unknown field `" <> f <> "`.")) Right (M.lookup f tab)
-
 ctorFields :: Maybe Span -> FieldTab -> Text -> Either Text [Text]
 ctorFields sp tab c =
-    case sortOn (fiIdx . snd) [(f, fi) | (f, fi) <- M.toList tab, fiCtor fi == c] of
+    case sortOn (fiIdx . snd) [(f, fi) | (f, fis) <- M.toList tab, fi <- fis, fiCtor fi == c] of
         [] -> Left $ badSpan sp ("`" <> c <> "` is not a record constructor.")
         fs -> Right (map fst fs)
 
@@ -970,31 +944,6 @@ recBuild sp tab rest a = case T.splitOn "@" rest of
                 (f: _) -> Left $ badSpan sp ("`" <> c <> "` still needs field `" <> f <> "`.")
                 [] -> Right $ foldl App (Var c) [v | f <- order, Just v <- [lookup f given]]
     _ -> Left $ badSpan sp "malformed record."
-
-recUpdate :: Maybe Span -> FieldTab -> Text -> E' -> Either Text E'
-recUpdate sp tab flds a = case a of
-    TupleLit (r: vs) -> do
-        given <- zipFields sp "$update" (T.splitOn "," flds) (TupleLit vs)
-        fis <- mapM (\(f, _) -> (,) f <$> lookupField sp tab f) given
-        let fi = snd (head fis)
-        if any ((/= fiCtor fi) . fiCtor . snd) fis
-            then Left $ badSpan sp "a record update cannot mix fields of different constructors."
-            else do
-                let ar = fiArity fi
-                    idxs = map (fiIdx . snd) fis
-                    valAt j = case [v | ((_, g), v) <- zip fis vs, fiIdx g == j] of
-                        (v: _) -> v
-                        []     -> Var (oldTmp j)
-                    pat = PCtor (fiCtor fi)
-                        [if j `elem` idxs then PWild else PVar (oldTmp j) | j <- [0 .. ar - 1]]
-                    body = foldl App (Var (fiCtor fi)) [valAt j | j <- [0 .. ar - 1]]
-                    bad = (PVar recOther,
-                           App (App (Var fieldErr) (SLit (fst (head given)))) (Var recOther))
-                return $ Match r ((pat, body) : [bad | not (fiSolo fi)])
-    _ -> Left $ badSpan sp "malformed record update."
-
-oldTmp :: Int -> Text
-oldTmp j = "$recOld" <> pack (show j)
 
 zipFields :: Maybe Span -> Text -> [Text] -> E' -> Either Text [(Text, E')]
 zipFields sp c flds a = case a of

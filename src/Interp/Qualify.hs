@@ -57,7 +57,7 @@ qualifyProgram a prs = map (stmt (topsOf prs)) prs
         
         param :: Tops -> Param -> Param
         param t = \case
-            ExplicitParam n -> ExplicitParam n
+            ExplicitParam n mty -> ExplicitParam n (fmap (typ t) mty)
             ImplicitParam n ty -> ImplicitParam n (typ t ty)
 
         expr :: Tops -> S.Set Text -> E' -> E'

@@ -93,9 +93,14 @@ printT' = go False
             TFunc t1 eff t2 -> "(" <> T.unwords 
                 (  [go False t1, "->"] <> [prettyEff eff | eff /= emptyEff] <> [go False t2])
                 <> ")"
-            TCon n x -> case x of
-                [] -> n
-                args -> parenIf needParen (T.unwords (n: fmap (go True) args))
+            TCon n x
+                | Just f <- T.stripPrefix "$get_" n, [rho, alpha] <- x ->
+                    parenIf needParen ("{" <> f <> " : " <> go False alpha <> " | " <> go False rho <> "}")
+                | Just f <- T.stripPrefix "$set_" n, [rho, alpha] <- x ->
+                    parenIf needParen ("{" <> f <> " := " <> go False alpha <> " | " <> go False rho <> "}")
+                | otherwise -> case x of
+                    [] -> n
+                    args -> parenIf needParen (T.unwords (n: fmap (go True) args))
         
         parenIf :: Bool -> Text -> Text
         parenIf b t = if b then "(" <> t <> ")" else t
@@ -119,7 +124,12 @@ prettyTypeError = \case
         T.unwords ["Constructor", c, "expects", pack (show n), "argument(s) but the pattern has", pack (show m)] <> "."
     DuplicateCtor c -> "Duplicate constructor: " <> c <> "."
     DuplicateData d -> "Duplicate data declaration: " <> d <> "."
-    UnknownTypeCtor t -> "Unknown type: " <> t <> "."
+    UnknownTypeCtor t
+        | Just f <- T.stripPrefix "$get_" t ->
+            "No record type in scope has a field `" <> f <> "`, so it cannot be read polymorphically."
+        | Just f <- T.stripPrefix "$set_" t ->
+            "No record type in scope has a field `" <> f <> "`, so it cannot be updated polymorphically."
+        | otherwise -> "Unknown type: " <> t <> "."
     TypeCtorArityMisMatch t n m -> 
         T.unwords ["Type", t, "expects", pack (show n), "argument(s) but got", pack (show m)] <> "."
     CalleeNote n sch e ->
@@ -166,6 +176,7 @@ prettyTypeError = \case
     DuplicateEff n -> "Duplicate effect declaration " <> tick n <> "."
     DeclRoleChanged n -> "Cannot change " <> tick n <> " between data and ability in a live scope."
     HandleError msg -> "Handler/effect error: " <> msg
+    FieldError msg -> "Field error: " <> msg
 
 
 prettyS' :: S' -> Text
@@ -188,13 +199,17 @@ prettyS' sch@(Forall vars preds ty) =
                     [
                     case p of 
                         Implicit t -> printT' (renumberT ren t)
-                        NameImplicit n t -> n <> " :: " <> printT' (renumberT ren t)
-                        AutoImplicit n t -> n <> " :: " <> printT' (renumberT ren t)
+                        NameImplicit n t -> predText n (renumberT ren t)
+                        AutoImplicit n t -> predText n (renumberT ren t)
                     | p <- preds
                     ]
                 <> "} => "
     in varsText <> predsText <> printT' (renumberT ren ty) <> constraintsText
     where
+        -- 合成的字段约束（getter/setter ability）用记录行记法显示，隐去自动生成的字典名。
+        predText n t = case t of
+            TCon nm [_, _] | "$get_" `T.isPrefixOf` nm || "$set_" `T.isPrefixOf` nm -> printT' t
+            _ -> n <> " :: " <> printT' t
         renEff e = 
             let varsInOrder = dedup 
                     (  effVarOrder ty 

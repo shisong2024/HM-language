@@ -142,7 +142,9 @@ execBatch' pendingSyns loud ss src lprs perr = do
                             , sEnv    = foldr M.delete env' stale
                             , sNext   = n
                             , sDEnv   = denv
-                            , sFields = M.filter (\fi -> fiCtor fi `notElem` stale) (sFields ss)
+                            , sFields = M.filter (not . null)
+                                  . M.map (filter (\fi -> fiCtor fi `notElem` stale))
+                                  $ sFields ss
                             , sImp    = newImp <> filter (`notElem` newImp) (sImp ss)
                             , sSyns   = pendingSyns
                             }, ok)
@@ -326,7 +328,7 @@ moduleExports modS prs =
     ctorsAll = S.union ctors (ctorClosure tys denv)
     vals = S.unions [tVals tops, ctorsAll, opsAll, ownOps]
     abils = S.intersection tys (denvAbilities denv)
-    fields = S.fromList [f | (f, fi) <- M.toList (sFields modS)
+    fields = S.fromList [f | (f, fis) <- M.toList (sFields modS), fi <- fis
                         , fiCtor fi `S.member` ctorsAll || fiData fi `S.member` tys]
 
 restrictSession :: ModuleExports -> Session -> Session
@@ -339,9 +341,10 @@ restrictSession ex s = s
         , denvAbilities  = S.intersection (denvAbilities (sDEnv s)) (meAbils ex)
         , denvEffs       = S.intersection (denvEffs (sDEnv s)) (meEffs ex)
         , denvOperations = rk (denvOperations (sDEnv s)) (meOps ex)
+        , denvFields     = rk (denvFields (sDEnv s)) (meTypes ex)
         }
     , sSyns     = rk (sSyns s) (meSyns ex)
-    , sFields   = M.filter keepField (sFields s)
+    , sFields   = (M.filter (not . null) . M.map (filter keepField)) (sFields s)
     , sFixities = rk (sFixities s) (meFix ex)
     , sImp      = filter (`S.member` meImps ex) (sImp s)
     , sImports  = M.empty
@@ -365,10 +368,11 @@ applyView register target ref view = do
                 , denvAbilities  = S.union (denvAbilities vd) (denvAbilities td)
                 , denvEffs       = S.union (denvEffs vd) (denvEffs td)
                 , denvOperations = M.union (denvOperations vd) (denvOperations td)
+                , denvFields     = M.union (denvFields vd) (denvFields td)
                 }
             , sSyns     = M.union (sSyns view) (sSyns target)
             , sFixities = M.union (sFixities view) (sFixities target)
-            , sFields   = M.union (sFields view) (sFields target)
+            , sFields   = M.unionWith (++) (sFields view) (sFields target)
             , sImp      = sImp view <> sImp target
             , sNext     = mergeCounter (sNext target) (sNext view)
             , sResume   = mergeResume (sResume target) (sResume view)
@@ -393,16 +397,13 @@ applyView register target ref view = do
                     <> "`; use `:unimport " <> other <> "` first")
             _ -> return ()
 
-    checkConflicts t r v = case badFields <> badFix <> badOps of
+    checkConflicts t r v = case badFix <> badOps of
         (m:_) -> Left m
         []    -> return ()
       where
         where_ = "module `" <> mrAlias r <> "`"
-        badFields = ["field `" <> k <> "` from " <> where_
-                        <> " conflicts with the field of another module"
-                    | (k, fi) <- M.toList (sFields v)
-                    , Just old <- [M.lookup k (sFields t)]
-                    , old /= fi]
+        -- 跨模块的同名字段不再是冲突：字段访问/更新在类型检查期按 scrutinee 的
+        -- 具体 data 类型解析，而各模块的构造子名带别名前缀互不相同，故无歧义。
         badFix = ["operator `" <> k <> "` from " <> where_
                     <> " conflicts with an existing operator"
                  | (k, fx) <- M.toList (sFixities v)
@@ -460,9 +461,10 @@ deleteExports ex s = s
         , denvAbilities  = denvAbilities (sDEnv s) `S.difference` meAbils ex
         , denvEffs       = denvEffs (sDEnv s) `S.difference` meEffs ex
         , denvOperations = M.withoutKeys (denvOperations (sDEnv s)) (meOps ex)
+        , denvFields     = M.withoutKeys (denvFields (sDEnv s)) (meTypes ex)
         }
     , sSyns     = M.withoutKeys (sSyns s) (meSyns ex)
-    , sFields   = M.filter keep (sFields s)
+    , sFields   = (M.filter (not . null) . M.map (filter keep)) (sFields s)
     , sFixities = M.withoutKeys (sFixities s) (meFix ex)
     , sImp      = filter (`S.notMember` meImps ex) (sImp s)
     }
@@ -663,7 +665,7 @@ withPrelude s = do
 aliasFields :: Maybe Text -> [(Int, Statement)] -> Session -> Session
 aliasFields ma lprs s = case ma of
     Nothing -> s
-    Just a  -> s { sFields = M.map pre (sFields s) }
+    Just a  -> s { sFields = M.map (map pre) (sFields s) }
         where
             ctors, datas :: S.Set Text
             ctors = S.fromList [c | d <- dataDeclsOf (map snd lprs), (c, _) <- dCtors d]

@@ -3,8 +3,11 @@ node_modules/
 build-tmp/
 
 TODO/
-test/
 AGENTS/
+
+# test/ 现在纳入版本控制（测试套件）；但 test/rev/ 是排查用的影子副本/探针脚本/补丁
+# 与源快照（scratch），继续忽略，避免把上百个非测试资产塞进仓库。
+test/rev/
 
 *.patch
 *.json

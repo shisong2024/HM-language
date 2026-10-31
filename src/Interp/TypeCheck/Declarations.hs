@@ -8,6 +8,7 @@ import Control.Monad.Except (MonadError (throwError))
 
 import Data.Text (Text)
 
+import qualified Data.Text as T
 import qualified Data.Map as M
 import qualified Data.Set as S
 
@@ -72,6 +73,7 @@ buildDEnv ds = DEnv
     , denvAbilities = S.empty
     , denvEffs = S.fromList ["Console", "FileIO"]
     , denvOperations = M.empty
+    , denvFields = M.fromList [(dName d, dFields d) | d <- ds]
     }
 
 buildProgramDEnv :: Program -> DEnv
@@ -91,6 +93,7 @@ mergeDEnv new old =
         , denvAbilities = S.union (denvAbilities new) (denvAbilities old `S.difference` redefined)
         , denvEffs = S.union (denvEffs new) (denvEffs old)
         , denvOperations = M.union (denvOperations new) (denvOperations old)
+        , denvFields = M.union (denvFields new) (denvFields old)
         }
 
 ctorInfo :: DataDecl -> [T'] -> CtorInfo
@@ -120,3 +123,37 @@ checkDataDecls ds = do
     case [c | c <- concatMap (map fst . dCtors) ds, c `elem` live] of
         (c: _) -> throwError $ Located Nothing $ DuplicateCtor c
         [] -> return ()
+
+-- ==== 字段多态：合成的 getter / setter ability ====
+--
+-- 字段约束需要在类型层区分「哪个字段」，而语言没有类型级字符串。方案：为每个
+-- 字段名 x 合成两个 ability —— `$get_x r a`（投影）和 `$set_x r a`（更新），
+-- 字段名编码进 ability 名字里，于是不同字段的约束类型头不同，天然不歧义。
+-- 这些 ability 只作为约束的类型头存在（让 checkAbilityType 通过）；真正的字典
+-- （投影/更新函数）在 Infer.resolveFieldWanted 里按具体 data 现场构造并拼接。
+
+getterAbility, setterAbility :: Text -> Text
+getterAbility x = "$get_" <> x
+setterAbility x = "$set_" <> x
+
+-- | 从一个约束类型头名反解出字段名（若是合成字段 ability）。
+getterFieldOf, setterFieldOf :: Text -> Maybe Text
+getterFieldOf n = T.stripPrefix "$get_" n
+setterFieldOf n = T.stripPrefix "$set_" n
+
+isFieldAbilityName :: Text -> Bool
+isFieldAbilityName n = "$get_" `T.isPrefixOf` n || "$set_" `T.isPrefixOf` n
+
+-- | 为给定字段名集合合成 getter/setter ability 的 DEnv 片段。
+-- 形状：`$get_x r a = $get_x { fldGet :: r -> a }`、`$set_x r a = $set_x { fldSet :: a -> r -> r }`。
+buildFieldAbilities :: [Text] -> DEnv
+buildFieldAbilities xs = (buildDEnv decls)
+    { denvAbilities = S.fromList (map getterAbility xs <> map setterAbility xs) }
+  where
+    decls = concat [[getterDecl x, setterDecl x] | x <- xs]
+    getterDecl x = DataDecl (getterAbility x) ["r", "a"]
+        [(getterAbility x, [TFunc (TVar 0) emptyEff (TVar 1)])]
+        (M.fromList [("fldGet", (getterAbility x, 0))])
+    setterDecl x = DataDecl (setterAbility x) ["r", "a"]
+        [(setterAbility x, [TFunc (TVar 1) emptyEff (TFunc (TVar 0) emptyEff (TVar 0))])]
+        (M.fromList [("fldSet", (setterAbility x, 0))])

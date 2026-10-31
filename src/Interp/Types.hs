@@ -76,7 +76,11 @@ data FieldInfo = FieldInfo
     , fiSolo  :: Bool
     } deriving (Show, Eq)
 
-type FieldTab = Map Text FieldInfo
+-- | 一个字段名可属于多个 data（跨声明同名字段），故值是一个列表。
+-- 记录构造 `C { f = v }` 与记录模式 `C { f = p }` 按构造子名过滤（'ctorFields'），
+-- 天然无歧义；字段访问 `r.f` / 更新 `r { f = v }` 则在类型检查期按 scrutinee 的
+-- 具体类型（data 名）解析，见 Infer.hs 的 'inferFieldAccess'/'inferFieldUpdate'。
+type FieldTab = Map Text [FieldInfo]
 
 data Tabs = Tabs
     { tbFix :: FixTab
@@ -252,6 +256,7 @@ data TypeError
     | DuplicateEff Text
     | DeclRoleChanged Text
     | HandleError Text
+    | FieldError Text
     deriving (Show, Eq)
 
 type Env  = Map Text V'
@@ -262,7 +267,7 @@ type SynTable = Map Text ([Text], T')
 type Parser a = Parsec Void Text a
 
 data Param
-    = ExplicitParam Text 
+    = ExplicitParam Text (Maybe T')   -- ^ 显式参数，可选类型标注 `(x :: T)`
     | ImplicitParam Text T' 
     deriving (Show, Eq)
 
@@ -369,6 +374,9 @@ data DEnv = DEnv
     , denvAbilities  :: Set Text
     , denvEffs       :: Set Text
     , denvOperations :: Map Text EffDecl
+    -- | data 名 → (字段名 → (构造子名, 参数下标))。类型检查期按 scrutinee 的
+    -- 具体类型解析字段访问/更新（见 Infer.inferFieldAccess）。
+    , denvFields     :: Map Text (Map Text (Text, Int))
     } deriving (Show, Eq)
 
 data Tops = Tops 

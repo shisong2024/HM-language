@@ -26,6 +26,7 @@ import Data.Set (Set)
 import Data.Graph (stronglyConnComp)
 import Data.Functor ((<&>))
 import Data.Text (Text)
+import qualified Data.Text as T
 
 import Interp.TypeCheck.Common
 import Interp.TypeCheck.Solver
@@ -76,7 +77,13 @@ programChecker outT outI p = withInferRollback $ do
         let otherOps = [o | oldDecl <- M.elems (denvOperations old),edName oldDecl /= edName d,(o,_) <- edOperations oldDecl]
         forM_ (edOperations d) $ \(o,_) -> when (o `elem` otherOps || o `elem` ["putStr","putStrLn","readFile","writeFile"]) $
             throwError $ Located Nothing $ DuplicateDef o
-    let denv = mergeDEnv (buildProgramDEnv p) old
+    let base = mergeDEnv (buildProgramDEnv p) old
+        -- 为所有已知字段名合成 getter/setter ability（字段多态的约束类型头）。
+        -- 字段名是 denvFields 内层 map 的键（外层键是 data 名）。跳过 `$`-前缀的合成
+        -- ability 名，避免跨批无限增殖。
+        usedFields = S.toList (S.fromList
+            [f | fm <- M.elems (denvFields base), f <- M.keys fm, not ("$" `T.isPrefixOf` f)])
+        denv = mergeDEnv (buildFieldAbilities usedFields) base
     local (const denv) $ do
         forM_ [t | StmtType _ _ t <- p] $ \t -> checkEffTypes denv t >> checkTypeCons denv t
         programCheckerCore outT outI p

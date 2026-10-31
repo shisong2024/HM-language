@@ -44,7 +44,7 @@ expandDecl :: SynTable -> Decl -> Either Text Decl
 expandDecl tab (Def n ps body) = Def n <$> mapM expandParam ps <*> expandE tab body
     where
         expandParam = \case
-            ExplicitParam x -> Right $ ExplicitParam x
+            ExplicitParam x mty -> ExplicitParam x <$> mapM (expandT tab) mty
             ImplicitParam x ty -> ImplicitParam x <$> expandT tab ty
 
 expandE :: SynTable -> E' -> Either Text E'

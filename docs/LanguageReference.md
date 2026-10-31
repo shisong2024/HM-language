@@ -1,10 +1,10 @@
 # Language Reference：当前语言参考
 
-更新：2026-10-13。主版本基线为 HEAD `594df6b` 及当前工作区；具体边界见[文档入口](README.md)。未来方案与决策见 [Design Notes](DesignNotes.md)。
+更新：2026-10-30。主版本基线为 HEAD `9e56a12`；具体边界见[文档入口](README.md)。未来方案与决策见 [Design Notes](DesignNotes.md)。
 
-主源码已采用 R0–R5 与 ability/固定 effect 基础版。本轮冻结快照的解释器编译通过，接口适配后的基线测试为 332/0；原始主测试仍有旧导入/API，不能直接把这个数字视为未适配主测试的验收结果。
+主源码已采用 R0–R5、ability/固定 effect 基础版、参数化 effect/深层 handler/do（commit `2df939b effects and handlers`）与模块作用域隔离（commit `836884c refined imports`）。当前 HEAD `9e56a12`：`cabal build`、`cabal test`（283 examples, 0 failures）与 `test/run-golden.sh` 均已实测通过；测试接口已从旧 API 迁移到当前源码。
 
-第 6、7 节描述已采用的基础版。第 10 节另列[参数化 effect/handler 隔离交付](../TODO/36-参数化Effect与深层Handler完整代码.md)，供审查和使用副本；该扩展尚未应用到主源码。
+第 6、7 节描述 ability/固定 effect 基础版。第 10 节的参数化 effect/handler/do 也已进入主源码，`cabal run interp` 直接支持；[36](../TODO/36-参数化Effect与深层Handler完整代码.md) 保留其完整代码、原理与验证记录。
 
 ## 1. 运行与程序组织
 
@@ -62,7 +62,7 @@ def asInt x = x :: Int;
 (lambda x -> x + 1) :: Int -> Int;
 ```
 
-类型注解使用 `::`。必要时用括号界定被注解表达式。没有单独的顶层函数签名语法，也没有 `(x :: Int)` 形式的显式函数参数声明。
+类型注解使用 `::`。必要时用括号界定被注解表达式。没有单独的顶层函数签名语法，但**支持 `(x :: T)` 形式的显式参数类型标注**（2026-10-31 起）：它把该参数的类型钉住。例如 `def getName (r :: Person) = r.name` 得到单态的 `Person -> String`，而不是对任何带 `name` 字段的类型都成立的多态投影（见 §4）。标注里可含类型变量（`(o :: Ord a)` 照常泛化）；标注中的未知类型会报错。
 
 同一个 `def` 的隐式参数与 body 注解中，同名源变量 `a` 共享；不同定义独立。`let` 绑定值 RHS 内的注解保留局部范围，不参加外层定义的共享，`in` 后续表达式仍属于外层 body。裸注解中常用单个小写字母作为变量；`data`/`type` 声明的显式参数表另有名字绑定。
 
@@ -92,7 +92,32 @@ def label p = match p with Person { personName = n } -> n;
 
 支持位置构造器、Record 构造、字段读取、不可变字段更新、Record 模式、列表与元组模式。模式检查包含重复变量与穷尽性检查；各构造器分支应覆盖可能输入。
 
-当前字段表为 `Map Text FieldInfo`，字段访问在解析后的去糖阶段选择具体构造器并转成 `Match`。同一可见字段表中，不能把同名字段作为多个不同 Record 的独立字段。导入与重载有专门限定/合并逻辑，尚不是类型驱动的同名字段解析。
+**字段解析是类型驱动的（2026-10-31 起）。** 字段表为 `Map Text [FieldInfo]`（一个字段名可属于多个构造子），`DEnv` 另存 `denvFields`（data→字段→(构造子,下标)）。字段访问 `r.f` 与更新 `r{f=v}` 不再在解析期脱糖：parser 保留 marker，类型检查器拿到 scrutinee 的具体 `TCon d _` 后才选出构造子与下标、现场构造投影/更新 `Match`。因此**跨 data 的同名字段现在被允许**：`Person { name }` 与 `Cat { name }` 可以共存，`p.name` 按 `p` 的类型解析。（同一 data 内字段名仍须唯一。）记录构造 `C { f = v }` 与记录模式 `C { f = p }` 因写明了构造子名，仍在解析期消歧。
+
+**字段多态。** `def getName r = r.name`（不加标注）对**任何**带 `name` 字段的 record 类型都成立，类型显示为记录行约束：
+
+```text
+def getName r = r.name;              -- Forall a0 a1. {name : a1 | a0} => (a0 -> a1)
+def setname r x = r { name = x };    -- Forall a0 a1. {name := a1 | a0} => (a0 -> (a1 -> a0))
+getName (Person "Ann" 30);           -- "Ann"
+getName (Cat "Tom");                 -- "Tom"（同一函数，不同 data、不同字段类型）
+```
+
+约束里 `{name : a1 | a0}` 读作「a0 有字段 name，类型 a1」，`{name := a1 | a0}` 读作「可把 a0 的 name 更新为 a1」。调用点记录类型具体化后自动解析；若具体类型没有该字段则报错（`` `name` is not a field of `B` ``）。
+
+**收窄字段多态的两种方式：**
+- **钉到单个类型**：用参数标注 `def getName (r :: Person) = r.name`，得单态 `Person -> String`，传 `Cat` 会报类型不匹配。
+- **只允许某几个类型（白名单）**：用 ability + implicit 实例（§6），这是名义派发：
+
+```text
+ability HasName a = HasName { getName :: a -> String };
+implicit def personName = HasName { getName = lambda p -> p.name } :: HasName Person;
+implicit def catName    = HasName { getName = lambda c -> c.name } :: HasName Cat;
+def nameOf {d :: HasName a} x = d.getName x;   -- 只有 Person、Cat 可用
+nameOf (Dog "Rex");                            -- ✗ No implicit value of type HasName Dog
+```
+
+结构化字段访问（`r.name`＝任何带该字段的类型，开放）与 ability 白名单（只有写了实例的类型，受控）是两种取向，按需选用。当前**没有**完整 row polymorphism（匿名字段记录、记录扩展、`{ f : t | r }` 作为一等类型）。
 
 字段属于某个构造器。多构造器 ADT 的一个字段可能不在所有构造器中存在；读取或更新不含该字段的构造器会产生运行期字段错误。因此“类型知道所属 ADT”不等于“访问在所有值上都成功”。
 
@@ -129,7 +154,7 @@ ability Writer { emit :: String -> {Console} Unit };
 
 字典是一等值，可以由普通 `def` 保存、显式传给函数、从函数返回。`implicit def` 将字典或字典工厂注册到搜索空间。只构造一个普通字典值，不会自动注册。
 
-普通数据仍使用 `data`，可以通过普通参数显式传递。Ability 复用现有 Record 构造、模式匹配与字段访问机制，仍受同名字段限制。同一存活作用域不能将已有类型从 `data` 改成 `ability`，或反向改变。
+普通数据仍使用 `data`，可以通过普通参数显式传递。Ability 复用现有 Record 构造、模式匹配与字段访问机制（字段访问现已类型驱动、跨 data 同名字段允许，见 §4）。同一存活作用域不能将已有类型从 `data` 改成 `ability`，或反向改变。
 
 ```text
 def compareWith {o :: Ord a} x y = o.cmp' x y;
@@ -215,7 +240,7 @@ def greet s = putStrLn s;
 
 能力与效果分别描述隐式依赖和调用上界。例如 Writer 的 emit 方法可以携带 Console；调用该字段会传播 Console，构造 Writer 或取出字段本身不执行方法。纯 mock 可以满足带 Console 上界的方法类型，通过该接口调用仍保守保留 Console。自动搜索得到的字典必须纯构造，不能借此隐藏立即副作用。
 
-主版本目前不支持 `{State Int}` 等参数化效果、显式效果变量语法、`perform` 或 handlers，也没有新增语言级可恢复异常、可变状态操作。内部高阶效果传播仍保留。
+主版本已支持 `{State s}` 等参数化效果与深层 handler（见第 10 节，commit `2df939b`）：操作是普通函数调用，没有 `perform` 关键字；用户仍不能书写显式效果变量语法（`{e0 \\ State}` 只是内部残余效果记法）。语言级可恢复异常与可变状态操作不是内建，而由用户用 `effect`+`handler` 自行定义（如 `Error`/`State`）。内部高阶效果传播仍保留。
 
 ## 8. Prelude 与 Tuple
 
@@ -249,7 +274,7 @@ Prelude 正在演进；其未提交改动属于用户。本轮文档维护不改
 
 依赖的**普通值不导出**：`import P` 之后，P 内部 `import "leaf" as L` 的 `L.f` 不可见，需要自己显式导入 leaf。依赖的隐式候选也不随导入传递；需要时显式导入定义它的模块。
 
-算子仍是全局名字，不随模块限定：两个模块定义同名算子会报冲突。字段表同样全局按名字唯一，跨模块同名字段会报冲突（当前限制）。
+算子仍是全局名字，不随模块限定：两个模块定义同名算子会报冲突。字段名不再全局唯一：跨模块的同名字段允许共存，字段访问/更新按 scrutinee 的具体（带别名限定的）data 类型解析，故无歧义（2026-10-31 起）。
 
 别名规则：一个模块只有一个用户别名；一个别名只指向一个模块。重复导入同一别名+同一文件会先卸载再加载（等同对单个模块做 `:reload`）。
 
@@ -263,17 +288,17 @@ Prelude 正在演进；其未提交改动属于用户。本轮文档维护不改
 
 ### 9.6 当前缺口
 
-没有选择性导入、`hiding`、导出列表、re-export 或抽象类型；算子不能限定（`M.***` 未支持）；同名字段不能跨两个模块共存；类型身份仍由别名字符串表示（同一文件经不同别名不会出现，因为一个模块只允许一个别名）；`:load` 不具备事务性清理。
+没有选择性导入、`hiding`、导出列表、re-export 或抽象类型；算子不能限定（`M.***` 未支持）；类型身份仍由别名字符串表示（同一文件经不同别名不会出现，因为一个模块只允许一个别名）；`:load` 不具备事务性清理。
 
 已有源码位置、定义/调用说明、隐式缺候选/歧义、效果不匹配与求值错误。类型检查器有局部恢复机制，但当前 Main 遇到一个坏定义时可能拒绝整批提交；“能够继续检查”不等于“其余定义一定成功提交”。
 
-当前没有同名字段多态、do、guard、模式函数方程、完整 row polymorphism、HKT、higher-rank 字段、GAT 或 handlers。Ability 与固定 effect 声明已采用到主源码；参数化 effect、handler 和 do 的新版隔离交付见第 10 节。
+当前没有 guard、模式函数方程、完整 row polymorphism（匿名字段记录、记录扩展、`{ f : t | r }` 作为一等类型）、HKT、higher-rank 字段或 GAT。**同名字段与字段多态（投影/更新）已支持**（见 §4），但那是类型驱动的结构化字段访问，不是完整 row polymorphism；受控白名单用 ability 实例表达。Ability、固定 effect、参数化 effect、深层 handler 与 do 均已进入主源码（见第 10 节）；do 的支持范围与限制见 §10。
 
 源码对应入口：[Parser](../src/Interp/Parser.hs)、[TypeCheck](../src/Interp/TypeCheck.hs)、[Eval](../src/Interp/Eval.hs)、[Types](../src/Interp/Types.hs)、[Main](../app/Main.hs)、[Prelude](../utils/prelude.txt)。历史测试证据见 [归档](../TODO/archive/README.md)，当前验收工作见 [路线](../TODO/32-当前路线与验收.md)。
 
-## 10. 隔离交付：参数化 Effect、handler 与 do
+## 10. 参数化 Effect、handler 与 do
 
-本节对应 [36 的完整代码与验证记录](../TODO/36-参数化Effect与深层Handler完整代码.md)，需要使用隔离解释器或采用配套补丁。当前主版本的 `cabal run interp` 尚不支持本节扩展。
+本节特性已进入主源码（commit `2df939b effects and handlers`），`cabal run interp` 直接支持。2026-10-30 在 HEAD `9e56a12` 的 exe 上实测：下面的 `handle Error ...` 得 `Left "bad"`，`handle State ...` 得 `(11, 11)`，`do { x = 1 + 1; x * 2 }` 得 `4`，`readFile`/`writeFile` 类型与本文一致。原理、完整代码与验证记录见 [36](../TODO/36-参数化Effect与深层Handler完整代码.md)。
 
 ```text
 effect State s { get :: Unit -> s, set :: s -> Unit };
@@ -303,7 +328,7 @@ Handler 显式指定目标效果及类型参数，并且必须有 return 分支�
 
 State/Error 的处理器由用户代码实现，示例与通用 `runState`、`runError`、显式回滚 `attempt` 都在 36 配套程序中。Error 本身不保证状态回滚，嵌套处理顺序决定返回状态是否被保留。
 
-隔离版的宿主接口包括：
+主版本的宿主接口包括（已在 HEAD `9e56a12` 实测 `readFile`/`writeFile` 类型一致）：
 
 ```text
 putStr   : String -> {Console} Unit

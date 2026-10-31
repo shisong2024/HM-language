@@ -15,8 +15,8 @@ module Main where
 
 import Interp.Types
 import Interp.Parser (run, runProg, runProgWith, maskComments)
-import Interp.TypeCheck (typeChecker, programChecker, buildDEnv)
-import Interp.Eval (evalwDepth, evalCheckedProgram, dataDeclsOf)
+import Interp.TypeCheck (typeChecker, programChecker, buildProgramDEnv, mergeDEnv)
+import Interp.Eval (evalwDepth, evalCheckedProgram)
 import Interp.Builtin (initSession)
 import Interp.Pretty
 
@@ -147,12 +147,6 @@ emptyProg :: ProgRes
 emptyProg = ProgRes (sTEnv initSession) (sEnv initSession) (sNext initSession) (sDEnv initSession)
                    (sImp initSession) (sFixities initSession) (sFields initSession) M.empty M.empty
 
--- | 两批 data 声明合并 —— app/Main.hs 里叫 unionDEnv，这边只需要同样的语义：
---   新声明赢。buildDEnv 也在 Main 里被调过一次，但 programChecker 内部还会
---   自己从本批的 dataDeclsOf 再建一份，这里补的是"上一批"那一半。
-unionDEnv :: DEnv -> DEnv -> DEnv
-unionDEnv a b = DEnv (M.union (denvCtors a) (denvCtors b)) (M.union (denvDatas a) (denvDatas b))
-
 -- | 跑一段源码，返回新的会话。任一步失败就 Left（带上渲染好的消息）。
 --
 --   语句下标是 0 起的**序号**，不是源码行号 —— 和 programChecker / evalProgram
@@ -162,10 +156,13 @@ progRun s src = case runProgWith (Tabs (prFix s) (prFld s)) src of
     Left perr -> Left ("Parse error: " <> perr)
     Right (tb, lprs) ->
         let prs = map snd lprs
-            -- 本批的 data 声明 ＋ 之前各批留下的（REPL 逐行提交时靠这个把
-            -- data Maybe 传给下一行的构造子模式），和 app/Main.hs 的 execBatch 同构。
-            denv = unionDEnv (buildDEnv (dataDeclsOf prs)) (prDEnv s)
-            (tcRes, n') = runState (runExceptT (runReaderT (programChecker (prTEnv s) (prImp s) prs) denv)) (prNext s)
+            -- 与 app/Main.hs 的 execBatch 完全同构：用 buildProgramDEnv（会登记
+            -- ability/effect/operation，buildDEnv 不会）构建本批 denv，再 mergeDEnv
+            -- 到上一批之上，结果只用于存入新会话。programChecker 只接收【上一批】的
+            -- prDEnv s —— 本批 data 由它内部自行合并；若在这里预先并入本批再传进去，
+            -- DN-013 的重复声明检查会把本批 data 误判成"已存在"而报 Duplicate。
+            denv = mergeDEnv (buildProgramDEnv prs) (prDEnv s)
+            (tcRes, n') = runState (runExceptT (runReaderT (programChecker (prTEnv s) (prImp s) prs) (prDEnv s))) (prNext s)
         in case tcRes of
             -- ⚠️ 注意实参顺序：renderLocated 的实现是 (batchName, src)，
             -- 而 prettyTypeErrorWith 的签名却写成 (src, batchName) —— 两者都是 Text，
@@ -374,9 +371,10 @@ loggedEval source = do
     session <- preludeState
     (_, linesAndStatements) <- runProgWith (Tabs (prFix session) (prFld session)) source
     let program = map snd linesAndStatements
-        denv = unionDEnv (buildDEnv (dataDeclsOf program)) (prDEnv session)
+        -- 同 progRun：programChecker 只收上一批 denv，本批 data 由它内部合并，
+        -- 否则 DN-013 的重复声明检查会误报。
         (typed, _) = runState (runExceptT (runReaderT
-            (programChecker (prTEnv session) (prImp session) program) denv)) (prNext session)
+            (programChecker (prTEnv session) (prImp session) program) (prDEnv session))) (prNext session)
     checked <- either (Left . prettyTypeErrorWith "" source) Right typed
     case defFailure source (cTypes checked) of
         Just message -> Left message
@@ -395,7 +393,7 @@ expectOutput source events = case loggedEval source of
     Left message -> expectationFailure (T.unpack message)
     Right (_, runtime) -> do
         toList (rtLog runtime) `shouldBe` events
-        rtDepth runtime `shouldBe` Depth 0
+        rtDepth runtime `shouldBe` 0
 
 main :: IO ()
 main = do
@@ -997,7 +995,7 @@ spec = do
         ss2 <- okSteps ["lambda a -> a;", "lambda b -> b;"]
         -- 显示是 a0（每行独立重编号）；真正的"跨行单调"看 prNext。
         stmtType 0 (at 1 ss2) `shouldBe` "(a0 -> a0)"
-        prNext (at 1 ss2) `shouldSatisfy` (> prNext (at 0 ss1))
+        nextId (prNext (at 1 ss2)) `shouldSatisfy` (> nextId (prNext (at 0 ss1)))
 
     it "一行里只要有类型错误，整行不提交（调用方保留旧会话）" $ do
         ss <- okSteps ["def x = 1;"]
@@ -1055,7 +1053,7 @@ spec = do
         stmtType 0 (at 1 ss) `shouldBe` "(a0 -> Pair Int a0)"
 
     it "构造子模式数量不符要报错" $
-        -- 必须写在同一个 progRun 里：跨行的 ctor 靠 prDEnv 传（见上面的 unionDEnv）
+        -- 必须写在同一个 progRun 里：跨行的 ctor 靠 prDEnv 传（见上面 progRun 的 mergeDEnv）
         progSteps ["data Maybe a = None | Some a;\ndef bad m = match m with Some x y -> x;"]
             `shouldSatisfy` \r -> case r of
                 Left e  -> "expects 1 argument" `T.isInfixOf` e
@@ -1247,39 +1245,39 @@ spec = do
   describe "隐式参数" $ do
 
     -- 一份可用的 Ord Int 字典。注意 cmp 1 0 = GT（1 > 0）。
-    let ordInt = "implicit def ordInt = Ord { cmp = lambda a b -> _ordFromInt (intCompare a b) } :: Ord Int;"
+    let ordInt = "implicit def ordInt = Ord { cmp' = lambda a b -> _ordFromInt (intCompare a b) } :: Ord Int;"
 
     -- prelude 提供 Ord / Ordering / ordInt / ordStr，所以这一组要用 okProgP
     it "唯一的具体候选会被自动填入调用点" $ do
-        s <- okProgP (ordInt <> "\ndef use {o :: Ord Int} x = o.cmp x 0;\nuse 1;")
+        s <- okProgP (ordInt <> "\ndef use {o :: Ord Int} x = o.cmp' x 0;\nuse 1;")
         stmtVal 2 s `shouldBe` "GT"
 
     it "候选写在后面也能解析（整批一起检查，与声明顺序无关）" $ do
-        s <- okProgP ("def use {o :: Ord Int} x = o.cmp x 0;\n" <> ordInt <> "\nuse 1;")
+        s <- okProgP ("def use {o :: Ord Int} x = o.cmp' x 0;\n" <> ordInt <> "\nuse 1;")
         stmtVal 2 s `shouldBe` "GT"
 
     it "具体字典以命名约束保留在调用接口" $ do
-        s <- okProgP (ordInt <> "\ndef use {o :: Ord Int} x = o.cmp x 0;")
+        s <- okProgP (ordInt <> "\ndef use {o :: Ord Int} x = o.cmp' x 0;")
         stmtType 1 s `shouldBe` "{o :: Ord Int} => (Int -> Ordering)"
 
     it "prelude 的 ordInt 真的能当候选被选中" $ do
         s0 <- okPrelude
-        case progRun s0 "def use {o :: Ord Int} x = o.cmp x 0;\nuse 1;" of
+        case progRun s0 "def use {o :: Ord Int} x = o.cmp' x 0;\nuse 1;" of
             Left e  -> expectationFailure ("不该出错：" <> T.unpack e)
             Right s -> stmtVal 1 s `shouldBe` "GT"
 
     it "缺字典在调用处报出需要的类型" $ do
-        e <- dictTypeErrorP 2 "data Foo = Foo;\ndef use {o :: Ord Foo} x = o.cmp x x;\nuse Foo;"
+        e <- dictTypeErrorP 2 "data Foo = Foo;\ndef use {o :: Ord Foo} x = o.cmp' x x;\nuse Foo;"
         tcMsg e `shouldSatisfy` T.isInfixOf "No implicit value of type Ord Foo is available."
     it "缺字典调用错误带位置" $ do
-        let src = "data Foo = Foo;\ndef use {o :: Ord Foo} x = o.cmp x x;\nuse Foo;"
+        let src = "data Foo = Foo;\ndef use {o :: Ord Foo} x = o.cmp' x x;\nuse Foo;"
         e <- dictTypeErrorP 2 src
         let msg = prettyTypeErrorWith "" src e
         msg `shouldSatisfy` T.isInfixOf "3 | use Foo;"
         msg `shouldSatisfy` T.isInfixOf "^"
     it "默认候选歧义在调用处报错" $ do
-        let src = ordInt <> "\nimplicit def ordInt2 = Ord {cmp=lambda a b->EQ} :: Ord Int;"
-                  <> "\ndef use {o :: Ord Int} x = o.cmp x 0;\nuse 1;"
+        let src = ordInt <> "\nimplicit def ordInt2 = Ord {cmp'=lambda a b->EQ} :: Ord Int;"
+                  <> "\ndef use {o :: Ord Int} x = o.cmp' x 0;\nuse 1;"
         e <- dictTypeErrorP 3 src
         tcMsg e `shouldSatisfy` T.isInfixOf "More than one implicit value matches Ord Int"
         tcMsg e `shouldSatisfy` T.isInfixOf "ordInt2"
@@ -1290,39 +1288,38 @@ spec = do
 
     -- 当前行为（缺陷）：参数没被用上就**静默蒸发**，注解带进来的变量成了唯一的量化变量。
     it "当前行为（缺陷）：没用到隐式参数时它静默蒸发" $ do
-        s <- okProgP "def a2 {o :: Ord a} = Ord { cmp = lambda x y -> EQ } :: Ord [a];"
+        s <- okProgP "def a2 {o :: Ord a} = Ord { cmp' = lambda x y -> EQ } :: Ord [a];"
         stmtType 0 s `shouldBe` "Forall a0. Ord [a0]"
 
-    -- 当前行为（缺陷）：用上参数反而更糟 —— 注解的变量折到参数变量上，
-    -- 结果要求它自己要提供的那本字典（自引用）。
-    it "当前行为（缺陷）：包装式实例自引用 {Ord [a]} => Ord [a]" $ do
-        s <- okProgP "def a2b {o :: Ord a} = Ord { cmp = lambda x y -> o.cmp x y } :: Ord [a];"
-        stmtType 0 s `shouldBe` "Forall a0. {o :: Ord [a0]} => Ord [a0]"
+    -- 2026-10-30：旧缺陷（注解变量折到参数变量、得到自引用的 {Ord [a]} => Ord [a]）
+    -- 已修复。o.cmp' 是 a->a->Ordering，而结果注解 Ord [a] 要求 [a]->[a]->Ordering，
+    -- lambda 参数 x::[a] 与 a 合一触发 occurs check，现在被正确拒绝。
+    it "包装式实例自引用被 occurs check 拒绝（旧缺陷已修复）" $ do
+        let src = "def a2b {o :: Ord a} = Ord { cmp' = lambda x y -> o.cmp' x y } :: Ord [a];"
+        case progRunP emptyProg src of
+            Left e  -> e `shouldSatisfy` T.isInfixOf "Occurs check failed"
+            Right s -> [prettyTypeErrorWith "" src e | TyExpr (Left e) <- M.elems (prTys s)]
+                           `shouldSatisfy` T.isInfixOf "Occurs check failed" . T.unlines
 
-    it "带上下文的候选在声明处就被拒" $ do
+    -- 2026-10-30：R5 递归字典求解 + DN-002 容器工厂落地后，带上下文的候选不再在声明处
+    -- 被拒（旧文案 "cannot be an implicit candidate" / "requires Forall" 已不适用）。
+    it "带上下文的候选现在被接受（R5 容器工厂）" $ do
         -- 自带 data 声明：这样 data Ord 与候选在**同一个批**里，
         -- 记录字面量的字段表在解析这一批时就已建立。
-        -- 注意这里**不要**先单独 runProg 那个候选：它没有同批的 data Ord，
-        -- 会在解析期就报 "not a record constructor"。这一组测的是类型检查期的拒绝。
-        let pre = "data Ord a = Ord { cmp :: a -> a -> Ordering };\ndata Ordering = LT | EQ | GT;\n"
-            cand = "implicit def ordl {o :: Ord a} = Ord { cmp = lambda x y -> EQ } :: Ord [a];"
+        let pre = "ability Ord a = Ord { cmp' :: a -> a -> Ordering };\ndata Ordering = LT | EQ | GT;\n"
+            cand = "implicit def ordl {o :: Ord a} = Ord { cmp' = lambda x y -> EQ } :: Ord [a];"
         case progRun emptyProg (pre <> cand) of
-            Left e  -> e `shouldSatisfy` T.isInfixOf "cannot be an implicit candidate"
-            Right _ -> expectationFailure "多态候选竟然被接受了"
+            Left e  -> expectationFailure ("多态候选不应被拒绝：" <> T.unpack e)
+            Right _ -> return ()
 
-    -- 当前行为（缺陷）：上面那条的文案引用的 scheme 里根本没有 `=>`。
-    it "当前行为（缺陷）：候选被拒的文案引用了不存在的上下文" $ do
-        let pre = "data Ord a = Ord { cmp :: a -> a -> Ordering };\ndata Ordering = LT | EQ | GT;\n"
-        case progRun emptyProg (pre <> "implicit def ordl {o :: Ord a} = Ord { cmp = lambda x y -> EQ } :: Ord [a];") of
-            Left e  -> e `shouldSatisfy` T.isInfixOf "requires Forall"
-            Right _ -> expectationFailure "多态候选竟然被接受了"
-
-    it "互递归：两个 def 共享同一份隐式参数约束" $ do
-        s <- okProgP "def ev {o :: Ord a} x = o.cmp x x;\ndef od {o :: Ord a} x = ev x;"
-        stmtType 1 s `shouldSatisfy` T.isInfixOf "{o :: Ord a0}"
+    -- 2026-10-30：TODO-38 自动槽命名 —— od 的显式 `o` 未被 body 使用而蒸发，
+    -- 从 ev 传播上来的需求按类型自动命名为 ord0。
+    it "互递归：约束经传播在 od 上自动命名为 ord0" $ do
+        s <- okProgP "def ev {o :: Ord a} x = o.cmp' x x;\ndef od {o :: Ord a} x = ev x;"
+        stmtType 1 s `shouldSatisfy` T.isInfixOf "{ord0 :: Ord a0}"
 
     it "一个坏 def 不会阻止同批后面的 def 被检查" $ do
-        case progRunP emptyProg "def bad {o :: Ord Foo} x = o.cmp x x;\n" of
+        case progRunP emptyProg "def bad {o :: Ord Foo} x = o.cmp' x x;\n" of
             Left e  -> e `shouldSatisfy` T.isInfixOf "Unknown type: Foo"
             Right _ -> expectationFailure "坏 def 竟然通过了"
 
@@ -1374,11 +1371,22 @@ spec = do
             Left e  -> e `shouldSatisfy` T.isInfixOf "operator"
             Right _ -> expectationFailure "改内建 fixity 竟然通过了"
 
-    it "字符集：. | : $ # 都不许进操作符名" $ do
+    -- 2026-10-30：DN-013 复核后 isOpChar 纳入了 `|` 与 `$`，reservedOps 拒绝保留符号。
+    -- 因此 `.`/`:`/`#` 仍"不是操作符名"；`|` 作为保留符号被拒（文案不同）；
+    -- `$` 现在是合法用户操作符名。
+    it "字符集：. : # 不是操作符名" $ do
         mapM_ (\c -> case runProg ("infixl 6 " <> c <> ";") of
                         Left e  -> e `shouldSatisfy` T.isInfixOf "is not an operator name"
                         Right _ -> expectationFailure ("操作符名竟然接受了 " <> T.unpack c))
-              [".", "|", ":", "$", "#"]
+              [".", ":", "#"]
+    it "保留符号 | 不能作为用户操作符" $
+        runProg "infixl 6 |;" `shouldSatisfy` (\r -> case r of
+            Left _  -> True
+            Right _ -> False)
+    it "$ 现在是合法用户操作符名" $
+        runProg "infixl 6 $;" `shouldSatisfy` (\r -> case r of
+            Left _  -> False
+            Right _ -> True)
 
     -- 当前行为（缺陷）：`def (+)` / `def (<)` 被接受，但记号仍走内建 —— 声明成了死代码。
     -- 而 `def <+>` 这条路是设计支持的。见 build-tmp\排查报告.md 的 F-8。
@@ -1422,91 +1430,94 @@ spec = do
 
   describe "DictCall 精确字典传参与递归接口" $ do
     it "default" $ do
-        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nu 1 2;"
+        st <- okProgP "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\nu 1 2;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["(LT, LT)"]
     it "only-o1" $ do
-        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nu @{o1=rev} 1 2;"
+        st <- okProgP "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\nu @{o1=rev} 1 2;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["(GT, LT)"]
     it "only-o2" $ do
-        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nu @{o2=rev} 1 2;"
+        st <- okProgP "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\nu @{o2=rev} 1 2;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["(LT, GT)"]
     it "both-reversed" $ do
-        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nu @{o2=ordInt} @{o1=rev} 1 2;"
+        st <- okProgP "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\nu @{o2=ordInt} @{o1=rev} 1 2;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["(GT, LT)"]
     it "argument-position" $ do
-        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nu 1 @{o1=rev} 2;"
+        st <- okProgP "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\nu 1 @{o1=rev} 2;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["(GT, LT)"]
     it "lexical-isolation" $ do
-        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nlet o1=1 in u @{o1=rev} o1 2;"
+        st <- okProgP "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\nlet o1=1 in u @{o1=rev} o1 2;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["(GT, LT)"]
     it "ordinary-argument-isolation" $ do
-        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\ndef value {o1::Ord Int} x = if o1.cmp x x == EQ then 1 else 2;\nu @{o1=rev} (value 1) 2;"
+        st <- okProgP "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\ndef value {o1::Ord Int} x = if o1.cmp' x x == EQ then 1 else 2;\nu @{o1=rev} (value 1) 2;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["(GT, LT)"]
     it "rhs-isolation" $ do
-        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\ndef make {o1::Ord Int} = Ord {cmp=lambda x y->o1.cmp x y};\nu @{o1=rev,o2=make} 1 2;"
+        st <- okProgP "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\ndef make {o1::Ord Int} = Ord {cmp'=lambda x y->o1.cmp' x y};\nu @{o1=rev,o2=make} 1 2;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["(GT, LT)"]
     it "wrapper" $ do
-        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\ndef wrap x y=u @{o1=rev} x y;\nwrap 1 2;"
+        st <- okProgP "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\ndef wrap x y=u @{o1=rev} x y;\nwrap 1 2;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["(GT, LT)"]
+    -- 2026-10-30：TODO-38/LangRef §6 —— let alias=u 会重新推导接口，把同类型的
+    -- o1/o2（都是 Ord Int）合并成一个自动命名槽 ord0，因此无法再分别指定 o1；
+    -- 传 ord0=rev 会同时替换两处，得到 (GT, GT)。
     it "alias" $ do
-        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nlet alias=u in alias @{o1=rev} 1 2;"
+        st <- okProgP "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\nlet alias=u in alias @{ord0=rev} 1 2;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
-        actual `shouldBe` ["(GT, LT)"]
+        actual `shouldBe` ["(GT, GT)"]
     it "partial" $ do
-        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nlet half=u @{o1=rev} 1 in half 2;"
+        st <- okProgP "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\nlet half=u @{o1=rev} 1 in half 2;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["(GT, LT)"]
     it "parenthesized-partial" $ do
-        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\n(u 1) @{o1=rev} 2;"
+        st <- okProgP "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\n(u 1) @{o1=rev} 2;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["(GT, LT)"]
     it "no-ordinary-args" $ do
-        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nlet half=u @{o1=rev} in half 1 2;"
+        st <- okProgP "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\nlet half=u @{o1=rev} in half 1 2;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["(GT, LT)"]
     it "unknown-label" $ do
-        case progRunP emptyProg "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nu @{wrong=rev} 1 2;" of
+        case progRunP emptyProg "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\nu @{wrong=rev} 1 2;" of
             Left msg -> do
                 msg `shouldSatisfy` T.isInfixOf "Unknown dictionary argument `wrong`"
                 msg `shouldSatisfy` T.isInfixOf "o1"
                 msg `shouldSatisfy` T.isInfixOf "o2"
                 msg `shouldSatisfy` T.isInfixOf "^"
             Right st -> do
-                let errors = [prettyTypeErrorWith "" "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nu @{wrong=rev} 1 2;" e | TyExpr (Left e) <- M.elems (prTys st)]
+                let errors = [prettyTypeErrorWith "" "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\nu @{wrong=rev} 1 2;" e | TyExpr (Left e) <- M.elems (prTys st)]
                 errors `shouldSatisfy` (not . null)
                 T.unlines errors `shouldSatisfy` T.isInfixOf "Unknown dictionary argument `wrong`"
                 T.unlines errors `shouldSatisfy` T.isInfixOf "o1"
                 T.unlines errors `shouldSatisfy` T.isInfixOf "o2"
                 T.unlines errors `shouldSatisfy` T.isInfixOf "^"
     it "duplicate-label" $ do
-        case progRunP emptyProg "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nu @{o1=rev} @{o1=ordInt} 1 2;" of
+        case progRunP emptyProg "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\nu @{o1=rev} @{o1=ordInt} 1 2;" of
             Left msg -> do
                 msg `shouldSatisfy` T.isInfixOf "duplicate named dictionary argument"
             Right st -> do
-                let errors = [prettyTypeErrorWith "" "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nu @{o1=rev} @{o1=ordInt} 1 2;" e | TyExpr (Left e) <- M.elems (prTys st)]
+                let errors = [prettyTypeErrorWith "" "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\nu @{o1=rev} @{o1=ordInt} 1 2;" e | TyExpr (Left e) <- M.elems (prTys st)]
                 errors `shouldSatisfy` (not . null)
                 T.unlines errors `shouldSatisfy` T.isInfixOf "duplicate named dictionary argument"
     it "wrong-type" $ do
-        case progRunP emptyProg "data Foo = Foo;\nimplicit def ordF1 = Ord {cmp = lambda x y -> EQ} :: Ord Foo;\ndef ordF2 = Ord {cmp = lambda x y -> GT} :: Ord Foo;\ndef use {oi :: Ord a} {of :: Ord Foo} x y = (oi.cmp x y, of.cmp Foo Foo);\nuse @{oi=ordF2} 1 2;" of
+        case progRunP emptyProg "data Foo = Foo;\nimplicit def ordF1 = Ord {cmp' = lambda x y -> EQ} :: Ord Foo;\ndef ordF2 = Ord {cmp' = lambda x y -> GT} :: Ord Foo;\ndef use {oi :: Ord a} {of :: Ord Foo} x y = (oi.cmp' x y, of.cmp' Foo Foo);\nuse @{oi=ordF2} 1 2;" of
             Left msg -> do
                 msg `shouldSatisfy` T.isInfixOf "Dictionary argument `oi` has type Ord Foo, but expected Ord Int."
                 msg `shouldSatisfy` T.isInfixOf "^"
             Right st -> do
-                let errors = [prettyTypeErrorWith "" "data Foo = Foo;\nimplicit def ordF1 = Ord {cmp = lambda x y -> EQ} :: Ord Foo;\ndef ordF2 = Ord {cmp = lambda x y -> GT} :: Ord Foo;\ndef use {oi :: Ord a} {of :: Ord Foo} x y = (oi.cmp x y, of.cmp Foo Foo);\nuse @{oi=ordF2} 1 2;" e | TyExpr (Left e) <- M.elems (prTys st)]
+                let errors = [prettyTypeErrorWith "" "data Foo = Foo;\nimplicit def ordF1 = Ord {cmp' = lambda x y -> EQ} :: Ord Foo;\ndef ordF2 = Ord {cmp' = lambda x y -> GT} :: Ord Foo;\ndef use {oi :: Ord a} {of :: Ord Foo} x y = (oi.cmp' x y, of.cmp' Foo Foo);\nuse @{oi=ordF2} 1 2;" e | TyExpr (Left e) <- M.elems (prTys st)]
                 errors `shouldSatisfy` (not . null)
                 T.unlines errors `shouldSatisfy` T.isInfixOf "Dictionary argument `oi` has type Ord Foo, but expected Ord Int."
                 T.unlines errors `shouldSatisfy` T.isInfixOf "^"
     it "missing-global" $ do
-        st <- okProgP "data Foo=Foo;\ndef f {o::Ord Foo} x=o.cmp x x;\nf @{o=Ord {cmp=lambda x y->EQ} :: Ord Foo} Foo;"
+        st <- okProgP "data Foo=Foo;\ndef f {o::Ord Foo} x=o.cmp' x x;\nf @{o=Ord {cmp'=lambda x y->EQ} :: Ord Foo} Foo;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["EQ"]
     it "legacy-rejected" $ do
@@ -1522,35 +1533,38 @@ spec = do
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["3"]
     it "recursive-default" $ do
-        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\ndef f {o::Ord Int} n=if n==0 then o.cmp 1 2 else f (n-1);\nf 3;"
+        st <- okProgP "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\ndef f {o::Ord Int} n=if n==0 then o.cmp' 1 2 else f (n-1);\nf 3;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["LT"]
     it "recursive-explicit" $ do
-        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\ndef f {o::Ord Int} n=if n==0 then o.cmp 1 2 else f @{o=rev} (n-1);\nf 3;"
+        st <- okProgP "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\ndef f {o::Ord Int} n=if n==0 then o.cmp' 1 2 else f @{o=rev} (n-1);\nf 3;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["GT"]
     it "recursive-inferred" $ do
-        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\ndef f n=if n==0 then min 1 2 else f @{o=rev} (n-1);\nf 3;"
+        st <- okProgP "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\ndef f n=if n==0 then min 1 2 else f @{ord0=rev} (n-1);\nf 3;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["2"]
     it "recursive-let-explicit" $ do
-        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\nlet go=lambda n->if n==0 then min 1 2 else go @{o=rev} (n-1) in go 3;"
+        st <- okProgP "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\nlet go=lambda n->if n==0 then min 1 2 else go @{ord0=rev} (n-1) in go 3;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["2"]
     it "recursive-unknown" $ do
-        case progRunP emptyProg "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\ndef f n=if n==0 then 0 else f @{wrong=rev} (n-1);\nf 3;" of
+        case progRunP emptyProg "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\ndef f n=if n==0 then 0 else f @{wrong=rev} (n-1);\nf 3;" of
             Left msg -> do
                 msg `shouldSatisfy` T.isInfixOf "Unknown dictionary argument `wrong`"
             Right st -> do
-                let errors = [prettyTypeErrorWith "" "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\ndef f n=if n==0 then 0 else f @{wrong=rev} (n-1);\nf 3;" e | TyExpr (Left e) <- M.elems (prTys st)]
+                let errors = [prettyTypeErrorWith "" "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\ndef f n=if n==0 then 0 else f @{wrong=rev} (n-1);\nf 3;" e | TyExpr (Left e) <- M.elems (prTys st)]
                 errors `shouldSatisfy` (not . null)
                 T.unlines errors `shouldSatisfy` T.isInfixOf "Unknown dictionary argument `wrong`"
     it "mutual-explicit" $ do
-        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\ndef f {o::Ord Int} n=if n==0 then o.cmp 1 2 else g @{o=rev} (n-1);\ndef g {o::Ord Int} n=if n==0 then o.cmp 1 2 else f (n-1);\nf 3;"
+        st <- okProgP "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\ndef f {o::Ord Int} n=if n==0 then o.cmp' 1 2 else g @{o=rev} (n-1);\ndef g {o::Ord Int} n=if n==0 then o.cmp' 1 2 else f (n-1);\nf 3;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["GT"]
+    -- 2026-10-30：DN-002 同名类型变量共享 —— {o1::Ord a} {o2::Ord a} 共享同一个 a，
+    -- 于是 x/y 必须同类型，`uu ... 1 "1"` 反而失败。要真正测"非共享类型"，两个隐式
+    -- 参数须用不同类型变量 a/b，此时 o1::Ord a0、o2::Ord a1 相互独立。
     it "unshared-types" $ do
-        st <- okProgP "def rev = Ord {cmp = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp x y, o2.cmp x y);\ndef uu {o1::Ord a} {o2::Ord a} x y=(o1.cmp x x,o2.cmp y y);\nuu @{o1=rev} 1 \"1\";\nuu @{o1=rev} 1 1;"
+        st <- okProgP "def rev = Ord {cmp' = lambda x y -> GT} :: Ord Int;\ndef u {o1 :: Ord Int} {o2 :: Ord Int} x y = (o1.cmp' x y, o2.cmp' x y);\ndef uu {o1::Ord a} {o2::Ord b} x y=(o1.cmp' x x,o2.cmp' y y);\nuu @{o1=rev} 1 \"1\";\nuu @{o1=rev} 1 1;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["(GT, EQ)", "(GT, EQ)"]
     it "highorder-rejected" $ do
@@ -1562,7 +1576,7 @@ spec = do
                 errors `shouldSatisfy` (not . null)
                 T.unlines errors `shouldSatisfy` T.isInfixOf "no named dictionary interface"
     it "foo-four" $ do
-        st <- okProgP "data Foo = Foo;\nimplicit def ordF1 = Ord {cmp = lambda x y -> EQ} :: Ord Foo;\ndef ordF2 = Ord {cmp = lambda x y -> GT} :: Ord Foo;\ndef use {oi :: Ord a} {of :: Ord Foo} x y = (oi.cmp x y, of.cmp Foo Foo);\nuse 1 2;\nuse @{of=ordF2} 1 2;\nuse @{oi=Ord {cmp=lambda x y->EQ}::Ord Int} 1 2;\nuse @{oi=Ord {cmp=lambda x y->EQ}::Ord Int} @{of=ordF2} 1 2;"
+        st <- okProgP "data Foo = Foo;\nimplicit def ordF1 = Ord {cmp' = lambda x y -> EQ} :: Ord Foo;\ndef ordF2 = Ord {cmp' = lambda x y -> GT} :: Ord Foo;\ndef use {oi :: Ord a} {of :: Ord Foo} x y = (oi.cmp' x y, of.cmp' Foo Foo);\nuse 1 2;\nuse @{of=ordF2} 1 2;\nuse @{oi=Ord {cmp'=lambda x y->EQ}::Ord Int} 1 2;\nuse @{oi=Ord {cmp'=lambda x y->EQ}::Ord Int} @{of=ordF2} 1 2;"
         let actual = [prettyV' v | (_, Right v) <- M.toAscList (prVals st)]
         actual `shouldBe` ["(LT, EQ)", "(LT, GT)", "(EQ, EQ)", "(EQ, GT)"]
 
@@ -1600,14 +1614,26 @@ spec = do
                 let errs = [prettyTypeErrorWith "" "infixl 12 <+>;" e | TyExpr (Left e) <- M.elems (prTys st)]
                 errs `shouldSatisfy` (not . null)
                 T.unlines errs `shouldSatisfy` T.isInfixOf "single digit"
-    it "r0-record-error" $ do
-        case progRunP emptyProg "data A = A {v :: Int};\ndata B = B {v :: Int};" of
-            Left msg -> do
-                msg `shouldSatisfy` T.isInfixOf "already a field"
+    -- 2026-10-31：字段多态 Stage 1 —— 跨 data 同名字段现已合法，字段访问/更新改为
+    -- 类型检查期按 scrutinee 的具体类型解析。原 r0-record-error 断言的是旧的
+    -- "already a field" 拒绝行为，随该特性一并更新为正向 + 新错误用例。
+    it "跨 data 同名字段合法，按 scrutinee 类型解析" $ do
+        st <- okProgP "data A = A {v :: Int};\ndata B = B {v :: Bool};\n(A 7).v;\n(B true).v;"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["7", "true"]
+    it "同名字段可以有不同类型（Int vs String）" $ do
+        st <- okProgP "data A = A {v :: Int};\ndata B = B {v :: String};\n(A 7).v;\n(B \"hi\").v;"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["7", "\"hi\""]
+    it "具体类型的记录更新 r { f = v } 保留未更新字段" $ do
+        st <- okProgP "data P = P {x :: Int, y :: Int};\ndef p = P {x = 1, y = 2};\n(p {x = 10}).x;\n(p {x = 10}).y;"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["10", "2"]
+    it "访问不属于该 data 的字段被拒绝" $ do
+        let src = "data A = A {v :: Int};\ndata B = B {w :: Int};\n(A 1).w;"
+        case progRunP emptyProg src of
+            Left msg -> msg `shouldSatisfy` T.isInfixOf "is not a field of"
             Right st -> do
-                let errs = [prettyTypeErrorWith "" "data A = A {v :: Int};\ndata B = B {v :: Int};" e | TyExpr (Left e) <- M.elems (prTys st)]
+                let errs = [prettyTypeErrorWith "" src e | TyExpr (Left e) <- M.elems (prTys st)]
                 errs `shouldSatisfy` (not . null)
-                T.unlines errs `shouldSatisfy` T.isInfixOf "already a field"
+                T.unlines errs `shouldSatisfy` T.isInfixOf "is not a field of"
     it "r0-same-line" $ do
         st <- okProgP "def (<+>)a b=a*10+b; infixl 1 <+>;\n1+2 <+>3;"
         [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["33"]
@@ -1647,7 +1673,7 @@ spec = do
                 errs `shouldSatisfy` (not . null)
                 T.unlines errs `shouldSatisfy` T.isInfixOf "non-associative"
     it "r2-override" $ do
-        st <- okProgP "def rev=Ord {cmp=lambda a b->GT}::Ord Int; (<) @{o=rev} 1 2; (<) 1 2;"
+        st <- okProgP "def rev=Ord {cmp'=lambda a b->GT}::Ord Int; (<) @{o=rev} 1 2; (<) 1 2;"
         [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["false", "true"]
     it "r2-user-no-space" $ do
         st <- okProgP "def (<)a b=false; 1<2; (<) 1 2;"
@@ -1655,14 +1681,12 @@ spec = do
     it "r2-custom-sections" $ do
         st <- okProgP "def (<+>)a b=a*10+b; infixl 6 <+>; (<+>) 2 3; (2 <+>)3; (<+> 3)2;"
         [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["23", "23", "23"]
-    it "r2-list-no-candidate" $ do
-        case progRunP emptyProg "[1] < [2];" of
-            Left msg -> do
-                msg `shouldSatisfy` T.isInfixOf "No implicit"
-            Right st -> do
-                let errs = [prettyTypeErrorWith "" "[1] < [2];" e | TyExpr (Left e) <- M.elems (prTys st)]
-                errs `shouldSatisfy` (not . null)
-                T.unlines errs `shouldSatisfy` T.isInfixOf "No implicit"
+    -- 2026-10-30：prelude 现在带递归容器实例 ordList :: Ord [a]（R5/DN-002 容器工厂），
+    -- 所以 [1] < [2] 不再是"无候选"，而是按字典序求得 true。旧断言（期望 "No implicit"）
+    -- 是 prelude 尚无列表实例时写的，已过时。
+    it "r2-list-ord-recursive-candidate" $ do
+        st <- okProgP "[1] < [2];"
+        [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["true"]
     it "r2-sort" $ do
         st <- okProgP "sort [3,1,2]; sort [\"c\",\"a\",\"b\"];"
         [prettyV' v | (_, Right v) <- M.toAscList (prVals st)] `shouldBe` ["[1, 2, 3]", "[\"a\", \"b\", \"c\"]"]
@@ -1674,9 +1698,11 @@ spec = do
         maskComments "\"a\\\" -- b\"; -- tail" `shouldBe` "\"a\\\" -- b\";        "
     it "single expression comments use the same scanner" $
         runSrc "1 + 2 -- comment" `shouldBe` Ok "Int" "3"
-    it "operator reference retains its named dictionary scheme" $ do
+    -- 2026-10-30：TODO-38 —— 引用 (<) 并包进 def 时，传播来的隐式槽自动命名为 ord0
+    -- （(<) 单独查询仍是 {o :: Ord a0}）。
+    it "operator reference retains its propagated dictionary scheme" $ do
         st <- okProgP "def less = (<);"
-        stmtType 0 st `shouldBe` "Forall a0. {o :: Ord a0} => (a0 -> (a0 -> Bool))"
+        stmtType 0 st `shouldBe` "Forall a0. {ord0 :: Ord a0} => (a0 -> (a0 -> Bool))"
     it "fixity rejects multi-digit zero" $
         runProg "infixl 00 <+>;" `shouldSatisfy` (\r -> case r of
             Left e -> "single digit" `T.isInfixOf` e
@@ -1707,7 +1733,7 @@ spec = do
     it "map can invoke the new ordinary function" $
         expectOutput "map putStrLn [\"a\",\"b\"];" [WriteLine "a", WriteLine "b"]
     it "recursive output preserves every request" $
-        expectOutput "def count n=if n==0 then Unit else let _=putStrLn (showInt n) in count (n-1); count 3;"
+        expectOutput "def count n=if n==0 then Unit else let _=putStrLn (_showInt n) in count (n-1); count 3;"
             [WriteLine "3", WriteLine "2", WriteLine "1"]
     it "a non-function definition initializes output once" $
         expectOutput "def x=putStrLn \"init\"; x; x;" [WriteLine "init"]
@@ -1722,7 +1748,7 @@ spec = do
             Right (Left message, runtime) -> do
                 message `shouldSatisfy` T.isInfixOf "Divided by zero"
                 toList (rtLog runtime) `shouldBe` [WriteLine "prefix"]
-                rtDepth runtime `shouldBe` Depth 0
+                rtDepth runtime `shouldBe` 0
             _ -> expectationFailure "expected a fatal initializer failure"
     it "ill-typed nested output never executes raw source" $
         expectOutput "putStr (putStrLn \"never\"); putStrLn \"yes\";" [WriteLine "yes"]
@@ -1741,4 +1767,191 @@ spec = do
                 (evalwDepth (App (Var "putStr") (SLit "no")))) (sEnv initSession)) emptyRuntime
         result `shouldSatisfy` isLeft
         rtLog runtime `shouldBe` Seq.empty
-        rtDepth runtime `shouldBe` Depth 0
+        rtDepth runtime `shouldBe` 0
+
+  -----------------------------------------------------------------------
+  -- 参数化 effect、深 handler 与 do（DN-011 / R4，2df939b 起进主线）
+  --
+  -- 这组补的是长期缺口：handler / 参数化 effect / do 此前在 Spec.hs 里
+  -- 没有任何细粒度断言，而它恰恰是最新、最没被测过的特性。每条断言都
+  -- 先对着 exe 实测过当前行为再写死，绝不把 bug 当基线。
+  -----------------------------------------------------------------------
+  describe "参数化 effect、handler 与 do" $ do
+    it "状态传递式深 handler 串起 get/set 并返回终态" $ do
+        let src = "effect State s { get :: Unit -> s, set :: s -> Unit };\n\
+                  \def runState initial action = (handle State a in action Unit with {\n\
+                  \    return x -> lambda state -> (x, state);\n\
+                  \    get u res -> lambda state -> res state state;\n\
+                  \    set value res -> lambda state -> res Unit value;\n\
+                  \}) initial;\n\
+                  \def prog u = do { set (6); v = get Unit; set (v * 10); get Unit };\n\
+                  \runState 5 prog;"
+        st <- okProgP src
+        stmtType 3 st `shouldBe` "(Int, Int)"
+        stmtVal 3 st `shouldBe` "(60, 60)"
+
+    it "resume 只能用一次：第二次 resume 报 EvalError" $ do
+        let src = "effect Coin { flip :: Unit -> Int };\n\
+                  \handle Coin in flip Unit with { return x -> x; flip u res -> res 1 + res 2 };"
+        st <- okProgP src
+        stmtVal 1 st `shouldSatisfy` T.isInfixOf "resumed at most once"
+
+    it "handler 可以丢弃续体（abort），直接给答案" $ do
+        let src = "effect Coin { flip :: Unit -> Int };\n\
+                  \handle Coin in flip Unit with { return x -> x; flip u res -> 42 };"
+        st <- okProgP src
+        stmtVal 1 st `shouldBe` "42"
+
+    it "未处理的操作向内层 handler 之外转发（嵌套 handler 各管一个 effect）" $ do
+        let src = "effect A { a :: Unit -> Int };\n\
+                  \effect B { b :: Unit -> Int };\n\
+                  \def comp u = do { x = a Unit; y = b Unit; x + y };\n\
+                  \handle B in (handle A in comp Unit with { return x -> x; a uu r -> r 10 }) \
+                  \with { return x -> x; b uu r -> r 100 };"
+        st <- okProgP src
+        stmtVal 3 st `shouldBe` "110"
+
+    it "handler 必须恰好覆盖每个操作一次（静态拒绝漏 arm）" $ do
+        let src = "effect Coin { flip :: Unit -> Int, peek :: Unit -> Int };\n\
+                  \handle Coin in flip Unit with { return x -> x; flip u res -> res 1 };"
+        st <- okProgP src
+        stmtType 1 st `shouldSatisfy` T.isInfixOf "cover each operation exactly once"
+
+    it "操作的类型带 effect row；def 引用后 row 保留" $ do
+        let src = "effect State s { get :: Unit -> s, set :: s -> Unit };\n\
+                  \def useGet u = get Unit;"
+        st <- okProgP src
+        stmtType 1 st `shouldBe` "Forall a0 a1. (a0 -> {State a1} a1)"
+
+    it "处理掉一个 effect 后，另一个 effect 仍留在残余类型里" $ do
+        let src = "effect A { a :: Unit -> Int };\n\
+                  \effect B { b :: Unit -> Int };\n\
+                  \def comp u = do { x = a Unit; y = b Unit; x + y };\n\
+                  \def partial u = handle A in comp Unit with { return x -> x; a uu r -> r 10 };"
+        st <- okProgP src
+        stmtType 2 st `shouldBe` "Forall a0. (a0 -> {A, B} Int)"
+        stmtType 3 st `shouldBe` "Forall a0. (a0 -> {B} Int)"
+
+    it "用户 handler 能拦截内置 Console，吞掉输出" $ do
+        let src = "def comp u = do { putStrLn \"hi\"; 42 };\n\
+                  \handle Console in comp Unit with {\n\
+                  \    return x -> x;\n\
+                  \    putStr s res -> res Unit;\n\
+                  \    putStrLn s res -> res Unit\n\
+                  \};"
+        expectOutput src []
+        st <- okProgP src
+        stmtVal 1 st `shouldBe` "42"
+
+    it "FileIO handler：readFile 的续体接受文件内容字符串（回归：曾因 readFile 被误标成 Either String Unit 而拒绝）" $ do
+        let src = "def comp u = do {\n\
+                  \    c = readFile \"whatever.txt\";\n\
+                  \    match c with Left e -> \"err\" | Right content -> content\n\
+                  \};\n\
+                  \handle FileIO in comp Unit with {\n\
+                  \    return x -> x;\n\
+                  \    readFile p res -> res (Right \"mocked\");\n\
+                  \    writeFile t res -> res (Right Unit)\n\
+                  \};"
+        st <- okProgP src
+        stmtVal 1 st `shouldBe` "\"mocked\""
+
+    it "do 从左到右求值，未使用的绑定也被强制初始化（StrictLet）" $ do
+        let src = "effect Log { put :: Int -> Unit };\n\
+                  \def runLog action = (handle Log in action Unit with {\n\
+                  \    return x -> lambda acc -> (x, acc);\n\
+                  \    put v res -> lambda acc -> res Unit (append acc [v])\n\
+                  \}) [];\n\
+                  \def comp u = do { put 1; unused = put 2; put 3; 0 };\n\
+                  \runLog comp;"
+        st <- okProgP src
+        stmtVal 3 st `shouldBe` "(0, [1, 2, 3])"
+
+    it "do 里后一个绑定可遮蔽前一个同名绑定" $ do
+        st <- okProg "do { x = 1; x = x + 10; x };"
+        stmtVal 0 st `shouldBe` "11"
+
+    it "do 可以嵌套" $ do
+        st <- okProg "do { a = do { b = 2; b * 3 }; a + 1 };"
+        stmtVal 0 st `shouldBe` "7"
+
+    it "空 do 块解析失败" $
+        case runProg "do { };" of
+            Left _  -> return ()
+            Right _ -> expectationFailure "空 do 块不该解析通过"
+
+    it "以绑定结尾的 do 块被拒绝（必须以表达式收尾）" $
+        progParseErr "do must end with an expression" "do { x = 1; };"
+
+  -- 2026-10-31：字段多态 Stage 2 —— 抽象 scrutinee 上的 r.x / r{x=v} 通过合成的
+  -- getter/setter ability 约束（`$get_x` / `$set_x`，Pretty 里显示成记录行记法
+  -- `{x : a | r}` / `{x := a | r}`）泛化，调用点记录类型具体化后由 resolveFieldWanted
+  -- 解出字段类型并拼接投影/更新闭包。
+  describe "字段多态（Stage 2）" $ do
+    it "多态投影：同一函数作用于不同 data、不同字段类型" $ do
+        st <- okProgP "data A = A {v :: Int};\ndata B = B {v :: String};\ndef getv r = r.v;\ngetv (A 7);\ngetv (B \"hi\");"
+        stmtVal 3 st `shouldBe` "7"
+        stmtVal 4 st `shouldBe` "\"hi\""
+
+    it "多态投影的类型带 getter 记录行约束" $ do
+        st <- okProgP "data A = A {v :: Int};\ndef getv r = r.v;"
+        stmtType 1 st `shouldBe` "Forall a0 a1. {{v : a1 | a0}} => (a0 -> a1)"
+
+    it "多态更新：r {v = x} 泛型作用，未改字段保留" $ do
+        st <- okProgP "data A = A {v :: Int, w :: Bool};\ndef setv r x = r {v = x};\n(setv (A 1 true) 99).v;\n(setv (A 1 true) 99).w;"
+        stmtVal 2 st `shouldBe` "99"
+        stmtVal 3 st `shouldBe` "true"
+
+    it "多态更新的类型带 setter 记录行约束" $ do
+        st <- okProgP "data A = A {v :: Int};\ndef setv r x = r {v = x};"
+        stmtType 1 st `shouldBe` "Forall a0 a1. {{v := a1 | a0}} => (a0 -> (a1 -> a0))"
+
+    it "多态投影可高阶传递：twice inc 把 n 加两次" $ do
+        st <- okProgP "data P = P {n :: Int};\ndef inc p = P {n = p.n + 1};\ndef twice f x = f (f x);\n(twice inc (P 1)).n;"
+        stmtVal 3 st `shouldBe` "3"
+
+    it "链式读改：(p{v=..}).v 同时留下 getter 和 setter 约束" $ do
+        st <- okProgP "data A = A {v :: Int};\ndef both r x = (r {v = x}).v;\nboth (A 1) 42;"
+        stmtType 1 st `shouldBe` "Forall a0 a1 a2. {{v := a1 | a0}, {v : a2 | a0}} => (a0 -> (a1 -> a2))"
+        stmtVal 2 st `shouldBe` "42"
+
+    it "多态投影到没有该字段的具体 data 报错" $ do
+        let src = "data A = A {v :: Int};\ndata B = B {q :: Int};\ndef getv r = r.v;\ngetv (B 1);"
+        msg <- either return (return . stmtType 3) (progRunP emptyProg src)
+        msg `shouldSatisfy` T.isInfixOf "is not a field of"
+
+    it "字段在任何 data 都不存在时，多态定义报友好错误（不泄漏内部名）" $ do
+        let src = "def bump p = p {n = 1};"
+        msg <- either return (return . stmtType 0) (progRunP emptyProg src)
+        msg `shouldSatisfy` T.isInfixOf "No record type in scope has a field"
+
+  -- 2026-10-31：显式参数类型标注 `(x :: T)` —— Param 带 Maybe T'，把参数类型钉住。
+  -- 用于把「任何带该字段的类型都行」的多态投影，收窄成只接受某个具体类型。
+  describe "显式参数类型标注 (x :: T)" $ do
+    it "标注把字段访问钉成单态：def getNameP (r :: Person) = r.name" $ do
+        st <- okProgP "data Person = Person {name :: String};\ndef getNameP (r :: Person) = r.name;\ngetNameP (Person \"Ann\");"
+        stmtType 1 st `shouldBe` "(Person -> String)"
+        stmtVal 2 st `shouldBe` "\"Ann\""
+
+    it "标注后拒绝其它同名字段的类型（Cat 不是 Person）" $ do
+        let src = "data Person = Person {name :: String};\ndata Cat = Cat {name :: String};\ndef getNameP (r :: Person) = r.name;\ngetNameP (Cat \"Tom\");"
+        msg <- either return (return . stmtType 3) (progRunP emptyProg src)
+        msg `shouldSatisfy` T.isInfixOf "expected Person but got Cat"
+
+    it "标注基本类型 (x :: Int)" $ do
+        st <- okProgP "def addOne (x :: Int) = x + 1;\naddOne 5;"
+        stmtType 0 st `shouldBe` "(Int -> Int)"
+        stmtVal 1 st `shouldBe` "6"
+
+    it "标注里的未知类型报错" $ do
+        let src = "def bad (y :: Nope) = 1;"
+        msg <- either return (return . stmtType 0) (progRunP emptyProg src)
+        msg `shouldSatisfy` T.isInfixOf "Unknown type: Nope"
+
+    it "标注含类型变量时照常泛化 (o :: Ord a)" $ do
+        st <- okProgP "def poly (o :: Ord a) x = o.cmp' x x;"
+        stmtType 0 st `shouldBe` "Forall a0. (Ord a0 -> (a0 -> Ordering))"
+
+    it "对照：不标注时同一函数是多态的（带记录行约束）" $ do
+        st <- okProgP "data Person = Person {name :: String};\ndef getv r = r.name;"
+        stmtType 1 st `shouldBe` "Forall a0 a1. {{name : a1 | a0}} => (a0 -> a1)"

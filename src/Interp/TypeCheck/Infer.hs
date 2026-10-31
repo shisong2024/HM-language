@@ -3,6 +3,7 @@
 module Interp.TypeCheck.Infer where
 
 import Interp.Types
+import Interp.Builtin (consoleEffDecl, fileIOEffDecl)
 
 import qualified Data.Set as S
 
@@ -13,13 +14,13 @@ import Control.Monad.Except (throwError, catchError, MonadError)
 import Control.Monad (forM_, foldM, forM, unless, when)
 import Control.Monad.Reader (ask)
 
-import Data.Text (Text, pack)
+import Data.Text (Text, pack, stripPrefix, splitOn)
 import Data.Map ((!?))
 import Data.List (nub, partition)
 
 import qualified Data.Map as M
 
-import Interp.TypeCheck.Declarations (checkTypeCons, checkAbilityType)
+import Interp.TypeCheck.Declarations (checkTypeCons, checkAbilityType, getterAbility, getterFieldOf, setterAbility, setterFieldOf)
 import Interp.TypeCheck.Elaboration
 import Interp.TypeCheck.Pattern (patType, checkDupPatVar, exhaustive)
 import Interp.TypeCheck.Solver
@@ -56,8 +57,9 @@ typeOfExprWECore env ienv e = do
 inferExpr :: Checker m => TEnv -> IEnv -> E' -> m InferRes
 inferExpr env ienv e = do
     r <- inferExprCore env ienv e
-    (u, now) <- normalizeEff (irNow r)
-    return (applyInfer u r) { irNow = applyEff u now }
+    r1 <- resolveFieldWanted r
+    (u, now) <- normalizeEff (irNow r1)
+    return (applyInfer u r1) { irNow = applyEff u now }
 
 inferExprCore :: Checker m => TEnv -> IEnv -> E' -> m InferRes
 inferExprCore env ienv e = case e of
@@ -188,18 +190,22 @@ inferExprCore env ienv e = case e of
         r <- inferExpr env' ienv body
         return $ r { irType = TFunc (apply (irSub r) tv) (irNow r) (irType r), irExpr = Lambda n (irExpr r), irNow = emptyEff }
 
-    App f arg -> do
-        rf <- inferExpr env ienv f
-        ra <- inferExpr (applyTEnv (irSub rf) env) ienv arg
-        out <- fresh
-        eff <- freshEff
-        let su0 = compose (irSub ra) (irSub rf)
-        u <- applyFunction (apply su0 (irType rf)) (apply su0 (irType ra)) eff out
-            `catchError` calleeNote (applyTEnv su0 env) f
-        let su = compose u su0
-        return $ InferRes su (map (applyWanted su) (irWanted rf <> irWanted ra))
-            (apply su out) (App (irExpr rf) (irExpr ra))
-            (applyEff su (unionsEff [irNow rf, irNow ra, eff]))
+    App f arg -> case headMarker f of
+        Just (sp, n)
+            | Just fld <- stripPrefix "$fld@" n -> inferFieldAccess env ienv sp fld arg
+            | Just fs  <- stripPrefix "$upd@" n -> inferFieldUpdate env ienv sp fs arg
+        _ -> do
+            rf <- inferExpr env ienv f
+            ra <- inferExpr (applyTEnv (irSub rf) env) ienv arg
+            out <- fresh
+            eff <- freshEff
+            let su0 = compose (irSub ra) (irSub rf)
+            u <- applyFunction (apply su0 (irType rf)) (apply su0 (irType ra)) eff out
+                `catchError` calleeNote (applyTEnv su0 env) f
+            let su = compose u su0
+            return $ InferRes su (map (applyWanted su) (irWanted rf <> irWanted ra))
+                (apply su out) (App (irExpr rf) (irExpr ra))
+                (applyEff su (unionsEff [irNow rf, irNow ra, eff]))
 
 
     Match scrut arms -> do
@@ -227,6 +233,195 @@ inferExprCore env ienv e = case e of
         return r { irWanted = map (underSpan sp) (irWanted r), irExpr = At sp (irExpr r) }
 
     ImpHole h -> throwError (Located Nothing (EscapedImpHole h))
+
+-- | 剥掉外层 @At@ 拿到 head 变量名与位置，用来识别 parse 期留下的字段 marker。
+headMarker :: E' -> Maybe (Maybe Span, Text)
+headMarker = go Nothing
+  where
+    go sp (At s e) = go (Just (fromMaybe s sp)) e
+    go sp (Var n)  = Just (sp, n)
+    go _  _        = Nothing
+
+recVal, recOther, fieldErr :: Text
+recVal   = "$recVal"
+recOther = "$recOther"
+fieldErr = "$fieldErr"
+
+-- | 字段相关错误：带上 marker 的源码位置，用专用的 @FieldError@ 而非 @HandleError@。
+fieldReject :: MonadError (Located TypeError) m => Maybe Span -> Text -> m a
+fieldReject sp msg = throwError (Located sp (FieldError msg))
+
+-- | 按 data 名和字段名查出 (构造子, 参数下标, 元数, 是否单构造子)。
+dataFieldInfo :: Checker m => Maybe Span -> DEnv -> Text -> Text -> m (Text, Int, Int, Bool)
+dataFieldInfo sp denv d fld = case M.lookup d (denvFields denv) >>= M.lookup fld of
+    Nothing -> fieldReject sp ("`" <> fld <> "` is not a field of `" <> d <> "`.")
+    Just (ctor, idx) -> case M.lookup ctor (denvCtors denv) of
+        Nothing -> fieldReject sp ("internal: unknown constructor `" <> ctor
+                            <> "` while resolving field `" <> fld <> "`.")
+        Just ci -> return
+            ( ctor, idx, length (ciArgs ci)
+            , maybe True ((== 1) . length) (M.lookup d (denvDatas denv)) )
+
+-- | 纯构造：从记录 scrut 投影出字段 fld（构造子 ctor 的第 idx 位）。非单构造子时带
+-- @\$fieldErr@ 兜底臂。Stage 1 的具体访问和 Stage 2 的 getter 字典共用它。
+projectionExpr :: Text -> Text -> Int -> Int -> Bool -> E' -> E'
+projectionExpr fld ctor idx arity solo scrut =
+    Match scrut ((PCtor ctor ps, Var recVal) : [bad | not solo])
+  where
+    ps  = [if j == idx then PVar recVal else PWild | j <- [0 .. arity - 1]]
+    bad = (PVar recOther, App (App (Var fieldErr) (SLit fld)) (Var recOther))
+
+-- | 纯构造：单字段 setter 闭包 @lambda v -> lambda r -> r{fld=v}@（把第 idx 位换成 v，
+-- 其余位用旧值重建）。vvar/rvar 必须是新鲜名，避免链式 setter 之间相互遮蔽。
+setterExpr :: Text -> Text -> Int -> Int -> Bool -> Text -> Text -> E'
+setterExpr fld ctor idx arity solo vvar rvar =
+    Lambda vvar (Lambda rvar (Match (Var rvar) ((pat, body) : [bad | not solo])))
+  where
+    oldAt j = "$recOld" <> pack (show j)
+    pat  = PCtor ctor [if j == idx then PWild else PVar (oldAt j) | j <- [0 .. arity - 1]]
+    body = foldl App (Var ctor) [if j == idx then Var vvar else Var (oldAt j) | j <- [0 .. arity - 1]]
+    bad  = (PVar recOther, App (App (Var fieldErr) (SLit fld)) (Var recOther))
+
+-- | 类型驱动的字段访问 @r.f@：
+--   * scrutinee 是具体 @TCon d _@ → 据 d 选出构造子与下标，现场构造投影 @Match@ 再重新
+--     推断（重推断让 patType 自动算出实例化后的字段类型，也让兜底臂正常过类型检查）。
+--   * scrutinee 是抽象 @TVar rho@ → 生成 getter 约束 `@$get_fld rho alpha@ 和字典洞，
+--     body 用 @App (ImpHole h) scrut@；等 rho 在调用点被统一成具体 data 后，由
+--     'resolveFieldWanted' 解出 alpha（字段类型）并把洞替换成投影函数（多态投影）。
+inferFieldAccess :: Checker m => TEnv -> IEnv -> Maybe Span -> Text -> E' -> m InferRes
+inferFieldAccess env ienv sp fld scrut = do
+    r <- inferExpr env ienv scrut
+    denv <- ask
+    case apply (irSub r) (irType r) of
+        TCon d _ -> do
+            (ctor, idx, arity, solo) <- dataFieldInfo sp denv d fld
+            inferExpr env ienv (maybe id At sp (projectionExpr fld ctor idx arity solo scrut))
+        TVar rho -> do
+            alpha <- fresh
+            h <- freshHole
+            let w = Wanted
+                    { wtdHole  = h
+                    , wtdType  = TCon (getterAbility fld) [TVar rho, alpha]
+                    , wtdScope = ienv
+                    , wtdSpan  = sp
+                    , wtdName  = Nothing
+                    , wtdBind  = Nothing
+                    , wtdSearch = Nothing
+                    }
+            return $ r { irWanted = irWanted r <> [w]
+                       , irType   = alpha
+                       , irExpr   = App (ImpHole h) (irExpr r) }
+        _ -> fieldReject sp ("field `" <> fld <> "` is not a field of a non-record type.")
+
+-- | 类型驱动的字段更新 @r { f = v, ... }@：同样要求具体 @TCon d _@，所有被更新字段须属于
+-- 同一构造子；构造出「保留未更新位、替换更新位」的 @Match@ 再重新推断。
+inferFieldUpdate :: Checker m => TEnv -> IEnv -> Maybe Span -> Text -> E' -> m InferRes
+inferFieldUpdate env ienv sp flds arg = case arg of
+    TupleLit (scrut : vals) -> do
+        r <- inferExpr env ienv scrut
+        denv <- ask
+        let names = splitOn "," flds
+        case apply (irSub r) (irType r) of
+            TCon d _
+                | length names /= length vals -> fieldReject sp "malformed record update."
+                | (dup : _) <- dupNames names ->
+                    fieldReject sp ("field `" <> dup <> "` is given twice in a record update.")
+                | otherwise -> do
+                    fis <- mapM (\f -> (,) f <$> dataFieldInfo sp denv d f) names
+                    let (ctor0, _, arity, solo) = snd (head fis)
+                    unless (all (\(_, (c, _, _, _)) -> c == ctor0) fis) $
+                        fieldReject sp "a record update cannot mix fields of different constructors."
+                    let idxs   = [i | (_, (_, i, _, _)) <- fis]
+                        oldAt j = "$recOld" <> pack (show j)
+                        valAt j = case [v | ((_, (_, i, _, _)), v) <- zip fis vals, i == j] of
+                            (v : _) -> v
+                            []      -> Var (oldAt j)
+                        pat  = PCtor ctor0
+                            [if j `elem` idxs then PWild else PVar (oldAt j) | j <- [0 .. arity - 1]]
+                        body = foldl App (Var ctor0) [valAt j | j <- [0 .. arity - 1]]
+                        bad  = (PVar recOther, App (App (Var fieldErr) (SLit (head names))) (Var recOther))
+                        upd  = Match scrut ((pat, body) : [bad | not solo])
+                    inferExpr env ienv (maybe id At sp upd)
+            TVar rho
+                | length names /= length vals -> fieldReject sp "malformed record update."
+                | (dup : _) <- dupNames names ->
+                    fieldReject sp ("field `" <> dup <> "` is given twice in a record update.")
+                | otherwise -> do
+                    -- 多态更新：scrutinee 抽象。为每个字段生成 setter 约束 `$set_f rho beta`
+                    -- 和字典洞，链式拼成 `setx vx (sety vy r)`。rho 具体化后由 resolveFieldWanted
+                    -- 解出各 beta 并替换成 setter 闭包。
+                    (vsub, revs) <- foldVals (irSub r) vals
+                    hs <- mapM (const freshHole) names
+                    let ves  = map irExpr revs
+                        vtys = map (apply vsub . irType) revs
+                        rho' = apply vsub (TVar rho)
+                        ws = [ Wanted
+                                 { wtdHole = h, wtdType = TCon (setterAbility f) [rho', vty]
+                                 , wtdScope = ienv, wtdSpan = sp, wtdName = Nothing
+                                 , wtdBind = Nothing, wtdSearch = Nothing }
+                             | (h, f, vty) <- zip3 hs names vtys ]
+                        inner = foldr (\(h, ve) acc -> App (App (ImpHole h) ve) acc)
+                                      (irExpr r) (zip hs ves)
+                        wanted = map (applyWanted vsub) (irWanted r <> concatMap irWanted revs) <> ws
+                        nowEff = applyEff vsub (unionsEff (irNow r : map irNow revs))
+                    return $ InferRes vsub wanted rho' inner nowEff
+            _ -> fieldReject sp ("cannot update a field of a non-record type.")
+    _ -> fieldReject sp "malformed record update."
+  where
+    foldVals su0 es = foldM step (su0, []) es
+      where
+        step (su, acc) e0 = do
+            rv <- inferExpr (applyTEnv su env) ienv e0
+            return (compose (irSub rv) su, acc <> [rv])
+
+dupNames :: [Text] -> [Text]
+dupNames xs = [x | (i, x) <- zip [0 :: Int ..] xs, x `elem` drop (i + 1) xs]
+
+-- | 字段约束的「即时解析」：字段多态的约束 `$get_x rho alpha` 带一个**输出**类型
+-- alpha（字段类型），而现有隐式搜索只解闭合的输入约束、不解输出变量。所以在推断流里，
+-- 一旦记录类型 rho 被统一成具体 data（@TCon d args@），就立刻：查出字段类型 FT、把
+-- alpha 统一成 FT、按 d 现场构造投影函数并替换掉字典洞、丢弃该约束。仍未具体（rho 抽象）
+-- 的字段约束则原样保留，交给 closeBinding 泛化成隐藏字典参数（多态）。
+resolveFieldWanted :: Checker m => InferRes -> m InferRes
+resolveFieldWanted r = do
+    denv <- ask
+    (su, sols, solved) <- foldM (go denv) (irSub r, [], S.empty) (irWanted r)
+    if null sols
+        then return r
+        else do
+            let kept = [applyWanted su w | w <- irWanted r, not (S.member (wtdHole w) solved)]
+                r' = applyInfer su r
+            return r' { irWanted = kept
+                      , irExpr = replaceSolvedHoles (M.fromList sols) (irExpr r') }
+  where
+    go denv (su, sols, solved) w = case apply su (wtdType w) of
+        TCon n [recTy, outTy]
+            | Just fld <- getterFieldOf n
+            , TCon d args <- recTy -> do
+                (ctor, idx, arity, solo) <- dataFieldInfo (wtdSpan w) denv d fld
+                case M.lookup ctor (denvCtors denv) of
+                    Nothing -> return (su, sols, solved)
+                    Just ci -> do
+                        let ft = apply (M.fromList (zip [0 :: Int ..] args)) (ciArgs ci !! idx)
+                        u <- unify (apply su outTy, ft)
+                        gv <- freshInternal "g"
+                        let su'  = compose u su
+                            dict = Lambda gv (projectionExpr fld ctor idx arity solo (Var gv))
+                        return (su', (wtdHole w, dict) : sols, S.insert (wtdHole w) solved)
+            | Just fld <- setterFieldOf n
+            , TCon d args <- recTy -> do
+                (ctor, idx, arity, solo) <- dataFieldInfo (wtdSpan w) denv d fld
+                case M.lookup ctor (denvCtors denv) of
+                    Nothing -> return (su, sols, solved)
+                    Just ci -> do
+                        let ft = apply (M.fromList (zip [0 :: Int ..] args)) (ciArgs ci !! idx)
+                        u <- unify (apply su outTy, ft)
+                        vv <- freshInternal "v"
+                        rv <- freshInternal "r"
+                        let su'  = compose u su
+                            dict = setterExpr fld ctor idx arity solo vv rv
+                        return (su', (wtdHole w, dict) : sols, S.insert (wtdHole w) solved)
+        _ -> return (su, sols, solved)
 
 inferLet :: Checker m => TEnv -> IEnv -> Text -> E' -> E' -> m InferRes
 inferLet env ienv n rhs body = do
@@ -344,12 +539,9 @@ inferDictCall env ienv head0 ordinary dicts = do
 inferHandler :: Checker m => TEnv -> IEnv -> E' -> Text -> [T'] -> Text -> E' -> [(Text,Text,Text,E')] -> m InferRes
 inferHandler env ienv body n ts ret retBody arms = do
     denv <- ask
-    let console = EffDecl "Console" [] [("putStr", pureFunc TString (TCon "Unit" [])), ("putStrLn", pureFunc TString (TCon "Unit" []))]
-        fileIO  = EffDecl "FileIO" [] [("readFile", pureFunc TString (TCon "Either" [TString, TCon "Unit" []])),
-            ("writeFile", pureFunc (TTuple [TString, TString]) (TCon "Either" [TString, TCon "Unit" []]))]
     d <- maybe (case n of
-        "Console" -> return console
-        "FileIO" -> return fileIO
+        "Console" -> return consoleEffDecl
+        "FileIO" -> return fileIOEffDecl
         _ -> reject ("no operations for effect " <> n)
         ) return (M.lookup n (denvOperations denv))
     unless (length ts == length (edParams d)) $ reject "handle effect arity mismatch"
@@ -541,12 +733,22 @@ inferDeclBodyPrepared env ienv params body = go env params
         go current = \case
             [] -> inferExpr current ienv body
 
-            (ExplicitParam n : rest) -> do
+            (ExplicitParam n mty : rest) -> do
                 a <- fresh
-                r <- go (M.insert n (Forall S.empty [] a) current) rest
-                return r
-                    { irType = TFunc (apply (irSub r) a) (irNow r) (irType r)
-                    , irExpr = Lambda n (irExpr r)
+                -- 有标注 `(n :: T)`：先把参数类型变量钉到 T，再推断 body，
+                -- 于是 body 里的字段访问看到的是具体类型（走单态解析），
+                -- 整个 def 也就不会泛化成「任何带该字段的类型」。
+                u0 <- case mty of
+                    Nothing -> return M.empty
+                    Just ty -> do
+                        denv <- ask
+                        checkTypeCons denv ty
+                        unify (a, ty)
+                r <- go (applyTEnv u0 (M.insert n (Forall S.empty [] a) current)) rest
+                let r' = applyInfer u0 r
+                return r'
+                    { irType = TFunc (apply (irSub r') a) (irNow r') (irType r')
+                    , irExpr = Lambda n (irExpr r')
                     , irNow  = emptyEff
                     }
             (ImplicitParam n annotation : rest) -> do

@@ -1,0 +1,5 @@
+putStr "Hello";
+putStrLn ", world!";
+def greet name=putStrLn ("hi " ++ name);
+greet "Codex";
+map putStrLn ["a","b"];

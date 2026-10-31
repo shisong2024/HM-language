@@ -1,13 +1,16 @@
 # 语言文档入口
 
-更新：2026-10-12。
+更新：2026-10-30。
 
 2026-10-13 补记：当前主 HEAD `594df6b` 已采用基础版 ability/固定 effect；本轮扩展的用户动机与决策见 Design Notes 的 DN-011，完整代码及验证见 [36](../TODO/36-参数化Effect与深层Handler完整代码.md)。Language Reference 主体已核对基础版状态，第 10 节独立列出尚未采用的 handler 扩展。
+
+2026-10-30 补记（取代上条的采用状态）：参数化 effect/深层 handler/do 与模块作用域隔离已进入主源码（commit `2df939b`、`836884c`），当前 HEAD `9e56a12`。Language Reference 第 10 节不再是“尚未采用”的隔离交付，而是主版本事实；示例已在主 exe 实测通过。主测试接口已迁移到当前源码，`cabal test` 283/0、`test/run-golden.sh` 全绿。
 
 | 文档 | 回答的问题 |
 |---|---|
 | [Language Reference](LanguageReference.md) | 当前语言究竟支持什么，怎样写，哪些规则会影响程序行为？ |
 | [Design Notes](DesignNotes.md) | 为什么设计这个功能，目的是什么，接受什么代价，哪些事项尚未决定？ |
+| [Code Guide](CodeGuide.md) | 每个函数、每块实现具体在干什么？手动改代码前怎样快速回忆各模块职责与 TypeCheck 的实现细节？ |
 | [近期路线与验收](../TODO/32-当前路线与验收.md) | 下一步具体做什么，做到什么程度才算完成？ |
 | [设计实验与待决问题](../TODO/33-设计实验与待决问题.md) | 哪些方案可以实验，进入主语言之前需要谁决定什么？ |
 | [历史归档](../TODO/archive/README.md) | R0–R5 的代码、原理、旧计划及当时的验证证据在哪里？ |
